@@ -98,7 +98,7 @@ pub fn init() {
         // `KEY=VALUE` per line, `#` starts a comment, blank lines ignored. A variable the loader
         // already set wins; each applied line is logged.
         apply_env_file();
-        // NAK's plat pass (and the untested ofold) off, unless env.txt says otherwise
+        // NAK's plat and ofold passes off, unless env.txt says otherwise
         // (nak_safe_default).
         nak_safe_default();
         // Cores 0-2 for new threads unless HORIZON_NX_THREAD_CORES says otherwise (compat.rs);
@@ -146,9 +146,8 @@ fn check_std_stat() {
 /// With all seven default passes on, the GPU hung (`fifo idle timeout`) about ten seconds after a
 /// world's terrain started drawing, on a console, every time. Bisected on a console
 /// (2026-11-17, one pass at a time back on, shader cache off): xbar, sink, remat, xbrk and lsink
-/// play; turning `plat` on hangs. `ofold` stays off too because it was only ever tested together
-/// with `plat` (on, which hangs) or off: `-plat` alone is untested. Release 0.1.0 was built with
-/// a private NVK whose NAK differs.
+/// play; turning `plat` on hangs, and so does turning `ofold` on with `plat` off: each pass hangs
+/// the GPU on its own. Release 0.1.0 was built with a private NVK whose NAK differs.
 #[cfg(target_os = "horizon")]
 pub const NAK_SAFE_DEBUG: &str = "-plat,-ofold";
 
@@ -161,7 +160,7 @@ fn nak_safe_default() {
     // thing main does), so nothing reads the environment meanwhile.
     unsafe { std::env::set_var("NAK_DEBUG", NAK_SAFE_DEBUG) };
     crate::logging::write_log_line(format_args!(
-        "[Boot] NAK_DEBUG = {NAK_SAFE_DEBUG} (default: NAK's plat pass hung the GPU)"
+        "[Boot] NAK_DEBUG = {NAK_SAFE_DEBUG} (default: NAK's plat and ofold passes hung the GPU)"
     ));
 }
 
