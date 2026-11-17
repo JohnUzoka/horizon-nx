@@ -201,10 +201,16 @@ pub fn catch_stop_signals() {}
 /// 16% of a chunk's generation time), mimalloc keeps a heap per thread.
 /// On the Switch it takes its arenas from newlib's heap (the port's
 /// libmimalloc-sys patch); a build with `nx-allocator` uses horizon-nx's instead.
+#[cfg(not(target_os = "horizon"))]
 pub use mimalloc::MiMalloc as Allocator;
+/// On the Switch, newlib's heap; the game's own build replaces it with horizon-nx's
+/// (`nx-allocator`).
+#[cfg(target_os = "horizon")]
+pub use std::alloc::System as Allocator;
 
 /// `mi_option_purge_delay` in mimalloc.h (index 15 in v2 and v3); the bindings
 /// don't name it.
+#[cfg(not(target_os = "horizon"))]
 const PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
 /// Set the allocator up, first thing in `main`: free pages go back to the OS
@@ -214,10 +220,10 @@ const PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 /// back (the heap is fixed and always backed), so it never purges: a purge
 /// would only walk free pages for nothing.
 pub fn configure_allocator() {
-    let delay = if cfg!(target_os = "horizon") { -1 } else { 0 };
     // SAFETY: sets one integer option, which mimalloc reads at each purge.
+    #[cfg(not(target_os = "horizon"))]
     unsafe {
-        libmimalloc_sys::mi_option_set(PURGE_DELAY, delay);
+        libmimalloc_sys::mi_option_set(PURGE_DELAY, 0);
     }
 }
 
@@ -227,6 +233,7 @@ pub fn configure_allocator() {
 /// thread that allocated them, and macOS in its zones until memory runs short.
 pub fn release_free_memory() {
     // SAFETY: frees only pages no allocation uses (this thread's heap, shared arenas).
+    #[cfg(not(target_os = "horizon"))]
     unsafe {
         libmimalloc_sys::mi_collect(true);
     }
