@@ -98,8 +98,8 @@ pub fn init() {
         // `KEY=VALUE` per line, `#` starts a comment, blank lines ignored. A variable the loader
         // already set wins; each applied line is logged.
         apply_env_file();
-        // NVK's shader compiler without the public driver's extra NAK passes, unless env.txt
-        // says otherwise (nak_safe_default).
+        // NAK's plat pass (and the untested ofold) off, unless env.txt says otherwise
+        // (nak_safe_default).
         nak_safe_default();
         // Cores 0-2 for new threads unless HORIZON_NX_THREAD_CORES says otherwise (compat.rs);
         // before the profiler, so its thread follows the choice too.
@@ -140,15 +140,17 @@ fn check_std_stat() {
     }
 }
 
-/// The NAK passes the public NVK build (mesa-switch with bevy-horizon's patches) turns on by
-/// default in Switch builds, all turned off, unless `NAK_DEBUG` is already set (env.txt).
+/// Two NAK passes the public NVK build (mesa-switch with bevy-horizon's patches) turns on by
+/// default in Switch builds, turned off, unless `NAK_DEBUG` is already set (env.txt).
 ///
-/// With them on, the GPU hung (`fifo idle timeout`) about ten seconds after a world's terrain
-/// started drawing, on a console, every time; with them off the same world played (player logs
-/// of 2026-11-17). Release 0.1.0 was built with a private NVK whose NAK differs. Which pass is
-/// at fault is not known yet: env.txt can turn single ones back on (`NAK_DEBUG=-plat,-ofold`).
+/// With all seven default passes on, the GPU hung (`fifo idle timeout`) about ten seconds after a
+/// world's terrain started drawing, on a console, every time. Bisected on a console
+/// (2026-11-17, one pass at a time back on, shader cache off): xbar, sink, remat, xbrk and lsink
+/// play; turning `plat` on hangs. `ofold` stays off too because it was only ever tested together
+/// with `plat` (on, which hangs) or off: `-plat` alone is untested. Release 0.1.0 was built with
+/// a private NVK whose NAK differs.
 #[cfg(target_os = "horizon")]
-pub const NAK_SAFE_DEBUG: &str = "-xbar,-sink,-remat,-xbrk,-lsink,-plat,-ofold";
+pub const NAK_SAFE_DEBUG: &str = "-plat,-ofold";
 
 #[cfg(target_os = "horizon")]
 fn nak_safe_default() {
@@ -159,7 +161,7 @@ fn nak_safe_default() {
     // thing main does), so nothing reads the environment meanwhile.
     unsafe { std::env::set_var("NAK_DEBUG", NAK_SAFE_DEBUG) };
     crate::logging::write_log_line(format_args!(
-        "[Boot] NAK_DEBUG = {NAK_SAFE_DEBUG} (default: the public NVK's extra NAK passes hung the GPU)"
+        "[Boot] NAK_DEBUG = {NAK_SAFE_DEBUG} (default: NAK's plat pass hung the GPU)"
     ));
 }
 
