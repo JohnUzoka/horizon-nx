@@ -45,14 +45,16 @@ Tested on a Switch with Atmosphère, November 2026.
 
 ### 1. Get the Switch build
 
-Builds come from this repository's GitHub Actions. Open
-[the latest successful "Switch NRO" run](https://github.com/KoHaku743/horizon-nx/actions/workflows/switch-nro.yml?query=branch%3Aswitch-v010+is%3Asuccess)
-and download the `horizon-switch-…` file at the bottom of the page (you need to be signed in to GitHub). It contains:
+Download `horizon-switch-….zip` from the [latest release](https://github.com/KoHaku743/horizon-nx/releases/latest)
+and unzip it to the root of the SD card. It contains:
 
 ```
 switch/horizon/horizon.nro
 switch/horizon/client.txt
 ```
+
+Builds of every change are also on [GitHub Actions](https://github.com/KoHaku743/horizon-nx/actions/workflows/switch-nro.yml?query=branch%3Aswitch-v010+is%3Asuccess)
+(the `horizon-switch-…` file at the bottom of a run; you need to be signed in to GitHub).
 
 `client.txt` makes `horizon.nro` start the game; without it, it starts a dedicated server.
 
@@ -169,7 +171,9 @@ It clones [bevy-horizon](https://github.com/JohnUzoka/bevy-horizon) (the Switch 
 patched libraries) and [mesa-switch](https://github.com/danfromtico/mesa-switch) (the graphics driver) next to the
 repository. The result is `target/aarch64-nintendo-horizon/release/horizon.nro`. Every push to `switch-v010` runs
 the same build in [GitHub Actions](.github/workflows/switch-nro.yml); its log is also kept on the `ci-logs`
-branch. Details: [docs/switch.md](docs/switch.md).
+branch. To publish a release, run the "Switch NRO" workflow by hand (**Run workflow**) with a version in
+`release` (for example `v0.1.0-nx.2`): it builds, tags the commit and attaches the zip. Details:
+[docs/switch.md](docs/switch.md).
 
 ### Branches
 
