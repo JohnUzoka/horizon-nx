@@ -21,6 +21,10 @@ env:
   # The revisions packaging/switch/build.sh was written against.
   BEVY_HORIZON_REV: 3eac779b232ee47cd0eb957676c64386ac7b0f1d
   MESA_SWITCH_REV: 606441c90e459028a50fca352daebfc20211f890
+  # The Azure app for the title screen's Microsoft sign-in (crates/horizon-client-render/src/msa.rs).
+  # A client ID is public: Microsoft's sign-in page shows it. Mojang has to approve it before
+  # the Minecraft step accepts it.
+  HORIZON_MSA_CLIENT_ID: 31d69d62-d04a-4d5b-aa89-7fe8caa286d8
 
 jobs:
   nro:

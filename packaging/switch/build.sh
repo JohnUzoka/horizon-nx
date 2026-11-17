@@ -14,7 +14,8 @@
 # Variables: JOBS (cargo's parallel jobs; each rustc can take 1-2 GB of RAM), CARGO_ARGS (more
 # `cargo build` arguments), FEATURES (horizon-client features; by default audio, controllers and
 # nx-allocator, which also links NVK), VERSION, AUTHOR, ICON (a 256x256 JPEG for the HOME menu),
-# HORIZON_SWITCH_BUILD (the build number the in-game updater compares: docs/switch-updates.md).
+# HORIZON_SWITCH_BUILD (the build number the in-game updater compares: docs/switch-updates.md),
+# HORIZON_MSA_CLIENT_ID (the Azure app the title screen's Microsoft sign-in uses: msa.rs).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -78,6 +79,7 @@ nro() {
         -e CONFIG="$config" -e JOBS="${JOBS:-}" -e CARGO_ARGS="${CARGO_ARGS:-}" -e FEATURES="${FEATURES-audio,controllers,nx-allocator}" \
         -e HORIZON_NX_NVK_LIB=/src/bevy-horizon/nvk/lib \
         -e HORIZON_SWITCH_BUILD="${HORIZON_SWITCH_BUILD:-}" \
+        -e HORIZON_MSA_CLIENT_ID="${HORIZON_MSA_CLIENT_ID:-}" \
         "${mounts[@]}" -w /src/horizon-nx "$IMAGE" \
         bash -euo pipefail -c '
             # std is its own workspace and does not see our [patch]; a config-file patch applies to
