@@ -105,15 +105,33 @@ impl Write for Pipe {
     }
 }
 
+/// A connection's socket, shared by its reader, writer and closer. On the Switch they share one
+/// socket instead of each holding a duplicate: libnx's sockets can't be duplicated (`dup` gives
+/// a descriptor that is not a socket, and every read or write on it fails with EBADF, "Bad file
+/// number"), and the reader and writer may use one socket from two threads.
+#[cfg(target_os = "horizon")]
+type Tcp = Arc<TcpStream>;
+#[cfg(not(target_os = "horizon"))]
+type Tcp = TcpStream;
+
+#[cfg(target_os = "horizon")]
+fn clone_tcp(s: &Tcp) -> std::io::Result<Tcp> {
+    Ok(s.clone())
+}
+#[cfg(not(target_os = "horizon"))]
+fn clone_tcp(s: &Tcp) -> std::io::Result<Tcp> {
+    s.try_clone()
+}
+
 /// What a connection runs over.
 enum Stream {
-    Tcp(TcpStream),
+    Tcp(Tcp),
     Memory(Pipe),
 }
 impl Stream {
     fn try_clone(&self) -> std::io::Result<Self> {
         Ok(match self {
-            Self::Tcp(s) => Self::Tcp(s.try_clone()?),
+            Self::Tcp(s) => Self::Tcp(clone_tcp(s)?),
             Self::Memory(p) => Self::Memory(p.try_clone()),
         })
     }
@@ -138,7 +156,10 @@ impl Stream {
 impl Read for Stream {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
         match self {
-            Self::Tcp(s) => s.read(out),
+            Self::Tcp(s) => {
+                let mut s: &TcpStream = s;
+                s.read(out)
+            }
             Self::Memory(p) => p.read(out),
         }
     }
@@ -146,13 +167,19 @@ impl Read for Stream {
 impl Write for Stream {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         match self {
-            Self::Tcp(s) => s.write(data),
+            Self::Tcp(s) => {
+                let mut s: &TcpStream = s;
+                s.write(data)
+            }
             Self::Memory(p) => p.write(data),
         }
     }
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
-            Self::Tcp(s) => s.flush(),
+            Self::Tcp(s) => {
+                let mut s: &TcpStream = s;
+                s.flush()
+            }
             Self::Memory(p) => p.flush(),
         }
     }
@@ -268,7 +295,7 @@ impl Connection {
     }
     pub fn from_stream(stream: TcpStream) -> Result<Self> {
         stream.set_nodelay(true)?;
-        Self::over(Stream::Tcp(stream))
+        Self::over(Stream::Tcp(stream.into()))
     }
     /// A connection over one end of an in-memory [`Pipe`].
     pub fn local(pipe: Pipe) -> Self {
