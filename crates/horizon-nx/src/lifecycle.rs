@@ -653,6 +653,9 @@ pub fn flush_logs() {
             if memory_every > 0 && due(&mut b.memory, Duration::from_secs(memory_every)) {
                 log::info!("[Memory] {}", crate::memory::malloc_report());
             }
+            if let Some(line) = crate::vlinks::io_report() {
+                log::info!("{line}");
+            }
             if let Some(threads) = threads {
                 log::info!(
                     "[Threads] {} created since launch; detached: {} closed after exiting, {} still running",

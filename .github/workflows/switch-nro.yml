@@ -108,6 +108,17 @@ jobs:
           cp horizon-nx/target/aarch64-nintendo-horizon/release/horizon.nro out/switch/horizon/
           printf 'This file makes horizon.nro start the game. Without it, it runs a dedicated server.\n' > out/switch/horizon/client.txt
           sha256sum out/switch/horizon/horizon.nro | tee -a build.log
+          # The game's function symbols by address, to name the offsets in a cpu-profile.txt
+          # (crates/horizon-nx/src/profiler.rs) from this build: the NRO has none.
+          elf=horizon-nx/target/aarch64-nintendo-horizon/release/horizon-client
+          nm_tool="$(command -v llvm-nm || ls /usr/bin/llvm-nm-* 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -n "$nm_tool" ] && [ -f "$elf" ]; then
+            { echo "# horizon-client ${GITHUB_SHA}: address size type name"
+              "$nm_tool" --defined-only --numeric-sort --print-size --demangle "$elf" | grep -i ' t '
+            } | gzip -9 > symbols.txt.gz && ls -l symbols.txt.gz | tee -a build.log
+          else
+            echo "no symbols: llvm-nm (${nm_tool:-missing}) or $elf (missing)" | tee -a build.log
+          fi
 
       - name: Publish the release
         if: startsWith(github.ref, 'refs/tags/v') || inputs.release != ''
@@ -152,6 +163,11 @@ jobs:
           mkdir -p switch-nro
           cp "$GITHUB_WORKSPACE/tail.log" "switch-nro/${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}-${{ job.status }}.log"
           cp "$GITHUB_WORKSPACE/tail.log" switch-nro/latest.log
+          # The latest build's symbols only (a few MB each): profiles come from the build on the SD card.
+          if [ -f "$GITHUB_WORKSPACE/symbols.txt.gz" ]; then
+            git rm -q --ignore-unmatch 'switch-nro/symbols-*.txt.gz'
+            cp "$GITHUB_WORKSPACE/symbols.txt.gz" "switch-nro/symbols-${GITHUB_SHA::7}.txt.gz"
+          fi
           echo "${GITHUB_RUN_NUMBER} ${GITHUB_SHA} ${{ job.status }} ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" > switch-nro/latest.txt
           git add switch-nro
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \

@@ -22,6 +22,10 @@
 mod devoptab;
 #[cfg(target_os = "horizon")]
 pub use devoptab::install;
+#[cfg(target_os = "horizon")]
+mod io_stats;
+#[cfg(target_os = "horizon")]
+pub use io_stats::report as io_report;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, RwLock};

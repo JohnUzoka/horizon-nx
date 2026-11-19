@@ -16157,6 +16157,15 @@ fn synchronous_startup(options: &Options) -> bool {
         || std::env::var_os("HORIZON_NET_REPORT").is_some()
 }
 
+/// On the Switch, a line on what the SD card cost since the last one (horizon-nx `vlinks`):
+/// tells a load step that waits on the card from one that works the CPU.
+pub(crate) fn log_sd_io() {
+    #[cfg(target_os = "horizon")]
+    if let Some(line) = horizon_nx::vlinks::io_report() {
+        log::info!("{line}");
+    }
+}
+
 /// The synchronous launch loads both phases; an ordinary launch returns the
 /// core bundle while the rest worker keeps loading.
 fn load_resources(
@@ -16205,6 +16214,7 @@ fn load_resources(
                 "Horizon: UI bundle ready after {} ms",
                 started.elapsed().as_millis()
             );
+            log_sd_io();
             publish(ui, &root);
         } else {
             loaded_gui = Some(ui);
@@ -16253,12 +16263,14 @@ fn load_resources(
                 "Horizon: UI bundle ready after {} ms",
                 started.elapsed().as_millis()
             );
+            log_sd_io();
             publish(ui, &root);
         } else {
             loaded_gui = Some(ui);
         }
     }
     log::info!("load assets: {:.2}s", started.elapsed().as_secs_f32());
+    log_sd_io();
     progress.set(1);
     let behaviour_json: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(
         std::fs::File::open(root.join("block-behaviours.json"))?,
@@ -16291,12 +16303,14 @@ fn load_resources(
     let biomes = Arc::new(biomes.map_err(|e| -> Box<dyn std::error::Error> { e.into() })?);
     let environment = environment.map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     log::info!("load facts: {:.2}s", started.elapsed().as_secs_f32());
+    log_sd_io();
     progress.set(2);
     log::info!("load biomes+env: {:.2}s", started.elapsed().as_secs_f32());
     progress.set(3);
     let light = Arc::new(LightTables::load(&root, assets.registry, &facts)?);
     let pack = PackResources::load(&root, assets.clone(), render, &facts, biomes.clone(), light)?;
     log::info!("load pack tables: {:.2}s", started.elapsed().as_secs_f32());
+    log_sd_io();
     progress.set(4);
     if !menu {
         horizon_client::ui::load_metadata(&root);
@@ -16435,6 +16449,7 @@ fn load_world_rest(
         &horizon_world::loot::PackOverlay::NONE,
     )?;
     log::info!("load items: {:.2}s", started.elapsed().as_secs_f32());
+    log_sd_io();
     progress.set(7);
     let recipes = Recipes::load(root, &items, &horizon_world::loot::PackOverlay::NONE)?;
     let transformers = horizon_client::block_transform::Transformers::load(root, assets.registry)?;

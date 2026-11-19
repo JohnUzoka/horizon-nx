@@ -1,8 +1,11 @@
 //! The SD card's newlib device, with links: a copy of libnx's `fsdev` device table whose path
 //! operations go through [`super::Links`] first. File-handle operations (read, write, seek...)
-//! are libnx's own, untouched.
+//! are libnx's own; opens, reads, writes, closes, `stat`s and listings are counted and timed
+//! (`io_stats.rs`).
 
 use super::{Links, MANIFEST, Parts, Store, Then, normalize, render};
+use super::io_stats::{CLOSE, LIST, OPEN, PROBE, READ, STAT, WRITE};
+use std::time::Instant;
 use core::ffi::{CStr, c_char, c_int, c_long, c_void};
 use std::ffi::CString;
 use std::sync::OnceLock;
@@ -99,6 +102,8 @@ impl Sd {
 
 impl Store for Sd {
     fn read(&mut self, dir: &str) -> Option<Vec<u8>> {
+        let started = Instant::now();
+        let found = (|| {
         let path = CString::new(super::join(dir, MANIFEST)).ok()?;
         let o = original();
         let mut file = Sd::file_struct();
@@ -118,6 +123,9 @@ impl Store for Sd {
         }
         unsafe { o.close_r?(r, fd) };
         Some(bytes)
+        })();
+        PROBE.add(started, u64::from(found.is_some()));
+        found
     }
 
     fn append(&mut self, dir: &str, text: &str) -> Result<(), i32> {
@@ -254,18 +262,52 @@ unsafe extern "C" fn open_r(
     flags: c_int,
     mode: c_int,
 ) -> c_int {
-    unsafe {
+    let started = Instant::now();
+    let rc = unsafe {
         through(r, path, true, -1, |p| {
             original().open_r.unwrap()(r, file, p, flags, mode)
         })
-    }
+    };
+    OPEN.add(started, u64::from(rc == -1));
+    rc
+}
+
+unsafe extern "C" fn read_r(r: R, file: *mut c_void, ptr: *mut c_char, len: usize) -> isize {
+    let started = Instant::now();
+    let n = unsafe { original().read_r.unwrap()(r, file, ptr, len) };
+    READ.add(started, n.max(0) as u64);
+    n
+}
+
+unsafe extern "C" fn write_r(r: R, file: *mut c_void, ptr: *const c_char, len: usize) -> isize {
+    let started = Instant::now();
+    let n = unsafe { original().write_r.unwrap()(r, file, ptr, len) };
+    WRITE.add(started, n.max(0) as u64);
+    n
+}
+
+unsafe extern "C" fn close_r(r: R, file: *mut c_void) -> c_int {
+    let started = Instant::now();
+    let rc = unsafe { original().close_r.unwrap()(r, file) };
+    CLOSE.add(started, 0);
+    rc
 }
 
 unsafe extern "C" fn stat_r(r: R, path: *const c_char, st: *mut Stat) -> c_int {
-    unsafe { through(r, path, true, -1, |p| original().stat_r.unwrap()(r, p, st)) }
+    let started = Instant::now();
+    let rc = unsafe { through(r, path, true, -1, |p| original().stat_r.unwrap()(r, p, st)) };
+    STAT.add(started, u64::from(rc == -1));
+    rc
 }
 
 unsafe extern "C" fn lstat_r(r: R, path: *const c_char, st: *mut Stat) -> c_int {
+    let started = Instant::now();
+    let rc = unsafe { lstat_inner(r, path, st) };
+    STAT.add(started, u64::from(rc == -1));
+    rc
+}
+
+unsafe fn lstat_inner(r: R, path: *const c_char, st: *mut Stat) -> c_int {
     let o = original();
     let real_lstat = o.lstat_r.or(o.stat_r).unwrap();
     let Some(asked) = (unsafe { parts(path) }) else {
@@ -440,6 +482,13 @@ unsafe fn listing<'a>(dir: *mut DirIter) -> &'a mut Listing {
 }
 
 unsafe extern "C" fn diropen_r(r: R, dir: *mut DirIter, path: *const c_char) -> *mut DirIter {
+    let started = Instant::now();
+    let opened = unsafe { diropen_inner(r, dir, path) };
+    LIST.add(started, 0);
+    opened
+}
+
+unsafe fn diropen_inner(r: R, dir: *mut DirIter, path: *const c_char) -> *mut DirIter {
     let real = original().diropen_r.unwrap();
     let asked = unsafe { parts(path) };
     let at = match asked.as_deref().map(|a| LINKS.resolve(a, true)) {
@@ -484,6 +533,14 @@ unsafe extern "C" fn dirreset_r(r: R, dir: *mut DirIter) -> c_int {
 }
 
 unsafe extern "C" fn dirnext_r(r: R, dir: *mut DirIter, name: *mut c_char, st: *mut Stat) -> c_int {
+    let started = Instant::now();
+    let rc = unsafe { dirnext_inner(r, dir, name, st) };
+    // Time into the listing's total; one more entry when one came.
+    LIST.add_time(started, u64::from(rc == 0));
+    rc
+}
+
+unsafe fn dirnext_inner(r: R, dir: *mut DirIter, name: *mut c_char, st: *mut Stat) -> c_int {
     let listing = unsafe { listing(dir) };
     while !listing.real_done {
         let rc = unsafe { original().dirnext_r.unwrap()(r, dir, name, st) };
@@ -562,6 +619,7 @@ pub fn install() -> Result<(), &'static str> {
         {
             return Err("the SD card device lacks open, stat or listing");
         }
+        super::io_stats::boot();
         if ORIGINAL.set(Original(o)).is_err() {
             return Err("already installed");
         }
@@ -572,7 +630,7 @@ pub fn install() -> Result<(), &'static str> {
             )*};
         }
         wrap!(
-            open_r, stat_r, unlink_r, chdir_r, rename_r, mkdir_r, diropen_r, dirreset_r, dirnext_r,
+            open_r, read_r, write_r, close_r, stat_r, unlink_r, chdir_r, rename_r, mkdir_r, diropen_r, dirreset_r, dirnext_r,
             dirclose_r, statvfs_r, chmod_r, rmdir_r, utimes_r, pathconf_r, link_r
         );
         with_links.lstat_r = Some(lstat_r);
