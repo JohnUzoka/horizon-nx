@@ -16453,6 +16453,9 @@ fn load_world_rest(
     progress.set(7);
     let recipes = Recipes::load(root, &items, &horizon_world::loot::PackOverlay::NONE)?;
     let transformers = horizon_client::block_transform::Transformers::load(root, assets.registry)?;
+    // Loaded: on the Switch, pack the resources for the next start if they have no pack yet.
+    #[cfg(target_os = "horizon")]
+    horizon_nx::vlinks::build_pack_in_background();
     log::info!(
         "Horizon: resources loaded in {:.1}s; {} block states, {} items, {} biomes; {} worker threads",
         started.elapsed().as_secs_f32(),
@@ -17317,6 +17320,10 @@ pub fn run() -> Result<()> {
     let started = Instant::now();
     horizon_client::spans::enable(options.spikes.is_some());
     let vanilla_root = options.resources.clone();
+    // The Switch reads the resources from their pack (one file) when there is one: opening each
+    // of their 28,000 files costs about 10 ms there (horizon-nx `vlinks/pack.rs`).
+    #[cfg(target_os = "horizon")]
+    horizon_nx::vlinks::use_pack(&vanilla_root);
     if let Some(error) = missing_resources(&vanilla_root) {
         // The game build started by hand (the release's zip), not by the
         // launcher: a window says where to get it. Scripts and servers get

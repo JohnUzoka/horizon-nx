@@ -3,12 +3,13 @@
 //! are libnx's own; opens, reads, writes, closes, `stat`s and listings are counted and timed
 //! (`io_stats.rs`).
 
-use super::{Links, MANIFEST, Parts, Store, Then, normalize, render};
 use super::io_stats::{CLOSE, LIST, OPEN, PROBE, READ, STAT, WRITE};
-use std::time::Instant;
+use super::{Links, MANIFEST, Parts, Store, Then, normalize, render};
+use super::{pack, pack_device};
 use core::ffi::{CStr, c_char, c_int, c_long, c_void};
 use std::ffi::CString;
 use std::sync::OnceLock;
+use std::time::Instant;
 
 type R = *mut c_void;
 type Stat = libc::stat;
@@ -23,14 +24,15 @@ struct DirIter {
 /// newlib `devoptab_t` (`sys/iosupport.h`, devkitPro's newlib), field for field.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct DevOptab {
+pub(super) struct DevOptab {
     name: *const c_char,
     struct_size: usize,
-    open_r: Option<unsafe extern "C" fn(R, *mut c_void, *const c_char, c_int, c_int) -> c_int>,
-    close_r: Option<unsafe extern "C" fn(R, *mut c_void) -> c_int>,
+    pub(super) open_r:
+        Option<unsafe extern "C" fn(R, *mut c_void, *const c_char, c_int, c_int) -> c_int>,
+    pub(super) close_r: Option<unsafe extern "C" fn(R, *mut c_void) -> c_int>,
     write_r: Option<unsafe extern "C" fn(R, *mut c_void, *const c_char, usize) -> isize>,
     read_r: Option<unsafe extern "C" fn(R, *mut c_void, *mut c_char, usize) -> isize>,
-    seek_r: Option<unsafe extern "C" fn(R, *mut c_void, i64, c_int) -> i64>,
+    pub(super) seek_r: Option<unsafe extern "C" fn(R, *mut c_void, i64, c_int) -> i64>,
     fstat_r: Option<unsafe extern "C" fn(R, *mut c_void, *mut Stat) -> c_int>,
     stat_r: Option<unsafe extern "C" fn(R, *const c_char, *mut Stat) -> c_int>,
     link_r: Option<unsafe extern "C" fn(R, *const c_char, *const c_char) -> c_int>,
@@ -68,7 +70,7 @@ unsafe impl Sync for Original {}
 /// libnx's own SD card device, which every operation ends up in.
 static ORIGINAL: OnceLock<Original> = OnceLock::new();
 
-fn original() -> &'static DevOptab {
+pub(super) fn original() -> &'static DevOptab {
     // Set before the device that calls this is in newlib's table.
     &ORIGINAL
         .get()
@@ -94,35 +96,49 @@ struct Sd {
     open: Option<(String, Vec<u64>)>,
 }
 
+/// A buffer for libnx's file record (`fsdev_file_t`).
+pub(super) fn file_struct() -> Vec<u64> {
+    vec![0; original().struct_size.div_ceil(8)]
+}
+
+/// This thread's `struct _reent`.
+pub(super) fn reent() -> R {
+    unsafe { __getreent() }
+}
+
 impl Sd {
     fn file_struct() -> Vec<u64> {
-        vec![0; original().struct_size.div_ceil(8)]
+        file_struct()
     }
 }
 
 impl Store for Sd {
     fn read(&mut self, dir: &str) -> Option<Vec<u8>> {
         let started = Instant::now();
-        let found = (|| {
-        let path = CString::new(super::join(dir, MANIFEST)).ok()?;
-        let o = original();
-        let mut file = Sd::file_struct();
-        let r = unsafe { __getreent() };
-        let fd = file.as_mut_ptr().cast::<c_void>();
-        if unsafe { o.open_r?(r, fd, path.as_ptr(), libc::O_RDONLY, 0) } == -1 {
+        // The pack's index lists every file of the packed folder: no manifest to look for.
+        if super::pack_device::no_manifest(dir) {
             return None;
         }
-        let mut bytes = Vec::new();
-        let mut chunk = [0u8; 4096];
-        loop {
-            let n = unsafe { o.read_r?(r, fd, chunk.as_mut_ptr().cast(), chunk.len()) };
-            if n <= 0 {
-                break;
+        let found = (|| {
+            let path = CString::new(super::join(dir, MANIFEST)).ok()?;
+            let o = original();
+            let mut file = Sd::file_struct();
+            let r = unsafe { __getreent() };
+            let fd = file.as_mut_ptr().cast::<c_void>();
+            if unsafe { o.open_r?(r, fd, path.as_ptr(), libc::O_RDONLY, 0) } == -1 {
+                return None;
             }
-            bytes.extend_from_slice(&chunk[..n as usize]);
-        }
-        unsafe { o.close_r?(r, fd) };
-        Some(bytes)
+            let mut bytes = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = unsafe { o.read_r?(r, fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+                if n <= 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk[..n as usize]);
+            }
+            unsafe { o.close_r?(r, fd) };
+            Some(bytes)
         })();
         PROBE.add(started, u64::from(found.is_some()));
         found
@@ -208,13 +224,13 @@ fn errno(r: R) -> c_int {
     }
 }
 
-fn fail(r: R, e: c_int) -> c_int {
+pub(super) fn fail(r: R, e: c_int) -> c_int {
     unsafe { *r.cast::<c_int>() = e };
     -1
 }
 
 /// newlib's working directory, `sdmc:/...`.
-fn cwd() -> String {
+pub(super) fn cwd() -> String {
     let mut buf = [0u8; 1024];
     let at = unsafe { getcwd(buf.as_mut_ptr().cast(), buf.len()) };
     if at.is_null() {
@@ -265,23 +281,60 @@ unsafe extern "C" fn open_r(
     mode: c_int,
 ) -> c_int {
     let started = Instant::now();
-    let rc = unsafe {
-        through(r, path, true, -1, |p| {
-            original().open_r.unwrap()(r, file, p, flags, mode)
-        })
-    };
+    let rc = unsafe { open_inner(r, file, path, flags, mode) };
     OPEN.add(started, u64::from(rc == -1));
     rc
 }
 
+unsafe fn open_inner(
+    r: R,
+    file: *mut c_void,
+    path: *const c_char,
+    flags: c_int,
+    mode: c_int,
+) -> c_int {
+    let real_open = original().open_r.unwrap();
+    let Some(asked) = (unsafe { parts(path) }) else {
+        return unsafe { real_open(r, file, path, flags, mode) };
+    };
+    let real = match LINKS.resolve(&asked, true) {
+        Ok(real) => real,
+        Err(e) => return fail(r, e),
+    };
+    let writes = flags & libc::O_ACCMODE != libc::O_RDONLY
+        || flags & (libc::O_CREAT | libc::O_TRUNC | libc::O_APPEND) != 0;
+    if writes {
+        pack_device::changing(&real);
+    } else {
+        match pack_device::answer(&real) {
+            pack_device::Answer::Missing => return fail(r, super::ENOENT),
+            pack_device::Answer::Entry(entry) => {
+                if let Some(at) = pack_device::packed_at(&entry) {
+                    pack_device::open_packed(file, at, &entry);
+                    return 0;
+                }
+            }
+            pack_device::Answer::Folder => {}
+        }
+    }
+    unsafe { real_open(r, file, c(&render(&real)).as_ptr(), flags, mode) }
+}
+
 unsafe extern "C" fn read_r(r: R, file: *mut c_void, ptr: *mut c_char, len: usize) -> isize {
     let started = Instant::now();
-    let n = unsafe { original().read_r.unwrap()(r, file, ptr, len) };
+    let n = if pack_device::is_packed(file) {
+        pack_device::read(r, file, ptr.cast(), len)
+    } else {
+        unsafe { original().read_r.unwrap()(r, file, ptr, len) }
+    };
     READ.add(started, n.max(0) as u64);
     n
 }
 
 unsafe extern "C" fn write_r(r: R, file: *mut c_void, ptr: *const c_char, len: usize) -> isize {
+    if pack_device::is_packed(file) {
+        return fail(r, libc::EBADF) as isize;
+    }
     let started = Instant::now();
     let n = unsafe { original().write_r.unwrap()(r, file, ptr, len) };
     WRITE.add(started, n.max(0) as u64);
@@ -290,14 +343,80 @@ unsafe extern "C" fn write_r(r: R, file: *mut c_void, ptr: *const c_char, len: u
 
 unsafe extern "C" fn close_r(r: R, file: *mut c_void) -> c_int {
     let started = Instant::now();
-    let rc = unsafe { original().close_r.unwrap()(r, file) };
+    let rc = if pack_device::is_packed(file) {
+        pack_device::close(file);
+        0
+    } else {
+        unsafe { original().close_r.unwrap()(r, file) }
+    };
     CLOSE.add(started, 0);
     rc
 }
 
+unsafe extern "C" fn seek_r(r: R, file: *mut c_void, pos: i64, whence: c_int) -> i64 {
+    if pack_device::is_packed(file) {
+        return pack_device::seek(r, file, pos, whence);
+    }
+    unsafe { original().seek_r.unwrap()(r, file, pos, whence) }
+}
+
+unsafe extern "C" fn fstat_r(r: R, file: *mut c_void, st: *mut Stat) -> c_int {
+    if pack_device::is_packed(file) {
+        return unsafe { pack_device::fstat(file, st) };
+    }
+    unsafe { original().fstat_r.unwrap()(r, file, st) }
+}
+
+unsafe extern "C" fn ftruncate_r(r: R, file: *mut c_void, len: i64) -> c_int {
+    if pack_device::is_packed(file) {
+        return fail(r, libc::EBADF);
+    }
+    unsafe { original().ftruncate_r.unwrap()(r, file, len) }
+}
+
+unsafe extern "C" fn fsync_r(r: R, file: *mut c_void) -> c_int {
+    if pack_device::is_packed(file) {
+        return 0;
+    }
+    unsafe { original().fsync_r.unwrap()(r, file) }
+}
+
+unsafe extern "C" fn fchmod_r(r: R, file: *mut c_void, mode: libc::mode_t) -> c_int {
+    if pack_device::is_packed(file) {
+        return fail(r, libc::EBADF);
+    }
+    unsafe { original().fchmod_r.unwrap()(r, file, mode) }
+}
+
+unsafe extern "C" fn fpathconf_r(r: R, file: *mut c_void, name: c_int) -> c_long {
+    if pack_device::is_packed(file) {
+        return fail(r, libc::EINVAL) as c_long;
+    }
+    unsafe { original().fpathconf_r.unwrap()(r, file, name) }
+}
+
+/// `stat` from the pack's index when it can answer.
+unsafe fn stat_packed(r: R, real: &[String], st: *mut Stat) -> Option<c_int> {
+    match pack_device::answer(real) {
+        pack_device::Answer::Entry(entry) => {
+            unsafe { pack_device::fill(st, &entry) };
+            Some(0)
+        }
+        pack_device::Answer::Missing => Some(fail(r, super::ENOENT)),
+        pack_device::Answer::Folder => None,
+    }
+}
+
 unsafe extern "C" fn stat_r(r: R, path: *const c_char, st: *mut Stat) -> c_int {
     let started = Instant::now();
-    let rc = unsafe { through(r, path, true, -1, |p| original().stat_r.unwrap()(r, p, st)) };
+    let rc = match unsafe { parts(path) }.map(|asked| LINKS.resolve(&asked, true)) {
+        Some(Ok(real)) => match unsafe { stat_packed(r, &real, st) } {
+            Some(rc) => rc,
+            None => unsafe { original().stat_r.unwrap()(r, c(&render(&real)).as_ptr(), st) },
+        },
+        Some(Err(e)) => fail(r, e),
+        None => unsafe { original().stat_r.unwrap()(r, path, st) },
+    };
     STAT.add(started, u64::from(rc == -1));
     rc
 }
@@ -325,7 +444,10 @@ unsafe fn lstat_inner(r: R, path: *const c_char, st: *mut Stat) -> c_int {
             }
             0
         }
-        Ok((at, None)) => unsafe { real_lstat(r, c(&render(&at)).as_ptr(), st) },
+        Ok((at, None)) => match unsafe { stat_packed(r, &at, st) } {
+            Some(rc) => rc,
+            None => unsafe { real_lstat(r, c(&render(&at)).as_ptr(), st) },
+        },
         Err(e) => fail(r, e),
     }
 }
@@ -336,7 +458,10 @@ unsafe extern "C" fn unlink_r(r: R, path: *const c_char) -> c_int {
         return unsafe { real(r, path) };
     };
     match LINKS.unlink(&asked) {
-        Ok(Then::Real(at)) => unsafe { real(r, c(&at).as_ptr()) },
+        Ok(Then::Real(at)) => {
+            pack_device::changing(&normalize(&at, "sdmc:/"));
+            unsafe { real(r, c(&at).as_ptr()) }
+        }
         Ok(_) => 0,
         Err(e) => fail(r, e),
     }
@@ -353,6 +478,8 @@ unsafe extern "C" fn rename_r(r: R, old: *const c_char, new: *const c_char) -> c
     };
     match LINKS.rename(&from, &to) {
         Ok(Then::Rename(from, to)) => {
+            pack_device::changing(&normalize(&from, "sdmc:/"));
+            pack_device::changing(&normalize(&to, "sdmc:/"));
             let rc = unsafe { real(r, c(&from).as_ptr(), c(&to).as_ptr()) };
             if rc == 0 {
                 LINKS.renamed(&from, &to);
@@ -370,7 +497,10 @@ unsafe extern "C" fn mkdir_r(r: R, path: *const c_char, mode: c_int) -> c_int {
         return unsafe { real(r, path, mode) };
     };
     match LINKS.mkdir(&asked) {
-        Ok(at) => unsafe { real(r, c(&at).as_ptr(), mode) },
+        Ok(at) => {
+            pack_device::changing(&normalize(&at, "sdmc:/"));
+            unsafe { real(r, c(&at).as_ptr(), mode) }
+        }
         Err(e) => fail(r, e),
     }
 }
@@ -382,6 +512,7 @@ unsafe extern "C" fn rmdir_r(r: R, path: *const c_char) -> c_int {
     };
     match LINKS.rmdir(&asked) {
         Ok(at) => {
+            pack_device::changing(&normalize(&at, "sdmc:/"));
             let rc = unsafe { real(r, c(&at).as_ptr()) };
             LINKS.forget(&at);
             rc
@@ -396,7 +527,10 @@ unsafe extern "C" fn link_r(r: R, existing: *const c_char, new: *const c_char) -
         return unsafe { real(r, existing, new) };
     };
     match (LINKS.resolve(&from, true), LINKS.mkdir(&to)) {
-        (Ok(from), Ok(to)) => unsafe { real(r, c(&render(&from)).as_ptr(), c(&to).as_ptr()) },
+        (Ok(from), Ok(to)) => {
+            pack_device::changing(&normalize(&to, "sdmc:/"));
+            unsafe { real(r, c(&render(&from)).as_ptr(), c(&to).as_ptr()) }
+        }
         (Err(e), _) | (_, Err(e)) => fail(r, e),
     }
 }
@@ -412,6 +546,7 @@ unsafe extern "C" fn statvfs_r(r: R, path: *const c_char, buf: *mut c_void) -> c
 unsafe extern "C" fn chmod_r(r: R, path: *const c_char, mode: libc::mode_t) -> c_int {
     unsafe {
         through(r, path, true, -1, |p| {
+            pack_device::changing(&normalize(&CStr::from_ptr(p).to_string_lossy(), "sdmc:/"));
             original().chmod_r.unwrap()(r, p, mode)
         })
     }
@@ -420,6 +555,7 @@ unsafe extern "C" fn chmod_r(r: R, path: *const c_char, mode: libc::mode_t) -> c
 unsafe extern "C" fn utimes_r(r: R, path: *const c_char, times: *const c_void) -> c_int {
     unsafe {
         through(r, path, true, -1, |p| {
+            pack_device::changing(&normalize(&CStr::from_ptr(p).to_string_lossy(), "sdmc:/"));
             original().utimes_r.unwrap()(r, p, times)
         })
     }
@@ -440,7 +576,12 @@ unsafe extern "C" fn symlink_r(r: R, target: *const c_char, link: *const c_char)
         return fail(r, super::EINVAL);
     };
     match LINKS.symlink(target, &at) {
-        Ok(()) => 0,
+        Ok(()) => {
+            if let Ok(placed) = LINKS.resolve(&at, false) {
+                pack_device::changing(&placed);
+            }
+            0
+        }
         Err(e) => fail(r, e),
     }
 }
@@ -460,11 +601,13 @@ unsafe extern "C" fn readlink_r(r: R, path: *const c_char, buf: *mut c_char, siz
     }
 }
 
-/// What a listing adds to libnx's: the folder's links, after its real entries.
+/// What a listing adds to libnx's: the folder's links, after its real entries. A folder the
+/// pack's index lists is listed from it, without libnx (`packed`).
 struct Listing {
     links: Vec<CString>,
     next: usize,
     real_done: bool,
+    packed: Option<(Vec<(CString, pack::Entry)>, usize)>,
 }
 
 /// Where in a `DIR_ITER`'s state our `Listing` pointer sits: after libnx's own state.
@@ -501,9 +644,17 @@ unsafe fn diropen_inner(r: R, dir: *mut DirIter, path: *const c_char) -> *mut Di
         }
         None => None,
     };
-    let opened = match &at {
-        Some(at) => unsafe { real(r, dir, c(&render(at)).as_ptr()) },
-        None => unsafe { real(r, dir, path) },
+    let packed = at.as_deref().and_then(pack_device::listing).map(|names| {
+        let names = names
+            .into_iter()
+            .map(|(name, entry)| (c(&name), entry))
+            .collect();
+        (names, 0)
+    });
+    let opened = match (&at, &packed) {
+        (_, Some(_)) => dir,
+        (Some(at), None) => unsafe { real(r, dir, c(&render(at)).as_ptr()) },
+        (None, None) => unsafe { real(r, dir, path) },
     };
     if opened.is_null() {
         return opened;
@@ -511,10 +662,12 @@ unsafe fn diropen_inner(r: R, dir: *mut DirIter, path: *const c_char) -> *mut Di
     let links = at
         .map(|at| LINKS.names(&at).iter().map(|n| c(n)).collect())
         .unwrap_or_default();
+    let real_done = packed.is_some();
     let listing = Box::into_raw(Box::new(Listing {
         links,
         next: 0,
-        real_done: false,
+        real_done,
+        packed,
     }));
     unsafe {
         (*dir)
@@ -530,6 +683,10 @@ unsafe fn diropen_inner(r: R, dir: *mut DirIter, path: *const c_char) -> *mut Di
 unsafe extern "C" fn dirreset_r(r: R, dir: *mut DirIter) -> c_int {
     let listing = unsafe { listing(dir) };
     listing.next = 0;
+    if let Some((_, at)) = &mut listing.packed {
+        *at = 0;
+        return 0;
+    }
     listing.real_done = false;
     unsafe { original().dirreset_r.unwrap()(r, dir) }
 }
@@ -544,6 +701,22 @@ unsafe extern "C" fn dirnext_r(r: R, dir: *mut DirIter, name: *mut c_char, st: *
 
 unsafe fn dirnext_inner(r: R, dir: *mut DirIter, name: *mut c_char, st: *mut Stat) -> c_int {
     let listing = unsafe { listing(dir) };
+    if let Some((names, at)) = &mut listing.packed {
+        let Some((entry_name, entry)) = names.get(*at) else {
+            return fail(r, super::ENOENT);
+        };
+        *at += 1;
+        let bytes = entry_name.as_bytes_with_nul();
+        let n = bytes.len().min(256);
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), name.cast::<u8>(), n);
+            *name.add(255) = 0;
+        }
+        if !st.is_null() {
+            unsafe { pack_device::fill(st, entry) };
+        }
+        return 0;
+    }
     while !listing.real_done {
         let rc = unsafe { original().dirnext_r.unwrap()(r, dir, name, st) };
         if rc == 0 {
@@ -591,7 +764,10 @@ unsafe extern "C" fn dirclose_r(r: R, dir: *mut DirIter) -> c_int {
             .cast::<u8>()
             .add(listing_offset())
             .cast::<*mut Listing>();
-        drop(Box::from_raw(slot.read()));
+        let listing = Box::from_raw(slot.read());
+        if listing.packed.is_some() {
+            return 0;
+        }
         original().dirclose_r.unwrap()(r, dir)
     }
 }
@@ -632,8 +808,31 @@ pub fn install() -> Result<(), &'static str> {
             )*};
         }
         wrap!(
-            open_r, read_r, write_r, close_r, stat_r, unlink_r, chdir_r, rename_r, mkdir_r, diropen_r, dirreset_r, dirnext_r,
-            dirclose_r, statvfs_r, chmod_r, rmdir_r, utimes_r, pathconf_r, link_r
+            open_r,
+            read_r,
+            write_r,
+            close_r,
+            seek_r,
+            fstat_r,
+            ftruncate_r,
+            fsync_r,
+            fchmod_r,
+            fpathconf_r,
+            stat_r,
+            unlink_r,
+            chdir_r,
+            rename_r,
+            mkdir_r,
+            diropen_r,
+            dirreset_r,
+            dirnext_r,
+            dirclose_r,
+            statvfs_r,
+            chmod_r,
+            rmdir_r,
+            utimes_r,
+            pathconf_r,
+            link_r
         );
         with_links.lstat_r = Some(lstat_r);
         with_links.symlink_r = Some(symlink_r);

@@ -1583,7 +1583,7 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
 }
 
 /// The root to load: `base` itself with no content, else the mods' overlay
-/// over it, built in `cache/mod-content`.
+/// over it, built in `cache/mod-content-<hash>` (one per base).
 ///
 /// The root is built once and kept: later starts with the same build, base
 /// and mod files reuse it. With ATM10's carried mods a build takes about
@@ -1592,7 +1592,10 @@ pub fn resource_root(base: &Path, mods: &[ContentMod], cache: &Path) -> Result<P
     if mods.iter().all(|m| m.content.is_empty()) {
         return Ok(base.to_owned());
     }
-    let out = cache.join("mod-content");
+    // One root per base: joining a server with a resource pack lays the mods over the pack's
+    // overlay, leaving it lays them over the game's resources again, and with one root for both
+    // every such switch rebuilt it (33 s on the Switch, 112 MB written).
+    let out = cache.join(content_dir_name(base));
     let stamp = stamp(base, mods)?;
     if fs::read(out.join(STAMP)).is_ok_and(|s| s == stamp.as_bytes()) {
         // A reused root warns as the build did.
@@ -1605,6 +1608,15 @@ pub fn resource_root(base: &Path, mods: &[ContentMod], cache: &Path) -> Result<P
     }
     fs::write(out.join(STAMP), stamp)?;
     Ok(out)
+}
+
+/// The content root's folder name for `base`: `mod-content-<hash of its path>`.
+fn content_dir_name(base: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let absolute = std::path::absolute(base).unwrap_or_else(|_| base.to_owned());
+    let digest = Sha256::digest(absolute.as_os_str().as_encoded_bytes());
+    let hex: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+    format!("mod-content-{hex}")
 }
 
 /// In a root built by [`build`]: its warnings, one per line.
