@@ -13,7 +13,7 @@ On a Mac, run `dot_clean -m` on the SD card before ejecting it, or copy over FTP
 - Built from the source of the original port's 0.1.0, with this fork's public build setup.
 - **GPU hang fixed:** the graphics driver's `plat` and `ofold` shader optimizations hung the GPU about 10 s after terrain appeared; both are off by default.
 - **HOME works** with Nintendo's HOME menu (custom HOME menus such as SwitchU can freeze the console).
-- **Microsoft sign-in on the title screen** (Sign In, right of Realms). Until Mojang approves the app it stops at the Minecraft step.
+- **Microsoft sign-in on the title screen** (Sign In, right of Realms): enter a code at microsoft.com/link on your phone.
 
 ### Known issues
 

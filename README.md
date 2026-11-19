@@ -28,8 +28,8 @@ Tested on a Switch with Atmosphère, November 2026.
 | Single player: create and play worlds | ✅ Works |
 | Joy-Con and touch screen | ✅ Works |
 | HOME button (leave and come back) | ✅ Works with Nintendo's HOME menu ([custom HOME menus](#the-console-freezes-when-i-press-home) can freeze) |
-| Microsoft sign-in on the title screen | 🟡 Works up to the Minecraft step; waiting for Mojang to approve the app |
-| Online-mode servers | 🟡 Need the sign-in above |
+| Microsoft sign-in on the title screen | ✅ Works (approved by Mojang) |
+| Online-mode servers | ❔ Need the sign-in above; not tested yet |
 | Docked mode | ❔ Not tested yet |
 | Frame rate | Around 35–45 fps in handheld mode |
 | First start | Slow: a few minutes to the title screen, more to open a world the first time |
@@ -114,9 +114,6 @@ card can use that file to sign in as you** until you press **Sign Out**, which d
 
 When signed in, worlds play under your real account. A world you played before under the offline name starts you
 as a new player (as in Minecraft itself); the old character stays saved.
-
-> While Mojang hasn't approved this build's app registration, sign-in stops with *"…its app is not approved by
-> Mojang yet"*. Everything before that step works.
 
 ## Settings: `env.txt`
 
