@@ -1632,7 +1632,7 @@ fn stamp(base: &Path, mods: &[ContentMod]) -> Result<String> {
         ))
     };
     let mut parts = vec!["horizon mod content 1".to_owned()];
-    parts.push(meta(&std::env::current_exe()?)?);
+    parts.push(meta(&game_binary()?)?);
     let base = std::path::absolute(base)?;
     parts.push(
         String::from_utf8_lossy(&fs::read(base.join("horizon-resources.json"))?).into_owned(),
@@ -1659,6 +1659,22 @@ fn stamp(base: &Path, mods: &[ContentMod]) -> Result<String> {
         hasher.update(part.as_bytes());
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// The game's own file, whose change (an update) rebuilds content roots. On the Switch that's
+/// the NRO: std has no `current_exe` there ("operation not supported on this platform"), which
+/// failed every content root, so no `.hmod` mod ever loaded.
+fn game_binary() -> std::io::Result<PathBuf> {
+    #[cfg(target_os = "horizon")]
+    {
+        horizon_nx::nro_path()
+            .map(PathBuf::from)
+            .ok_or_else(|| std::io::Error::other("the NRO's path is unknown"))
+    }
+    #[cfg(not(target_os = "horizon"))]
+    {
+        std::env::current_exe()
+    }
 }
 
 #[cfg(test)]
