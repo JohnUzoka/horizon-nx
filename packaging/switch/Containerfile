@@ -5,13 +5,20 @@ FROM docker.io/devkitpro/devkita64:latest
 
 # libnx and the portlibs NVK links against (expat, zstd, zlib come with switch-mesa / switch-sdl2),
 # plus the tools that make the NRO (nacptool, elf2nro).
-RUN dkp-pacman -Syu --noconfirm \
+# pkg.devkitpro.org refuses some CI machines (HTTP 403): then the base image's packages are used,
+# and the portlibs the link needs are built from source (portlibs-fallback.sh).
+COPY portlibs-fallback.sh /usr/local/bin/portlibs-fallback.sh
+RUN if dkp-pacman -Syu --noconfirm \
         switch-mesa \
         switch-sdl2 \
         switch-tools \
         libnx \
-        devkitA64 && \
-    dkp-pacman -Scc --noconfirm
+        devkitA64; then \
+        dkp-pacman -Scc --noconfirm; \
+    else \
+        echo "warning: pkg.devkitpro.org refused the update; using the base image's packages"; \
+    fi && \
+    /usr/local/bin/portlibs-fallback.sh
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \

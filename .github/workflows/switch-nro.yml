@@ -53,10 +53,24 @@ jobs:
           git clone https://github.com/JohnUzoka/bevy-horizon.git bevy-horizon
           git -C bevy-horizon checkout --quiet "$BEVY_HORIZON_REV"
 
+      # The toolchain image is kept between runs: pkg.devkitpro.org refuses some CI machines,
+      # so it is only built when its recipe changes.
+      - name: Toolchain image cache
+        id: toolchain
+        uses: actions/cache@v4
+        with:
+          path: toolchain-image.tar
+          key: toolchain-${{ hashFiles('horizon-nx/packaging/switch/Containerfile', 'horizon-nx/packaging/switch/portlibs-fallback.sh') }}-v1
+
       - name: Toolchain image
         run: |
           set -o pipefail
-          horizon-nx/packaging/switch/build.sh image 2>&1 | tee -a build.log
+          if [ -f toolchain-image.tar ]; then
+            docker load -i toolchain-image.tar 2>&1 | tee -a build.log
+          else
+            horizon-nx/packaging/switch/build.sh image 2>&1 | tee -a build.log
+            docker save -o toolchain-image.tar horizon-switch-toolchain:local bevy-horizon-toolchain:local
+          fi
 
       - name: NVK cache
         id: nvk
