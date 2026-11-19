@@ -30,12 +30,12 @@ Tested on a Switch with Atmosphère, November 2026. Current release: **v1.0.0**.
 | HOME button (leave and come back) | ✅ Works with Nintendo's HOME menu ([custom HOME menus](#the-console-freezes-when-i-press-home) can freeze) |
 | Microsoft sign-in on the title screen | ✅ Works (approved by Mojang) |
 | Multiplayer, online-mode servers included | ✅ Works (sign in first for online-mode servers) |
-| Server resource packs | 🧪 Fix in testing (the SD card had no links for the pack overlay); 1.0.0 disconnects |
-| Horizon mods (`.hmod`) | 🧪 Fix in testing (same cause); enable them in Options → Mods, then restart |
+| Server resource packs | ✅ Works in the test builds (Hypixel SkyBlock tested; about a minute to apply the first time); 1.0.0 disconnects |
+| Horizon mods (`.hmod`) | ✅ Works in the test builds; enable them in Options → Mods, then restart |
 | In-game updates | ✅ From this repository's releases (1.0.0 and later) |
 | Docked mode | ❔ Not tested yet |
 | Frame rate | Around 35–45 fps in handheld mode |
-| First start | Slow: a few minutes to the title screen, more to open a world the first time |
+| Loading | Test builds: about 15 s to load after the first start (the first start packs the resources into one file in the background, about 20 minutes); 1.0.0: a few minutes |
 
 ## What you need
 
