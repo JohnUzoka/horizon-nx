@@ -277,6 +277,8 @@ pub(super) fn build(vanilla: &Path, packs: &[Pack], out: &Path) -> io::Result<()
         .create(true)
         .truncate(false)
         .open(lock_path(out))?;
+    // The Switch has no file locks (std: "lock() not supported"), and only one game runs there.
+    #[cfg(not(target_os = "horizon"))]
     lock.lock()?;
     let vanilla_key = absolute(vanilla)?;
     let marker_path = marker_path(out);

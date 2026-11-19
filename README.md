@@ -30,8 +30,8 @@ Tested on a Switch with Atmosphère, November 2026. Current release: **v1.0.0**.
 | HOME button (leave and come back) | ✅ Works with Nintendo's HOME menu ([custom HOME menus](#the-console-freezes-when-i-press-home) can freeze) |
 | Microsoft sign-in on the title screen | ✅ Works (approved by Mojang) |
 | Multiplayer, online-mode servers included | ✅ Works (sign in first for online-mode servers) |
-| Server resource packs | ❌ Disconnects (for example Hypixel SkyBlock); being worked on |
-| Horizon mods | ❌ Not on the Switch yet; being worked on |
+| Server resource packs | 🧪 Fix in testing (the SD card had no links for the pack overlay); 1.0.0 disconnects |
+| Horizon mods (`.hmod`) | 🧪 Fix in testing (same cause); enable them in Options → Mods, then restart |
 | In-game updates | ✅ From this repository's releases (1.0.0 and later) |
 | Docked mode | ❔ Not tested yet |
 | Frame rate | Around 35–45 fps in handheld mode |
@@ -129,6 +129,7 @@ A text file `switch/horizon/env.txt`, next to `horizon.nro`, sets options at sta
 | `MESA_SHADER_CACHE_DISABLE=true` | Compile every shader at every start instead of keeping them on the SD card. |
 | `HORIZON_MSA_CLIENT_ID=…` | A different Azure app for the Microsoft sign-in. |
 | `HORIZON_NX_CPU_BOOST=0` | Keep normal CPU clocks while loading (they're raised by default). |
+| `HORIZON_NX_LINKS=0` | Turn off the SD card links that resource packs and mods need (only to rule them out when something breaks). |
 
 ## Troubleshooting
 
@@ -193,6 +194,9 @@ branch. To publish a release, run the "Switch NRO" workflow by hand (**Run workf
 - **HOME:** the game waits in the background without drawing instead of asking the system to suspend it.
 - **Microsoft sign-in on the console** (`crates/horizon-client-render/src/msa.rs`, the title screen's account screen).
 - **No mimalloc on the Switch:** the console's own allocator is used.
+- **Links on the SD card:** resource packs and mods are folders of links into the game files, which the SD card's
+  file system (FAT) can't store. `crates/horizon-nx/src/vlinks` keeps each folder's links in a small `.hzlinks`
+  file in it and makes the SD card's device follow them, so packs and mods load without copying ~650 MB.
 
 ## Credits
 

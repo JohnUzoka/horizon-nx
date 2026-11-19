@@ -92,7 +92,8 @@ pub(crate) mod ffi {
         pub fn mkdir(path: *const c_char, mode: c_int) -> c_int;
 
         /// newlib `sys/iosupport.h`: the device table, indexed by `NewlibHandle::device`.
-        pub static devoptab_list: [*const usize; STD_MAX];
+        /// `static mut`: `vlinks::install` puts the SD card device with links in it.
+        pub static mut devoptab_list: [*const usize; STD_MAX];
         pub fn AddDevice(device: *const usize) -> c_int;
         pub fn __get_handle(fd: c_int) -> *mut NewlibHandle;
 

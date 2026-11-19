@@ -20,5 +20,9 @@ top_down_alloc = ["vulkan"]
 [dependencies]
 log = "0.4"
 
+[target.'cfg(target_os = "horizon")'.dependencies]
+# newlib's `struct stat` and constants (bevy-horizon's patched libc), for `vlinks`.
+libc = "0.2"
+
 [lints]
 workspace = true

@@ -1,0 +1,585 @@
+//! The SD card's newlib device, with links: a copy of libnx's `fsdev` device table whose path
+//! operations go through [`super::Links`] first. File-handle operations (read, write, seek...)
+//! are libnx's own, untouched.
+
+use super::{Links, MANIFEST, Parts, Store, Then, normalize, render};
+use core::ffi::{CStr, c_char, c_int, c_long, c_void};
+use std::ffi::CString;
+use std::sync::OnceLock;
+
+type R = *mut c_void;
+type Stat = libc::stat;
+
+/// newlib `DIR_ITER` (`sys/iosupport.h`).
+#[repr(C)]
+struct DirIter {
+    device: c_int,
+    dir_struct: *mut c_void,
+}
+
+/// newlib `devoptab_t` (`sys/iosupport.h`, devkitPro's newlib), field for field.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DevOptab {
+    name: *const c_char,
+    struct_size: usize,
+    open_r: Option<unsafe extern "C" fn(R, *mut c_void, *const c_char, c_int, c_int) -> c_int>,
+    close_r: Option<unsafe extern "C" fn(R, *mut c_void) -> c_int>,
+    write_r: Option<unsafe extern "C" fn(R, *mut c_void, *const c_char, usize) -> isize>,
+    read_r: Option<unsafe extern "C" fn(R, *mut c_void, *mut c_char, usize) -> isize>,
+    seek_r: Option<unsafe extern "C" fn(R, *mut c_void, i64, c_int) -> i64>,
+    fstat_r: Option<unsafe extern "C" fn(R, *mut c_void, *mut Stat) -> c_int>,
+    stat_r: Option<unsafe extern "C" fn(R, *const c_char, *mut Stat) -> c_int>,
+    link_r: Option<unsafe extern "C" fn(R, *const c_char, *const c_char) -> c_int>,
+    unlink_r: Option<unsafe extern "C" fn(R, *const c_char) -> c_int>,
+    chdir_r: Option<unsafe extern "C" fn(R, *const c_char) -> c_int>,
+    rename_r: Option<unsafe extern "C" fn(R, *const c_char, *const c_char) -> c_int>,
+    mkdir_r: Option<unsafe extern "C" fn(R, *const c_char, c_int) -> c_int>,
+    dir_state_size: usize,
+    diropen_r: Option<unsafe extern "C" fn(R, *mut DirIter, *const c_char) -> *mut DirIter>,
+    dirreset_r: Option<unsafe extern "C" fn(R, *mut DirIter) -> c_int>,
+    dirnext_r: Option<unsafe extern "C" fn(R, *mut DirIter, *mut c_char, *mut Stat) -> c_int>,
+    dirclose_r: Option<unsafe extern "C" fn(R, *mut DirIter) -> c_int>,
+    statvfs_r: Option<unsafe extern "C" fn(R, *const c_char, *mut c_void) -> c_int>,
+    ftruncate_r: Option<unsafe extern "C" fn(R, *mut c_void, i64) -> c_int>,
+    fsync_r: Option<unsafe extern "C" fn(R, *mut c_void) -> c_int>,
+    device_data: *mut c_void,
+    chmod_r: Option<unsafe extern "C" fn(R, *const c_char, libc::mode_t) -> c_int>,
+    fchmod_r: Option<unsafe extern "C" fn(R, *mut c_void, libc::mode_t) -> c_int>,
+    rmdir_r: Option<unsafe extern "C" fn(R, *const c_char) -> c_int>,
+    lstat_r: Option<unsafe extern "C" fn(R, *const c_char, *mut Stat) -> c_int>,
+    utimes_r: Option<unsafe extern "C" fn(R, *const c_char, *const c_void) -> c_int>,
+    fpathconf_r: Option<unsafe extern "C" fn(R, *mut c_void, c_int) -> c_long>,
+    pathconf_r: Option<unsafe extern "C" fn(R, *const c_char, c_int) -> c_long>,
+    symlink_r: Option<unsafe extern "C" fn(R, *const c_char, *const c_char) -> c_int>,
+    readlink_r: Option<unsafe extern "C" fn(R, *const c_char, *mut c_char, usize) -> isize>,
+}
+const _: () = assert!(size_of::<DevOptab>() == crate::logging::ffi::DEVOPTAB_WORDS * 8);
+
+struct Original(DevOptab);
+// SAFETY: a copy of libnx's static table: function pointers, a name and libnx's device record,
+// only ever read.
+unsafe impl Send for Original {}
+unsafe impl Sync for Original {}
+
+/// libnx's own SD card device, which every operation ends up in.
+static ORIGINAL: OnceLock<Original> = OnceLock::new();
+
+fn original() -> &'static DevOptab {
+    // Set before the device that calls this is in newlib's table.
+    &ORIGINAL
+        .get()
+        .expect("vlinks: the SD card device isn't installed")
+        .0
+}
+
+unsafe extern "C" {
+    /// libsysbase: the index in `devoptab_list` of the device a path names.
+    fn FindDevice(name: *const c_char) -> c_int;
+    fn getcwd(buf: *mut c_char, size: usize) -> *mut c_char;
+    /// newlib: this thread's `struct _reent`, whose first field is `errno`.
+    fn __getreent() -> R;
+}
+
+/// The links of the SD card.
+static LINKS: Links<Sd> = Links::new(Sd { open: None });
+
+/// Manifests on the SD card, read and written with libnx's own device (never through the links).
+struct Sd {
+    /// The manifest last appended to, kept open (and its folder): one write per link while a
+    /// builder links a folder's worth of files, instead of an open, a write and a close.
+    open: Option<(String, Vec<u64>)>,
+}
+
+impl Sd {
+    fn file_struct() -> Vec<u64> {
+        vec![0; original().struct_size.div_ceil(8)]
+    }
+}
+
+impl Store for Sd {
+    fn read(&mut self, dir: &str) -> Option<Vec<u8>> {
+        let path = CString::new(super::join(dir, MANIFEST)).ok()?;
+        let o = original();
+        let mut file = Sd::file_struct();
+        let r = unsafe { __getreent() };
+        let fd = file.as_mut_ptr().cast::<c_void>();
+        if unsafe { o.open_r?(r, fd, path.as_ptr(), libc::O_RDONLY, 0) } == -1 {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = unsafe { o.read_r?(r, fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+            if n <= 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..n as usize]);
+        }
+        unsafe { o.close_r?(r, fd) };
+        Some(bytes)
+    }
+
+    fn append(&mut self, dir: &str, text: &str) -> Result<(), i32> {
+        let o = original();
+        let r = unsafe { __getreent() };
+        let (Some(open_r), Some(write_r), Some(seek_r)) = (o.open_r, o.write_r, o.seek_r) else {
+            return Err(super::EIO);
+        };
+        if self.open.as_ref().is_none_or(|(open, _)| open != dir) {
+            self.release();
+            let path = CString::new(super::join(dir, MANIFEST)).map_err(|_| super::EINVAL)?;
+            let mut file = Sd::file_struct();
+            let fd = file.as_mut_ptr().cast::<c_void>();
+            if unsafe { open_r(r, fd, path.as_ptr(), libc::O_WRONLY | libc::O_CREAT, 0o666) } == -1
+            {
+                return Err(errno(r));
+            }
+            unsafe { seek_r(r, fd, 0, libc::SEEK_END) };
+            self.open = Some((dir.to_owned(), file));
+        }
+        let (_, file) = self.open.as_mut().unwrap();
+        let fd = file.as_mut_ptr().cast::<c_void>();
+        let mut rest = text.as_bytes();
+        while !rest.is_empty() {
+            let n = unsafe { write_r(r, fd, rest.as_ptr().cast(), rest.len()) };
+            if n <= 0 {
+                let e = errno(r);
+                self.release();
+                return Err(e);
+            }
+            rest = &rest[n as usize..];
+        }
+        // On the card now, not when the file closes: a console that crashes keeps its links.
+        if let Some(fsync_r) = o.fsync_r {
+            unsafe { fsync_r(r, fd) };
+        }
+        Ok(())
+    }
+
+    fn remove(&mut self, dir: &str) -> Result<(), i32> {
+        // The file system won't delete an open file.
+        self.release();
+        let path = CString::new(super::join(dir, MANIFEST)).map_err(|_| super::EINVAL)?;
+        let r = unsafe { __getreent() };
+        let Some(unlink_r) = original().unlink_r else {
+            return Err(super::EIO);
+        };
+        if unsafe { unlink_r(r, path.as_ptr()) } == -1
+            && self.kind(&super::join(dir, MANIFEST)).is_some()
+        {
+            return Err(errno(r));
+        }
+        Ok(())
+    }
+
+    fn kind(&mut self, path: &str) -> Option<bool> {
+        let path = CString::new(path).ok()?;
+        let mut st: Stat = unsafe { core::mem::zeroed() };
+        let r = unsafe { __getreent() };
+        if unsafe { original().stat_r?(r, path.as_ptr(), &mut st) } == -1 {
+            return None;
+        }
+        Some(st.st_mode & libc::S_IFMT == libc::S_IFDIR)
+    }
+
+    fn release(&mut self) {
+        if let Some((_, mut file)) = self.open.take() {
+            let r = unsafe { __getreent() };
+            if let Some(close_r) = original().close_r {
+                unsafe { close_r(r, file.as_mut_ptr().cast()) };
+            }
+        }
+    }
+}
+
+fn errno(r: R) -> c_int {
+    match unsafe { *r.cast::<c_int>() } {
+        0 => super::EIO,
+        e => e,
+    }
+}
+
+fn fail(r: R, e: c_int) -> c_int {
+    unsafe { *r.cast::<c_int>() = e };
+    -1
+}
+
+/// newlib's working directory, `sdmc:/...`.
+fn cwd() -> String {
+    let mut buf = [0u8; 1024];
+    let at = unsafe { getcwd(buf.as_mut_ptr().cast(), buf.len()) };
+    if at.is_null() {
+        return "sdmc:/".into();
+    }
+    unsafe { CStr::from_ptr(at) }.to_string_lossy().into_owned()
+}
+
+/// A path argument as absolute parts; `None` (pass it on as it is) when it isn't UTF-8.
+unsafe fn parts(path: *const c_char) -> Option<Parts> {
+    let path = unsafe { CStr::from_ptr(path) }.to_str().ok()?;
+    Some(normalize(path, &cwd()))
+}
+
+fn c(path: &str) -> CString {
+    // From parts of a C string: no NUL inside.
+    CString::new(path).unwrap_or_default()
+}
+
+/// Calls `f` with `path` gone through the links (with `follow`, its last part too).
+unsafe fn through<T>(
+    r: R,
+    path: *const c_char,
+    follow: bool,
+    failed: T,
+    f: impl FnOnce(*const c_char) -> T,
+) -> T {
+    let Some(asked) = (unsafe { parts(path) }) else {
+        return f(path);
+    };
+    match LINKS.resolve(&asked, follow) {
+        Ok(real) if real == asked => f(path),
+        Ok(real) => f(c(&render(&real)).as_ptr()),
+        Err(e) => {
+            fail(r, e);
+            failed
+        }
+    }
+}
+
+unsafe extern "C" fn open_r(
+    r: R,
+    file: *mut c_void,
+    path: *const c_char,
+    flags: c_int,
+    mode: c_int,
+) -> c_int {
+    unsafe {
+        through(r, path, true, -1, |p| {
+            original().open_r.unwrap()(r, file, p, flags, mode)
+        })
+    }
+}
+
+unsafe extern "C" fn stat_r(r: R, path: *const c_char, st: *mut Stat) -> c_int {
+    unsafe { through(r, path, true, -1, |p| original().stat_r.unwrap()(r, p, st)) }
+}
+
+unsafe extern "C" fn lstat_r(r: R, path: *const c_char, st: *mut Stat) -> c_int {
+    let o = original();
+    let real_lstat = o.lstat_r.or(o.stat_r).unwrap();
+    let Some(asked) = (unsafe { parts(path) }) else {
+        return unsafe { real_lstat(r, path, st) };
+    };
+    match LINKS.entry(&asked) {
+        Ok((_, Some(target))) => {
+            unsafe {
+                core::ptr::write_bytes(st, 0, 1);
+                (*st).st_mode = libc::S_IFLNK | 0o777;
+                (*st).st_nlink = 1;
+                (*st).st_size = target.len() as _;
+            }
+            0
+        }
+        Ok((at, None)) => unsafe { real_lstat(r, c(&render(&at)).as_ptr(), st) },
+        Err(e) => fail(r, e),
+    }
+}
+
+unsafe extern "C" fn unlink_r(r: R, path: *const c_char) -> c_int {
+    let real = original().unlink_r.unwrap();
+    let Some(asked) = (unsafe { parts(path) }) else {
+        return unsafe { real(r, path) };
+    };
+    match LINKS.unlink(&asked) {
+        Ok(Then::Real(at)) => unsafe { real(r, c(&at).as_ptr()) },
+        Ok(_) => 0,
+        Err(e) => fail(r, e),
+    }
+}
+
+unsafe extern "C" fn chdir_r(r: R, path: *const c_char) -> c_int {
+    unsafe { through(r, path, true, -1, |p| original().chdir_r.unwrap()(r, p)) }
+}
+
+unsafe extern "C" fn rename_r(r: R, old: *const c_char, new: *const c_char) -> c_int {
+    let real = original().rename_r.unwrap();
+    let (Some(from), Some(to)) = (unsafe { parts(old) }, unsafe { parts(new) }) else {
+        return unsafe { real(r, old, new) };
+    };
+    match LINKS.rename(&from, &to) {
+        Ok(Then::Rename(from, to)) => {
+            let rc = unsafe { real(r, c(&from).as_ptr(), c(&to).as_ptr()) };
+            if rc == 0 {
+                LINKS.renamed(&from, &to);
+            }
+            rc
+        }
+        Ok(_) => 0,
+        Err(e) => fail(r, e),
+    }
+}
+
+unsafe extern "C" fn mkdir_r(r: R, path: *const c_char, mode: c_int) -> c_int {
+    let real = original().mkdir_r.unwrap();
+    let Some(asked) = (unsafe { parts(path) }) else {
+        return unsafe { real(r, path, mode) };
+    };
+    match LINKS.mkdir(&asked) {
+        Ok(at) => unsafe { real(r, c(&at).as_ptr(), mode) },
+        Err(e) => fail(r, e),
+    }
+}
+
+unsafe extern "C" fn rmdir_r(r: R, path: *const c_char) -> c_int {
+    let real = original().rmdir_r.unwrap();
+    let Some(asked) = (unsafe { parts(path) }) else {
+        return unsafe { real(r, path) };
+    };
+    match LINKS.rmdir(&asked) {
+        Ok(at) => {
+            let rc = unsafe { real(r, c(&at).as_ptr()) };
+            LINKS.forget(&at);
+            rc
+        }
+        Err(e) => fail(r, e),
+    }
+}
+
+unsafe extern "C" fn link_r(r: R, existing: *const c_char, new: *const c_char) -> c_int {
+    let real = original().link_r.unwrap();
+    let (Some(from), Some(to)) = (unsafe { parts(existing) }, unsafe { parts(new) }) else {
+        return unsafe { real(r, existing, new) };
+    };
+    match (LINKS.resolve(&from, true), LINKS.mkdir(&to)) {
+        (Ok(from), Ok(to)) => unsafe { real(r, c(&render(&from)).as_ptr(), c(&to).as_ptr()) },
+        (Err(e), _) | (_, Err(e)) => fail(r, e),
+    }
+}
+
+unsafe extern "C" fn statvfs_r(r: R, path: *const c_char, buf: *mut c_void) -> c_int {
+    unsafe {
+        through(r, path, true, -1, |p| {
+            original().statvfs_r.unwrap()(r, p, buf)
+        })
+    }
+}
+
+unsafe extern "C" fn chmod_r(r: R, path: *const c_char, mode: libc::mode_t) -> c_int {
+    unsafe {
+        through(r, path, true, -1, |p| {
+            original().chmod_r.unwrap()(r, p, mode)
+        })
+    }
+}
+
+unsafe extern "C" fn utimes_r(r: R, path: *const c_char, times: *const c_void) -> c_int {
+    unsafe {
+        through(r, path, true, -1, |p| {
+            original().utimes_r.unwrap()(r, p, times)
+        })
+    }
+}
+
+unsafe extern "C" fn pathconf_r(r: R, path: *const c_char, name: c_int) -> c_long {
+    unsafe {
+        through(r, path, true, -1, |p| {
+            original().pathconf_r.unwrap()(r, p, name)
+        })
+    }
+}
+
+unsafe extern "C" fn symlink_r(r: R, target: *const c_char, link: *const c_char) -> c_int {
+    let (Ok(target), Some(at)) = (unsafe { CStr::from_ptr(target) }.to_str(), unsafe {
+        parts(link)
+    }) else {
+        return fail(r, super::EINVAL);
+    };
+    match LINKS.symlink(target, &at) {
+        Ok(()) => 0,
+        Err(e) => fail(r, e),
+    }
+}
+
+unsafe extern "C" fn readlink_r(r: R, path: *const c_char, buf: *mut c_char, size: usize) -> isize {
+    let Some(asked) = (unsafe { parts(path) }) else {
+        return fail(r, super::EINVAL) as isize;
+    };
+    match LINKS.readlink(&asked) {
+        Ok(target) => {
+            // Like readlink(2): no terminating NUL, cut to the buffer.
+            let n = target.len().min(size);
+            unsafe { core::ptr::copy_nonoverlapping(target.as_ptr(), buf.cast(), n) };
+            n as isize
+        }
+        Err(e) => fail(r, e) as isize,
+    }
+}
+
+/// What a listing adds to libnx's: the folder's links, after its real entries.
+struct Listing {
+    links: Vec<CString>,
+    next: usize,
+    real_done: bool,
+}
+
+/// Where in a `DIR_ITER`'s state our `Listing` pointer sits: after libnx's own state.
+fn listing_offset() -> usize {
+    original().dir_state_size.next_multiple_of(8)
+}
+
+unsafe fn listing<'a>(dir: *mut DirIter) -> &'a mut Listing {
+    unsafe {
+        let slot = (*dir)
+            .dir_struct
+            .cast::<u8>()
+            .add(listing_offset())
+            .cast::<*mut Listing>();
+        &mut **slot
+    }
+}
+
+unsafe extern "C" fn diropen_r(r: R, dir: *mut DirIter, path: *const c_char) -> *mut DirIter {
+    let real = original().diropen_r.unwrap();
+    let asked = unsafe { parts(path) };
+    let at = match asked.as_deref().map(|a| LINKS.resolve(a, true)) {
+        Some(Ok(at)) => Some(at),
+        Some(Err(e)) => {
+            fail(r, e);
+            return core::ptr::null_mut();
+        }
+        None => None,
+    };
+    let opened = match &at {
+        Some(at) => unsafe { real(r, dir, c(&render(at)).as_ptr()) },
+        None => unsafe { real(r, dir, path) },
+    };
+    if opened.is_null() {
+        return opened;
+    }
+    let links = at
+        .map(|at| LINKS.names(&at).iter().map(|n| c(n)).collect())
+        .unwrap_or_default();
+    let listing = Box::into_raw(Box::new(Listing {
+        links,
+        next: 0,
+        real_done: false,
+    }));
+    unsafe {
+        (*dir)
+            .dir_struct
+            .cast::<u8>()
+            .add(listing_offset())
+            .cast::<*mut Listing>()
+            .write(listing);
+    }
+    opened
+}
+
+unsafe extern "C" fn dirreset_r(r: R, dir: *mut DirIter) -> c_int {
+    let listing = unsafe { listing(dir) };
+    listing.next = 0;
+    listing.real_done = false;
+    unsafe { original().dirreset_r.unwrap()(r, dir) }
+}
+
+unsafe extern "C" fn dirnext_r(r: R, dir: *mut DirIter, name: *mut c_char, st: *mut Stat) -> c_int {
+    let listing = unsafe { listing(dir) };
+    while !listing.real_done {
+        let rc = unsafe { original().dirnext_r.unwrap()(r, dir, name, st) };
+        if rc == 0 {
+            if unsafe { CStr::from_ptr(name) }.to_bytes() == MANIFEST.as_bytes() {
+                continue;
+            }
+            return 0;
+        }
+        // libnx says ENOENT at the end of the folder; anything else is an error to report.
+        if errno(r) != super::ENOENT {
+            return rc;
+        }
+        listing.real_done = true;
+    }
+    // readdir's buffer is NAME_MAX + 1 (256) bytes: a longer name can't be listed.
+    let Some(link) = listing.links[listing.next..]
+        .iter()
+        .find(|link| link.as_bytes_with_nul().len() <= 256)
+    else {
+        listing.next = listing.links.len();
+        return fail(r, super::ENOENT);
+    };
+    listing.next = listing
+        .links
+        .iter()
+        .position(|l| core::ptr::eq(l, link))
+        .unwrap()
+        + 1;
+    let bytes = link.as_bytes_with_nul();
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), name.cast::<u8>(), bytes.len()) };
+    if !st.is_null() {
+        unsafe {
+            core::ptr::write_bytes(st, 0, 1);
+            (*st).st_mode = libc::S_IFLNK | 0o777;
+            (*st).st_nlink = 1;
+        }
+    }
+    0
+}
+
+unsafe extern "C" fn dirclose_r(r: R, dir: *mut DirIter) -> c_int {
+    unsafe {
+        let slot = (*dir)
+            .dir_struct
+            .cast::<u8>()
+            .add(listing_offset())
+            .cast::<*mut Listing>();
+        drop(Box::from_raw(slot.read()));
+        original().dirclose_r.unwrap()(r, dir)
+    }
+}
+
+/// Puts the SD card device with links in newlib's table, in place of libnx's. Call it once at
+/// boot, before any other thread runs and while no folder is open (a listing opened before has
+/// no room for the links' state). Existing links come from the manifests as paths reach them.
+pub fn install() -> Result<(), &'static str> {
+    use crate::logging::ffi::{STD_MAX, devoptab_list};
+    unsafe {
+        let index = FindDevice(c"sdmc:".as_ptr());
+        if index < 0 || index as usize >= STD_MAX {
+            return Err("no SD card device in newlib's table");
+        }
+        let slot = (&raw mut devoptab_list)
+            .cast::<*const DevOptab>()
+            .add(index as usize);
+        let sd = slot.read();
+        if sd.is_null() {
+            return Err("no SD card device in newlib's table");
+        }
+        let o = sd.read();
+        if o.open_r.is_none()
+            || o.stat_r.is_none()
+            || o.diropen_r.is_none()
+            || o.dirnext_r.is_none()
+        {
+            return Err("the SD card device lacks open, stat or listing");
+        }
+        if ORIGINAL.set(Original(o)).is_err() {
+            return Err("already installed");
+        }
+        let mut with_links = o;
+        macro_rules! wrap {
+            ($($field:ident),*) => {$(
+                with_links.$field = o.$field.map(|_| $field as _);
+            )*};
+        }
+        wrap!(
+            open_r, stat_r, unlink_r, chdir_r, rename_r, mkdir_r, diropen_r, dirreset_r, dirnext_r,
+            dirclose_r, statvfs_r, chmod_r, rmdir_r, utimes_r, pathconf_r, link_r
+        );
+        with_links.lstat_r = Some(lstat_r);
+        with_links.symlink_r = Some(symlink_r);
+        with_links.readlink_r = Some(readlink_r);
+        with_links.dir_state_size = listing_offset() + size_of::<*mut Listing>();
+        slot.write(Box::leak(Box::new(with_links)) as *const DevOptab);
+    }
+    Ok(())
+}

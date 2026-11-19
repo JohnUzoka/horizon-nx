@@ -15,6 +15,9 @@
 pub mod compat;
 pub mod lifecycle;
 pub mod logging;
+/// Symbolic links on the SD card (FAT has none), for the pack and mod overlays.
+#[cfg(any(target_os = "horizon", test))]
+pub mod vlinks;
 
 #[cfg(target_os = "horizon")]
 mod memory;
@@ -101,6 +104,18 @@ pub fn init() {
         // NAK's plat and ofold passes off, unless env.txt says otherwise
         // (nak_safe_default).
         nak_safe_default();
+        // Links on the SD card for the resource-pack and mod overlays (vlinks), unless
+        // HORIZON_NX_LINKS=0. After env.txt, while no other thread runs and no folder is open.
+        if std::env::var_os("HORIZON_NX_LINKS").is_none_or(|v| v != "0") {
+            match vlinks::install() {
+                Ok(()) => crate::logging::write_log_line(format_args!(
+                    "[Boot] SD card links on (resource packs and mods)"
+                )),
+                Err(e) => crate::logging::write_log_line(format_args!(
+                    "[Boot] SD card links NOT on: {e}; resource packs and mods won't load"
+                )),
+            }
+        }
         // Cores 0-2 for new threads unless HORIZON_NX_THREAD_CORES says otherwise (compat.rs);
         // before the profiler, so its thread follows the choice too.
         compat::thread_cores_from_env();
