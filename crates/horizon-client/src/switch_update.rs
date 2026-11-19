@@ -22,8 +22,9 @@ use std::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-/// The only repository updates come from.
-pub const REPO: &str = "JohnUzoka/horizon";
+/// The only repository updates come from: this fork's, whose releases carry its fixes (an
+/// upstream Switch release would replace them).
+pub const REPO: &str = "KoHaku743/horizon-nx";
 /// What a Switch release is tagged: `v<version>`, as `v0.1.0`.
 const TAG_PREFIX: &str = "v";
 /// `release.json`'s target.
@@ -65,8 +66,8 @@ impl std::fmt::Display for Version {
     }
 }
 
-/// This NRO's version: `HORIZON_SWITCH_VERSION` when it was built (`scripts/hx-release.sh` in the
-/// port's workshop); a development build has none, and any release updates it.
+/// This NRO's version: `HORIZON_SWITCH_VERSION` when it was built (the release build of
+/// `.github/workflows/switch-nro.yml`); a development build has none, and any release updates it.
 pub fn current_version() -> Version {
     option_env!("HORIZON_SWITCH_VERSION")
         .and_then(Version::parse)

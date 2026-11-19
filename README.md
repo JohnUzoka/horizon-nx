@@ -21,7 +21,7 @@ rebuilds it, fixes what broke on a real console, and adds Microsoft sign-in on t
 
 ## Status
 
-Tested on a Switch with Atmosphère, November 2026.
+Tested on a Switch with Atmosphère, November 2026. Current release: **v1.0.0**.
 
 | | |
 |---|---|
@@ -29,7 +29,10 @@ Tested on a Switch with Atmosphère, November 2026.
 | Joy-Con and touch screen | ✅ Works |
 | HOME button (leave and come back) | ✅ Works with Nintendo's HOME menu ([custom HOME menus](#the-console-freezes-when-i-press-home) can freeze) |
 | Microsoft sign-in on the title screen | ✅ Works (approved by Mojang) |
-| Online-mode servers | ❔ Need the sign-in above; not tested yet |
+| Multiplayer, online-mode servers included | ✅ Works (sign in first for online-mode servers) |
+| Server resource packs | ❌ Disconnects (for example Hypixel SkyBlock); being worked on |
+| Horizon mods | ❌ Not on the Switch yet; being worked on |
+| In-game updates | ✅ From this repository's releases (1.0.0 and later) |
 | Docked mode | ❔ Not tested yet |
 | Frame rate | Around 35–45 fps in handheld mode |
 | First start | Slow: a few minutes to the title screen, more to open a world the first time |

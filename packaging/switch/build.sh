@@ -15,7 +15,9 @@
 # `cargo build` arguments), FEATURES (horizon-client features; by default audio, controllers and
 # nx-allocator, which also links NVK), VERSION, AUTHOR, ICON (a 256x256 JPEG for the HOME menu),
 # HORIZON_SWITCH_BUILD (the build number the in-game updater compares: docs/switch-updates.md),
-# HORIZON_MSA_CLIENT_ID (the Azure app the title screen's Microsoft sign-in uses: msa.rs).
+# HORIZON_MSA_CLIENT_ID (the Azure app the title screen's Microsoft sign-in uses: msa.rs),
+# HORIZON_VERSION (the version the game shows) and HORIZON_SWITCH_VERSION (the one the in-game
+# updater compares; set both only for a release). ICON defaults to packaging/switch/icon.jpg.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -26,8 +28,9 @@ BEVY_HORIZON_REV=3eac779b232ee47cd0eb957676c64386ac7b0f1d
 MESA_SWITCH_REV=606441c90e459028a50fca352daebfc20211f890
 IMAGE=horizon-switch-toolchain:local
 ENGINE="${CONTAINER_ENGINE:-$(command -v docker >/dev/null && echo docker || echo podman)}"
-VERSION="${VERSION:-0.1.0}"
-AUTHOR="${AUTHOR:-Horizon contributors}"
+VERSION="${VERSION:-1.0.0}"
+AUTHOR="${AUTHOR:-KoHaku743}"
+ICON="${ICON:-$ROOT/packaging/switch/icon.jpg}"
 TITLE="${TITLE:-Horizon}"
 BIN=horizon-client
 OUT=target/aarch64-nintendo-horizon/release
@@ -80,6 +83,8 @@ nro() {
         -e HORIZON_NX_NVK_LIB=/src/bevy-horizon/nvk/lib \
         -e HORIZON_SWITCH_BUILD="${HORIZON_SWITCH_BUILD:-}" \
         -e HORIZON_MSA_CLIENT_ID="${HORIZON_MSA_CLIENT_ID:-}" \
+        -e HORIZON_VERSION="${HORIZON_VERSION:-}" \
+        -e HORIZON_SWITCH_VERSION="${HORIZON_SWITCH_VERSION:-}" \
         "${mounts[@]}" -w /src/horizon-nx "$IMAGE" \
         bash -euo pipefail -c '
             # std is its own workspace and does not see our [patch]; a config-file patch applies to
