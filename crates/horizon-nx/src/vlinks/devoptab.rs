@@ -246,7 +246,9 @@ unsafe fn through<T>(
         return f(path);
     };
     match LINKS.resolve(&asked, follow) {
-        Ok(real) if real == asked => f(path),
+        // Always the clean path, even with no link on it: libnx's own parser takes everything after
+        // the first `:`, so `sdmc:/switch/horizon/sdmc:/x` (what `std::path::absolute` makes of
+        // `sdmc:/x`, which Rust doesn't count as absolute) failed with EINVAL, and mods with it.
         Ok(real) => f(c(&render(&real)).as_ptr()),
         Err(e) => {
             fail(r, e);

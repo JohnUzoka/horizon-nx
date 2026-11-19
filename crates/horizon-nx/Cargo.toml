@@ -23,6 +23,10 @@ log = "0.4"
 [target.'cfg(target_os = "horizon")'.dependencies]
 # newlib's `struct stat` and constants (bevy-horizon's patched libc), for `vlinks`.
 libc = "0.2"
+# The TLSF heap under the allocator (allocator/tlsf_heap.rs); `unstable` only adds API
+# (`allocation_usable_size`), no nightly features.
+# Vendored (third_party/rlsf, 0.2.3) only to keep its GlobalTlsf, which needs mmap, off the Switch.
+rlsf = { path = "../../third_party/rlsf", default-features = false, features = ["unstable"] }
 
 [lints]
 workspace = true

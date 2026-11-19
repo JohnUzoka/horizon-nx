@@ -58,3 +58,10 @@ with Microsoft accounts
 The four-square Microsoft symbol in `launcher/src/microsoft.rs` reproduces the squares, positions and
 colours of Microsoft's official `ms-symbollockup_mssymbol_19.svg` from that page, unmodified. Microsoft
 and its logo are trademarks of the Microsoft group of companies; Horizon is not endorsed by Microsoft.
+
+## rlsf
+
+`third_party/rlsf` is [rlsf](https://github.com/yvt/rlsf) 0.2.3 by yvt, the TLSF allocator under the
+Switch build's memory allocator, changed only to leave its `mmap`-based global allocator out on the
+Switch (`third_party/rlsf/HORIZON.md`). It is licensed under MIT or Apache-2.0; both licenses are in
+that folder (`LICENSE-MIT`, `LICENSE-APACHE`).

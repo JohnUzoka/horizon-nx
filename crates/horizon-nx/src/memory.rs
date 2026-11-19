@@ -306,6 +306,11 @@ impl core::fmt::Display for MallocFigures {
                 mib(rust.malloc_large),
                 mib(rust.malloc_medium),
             )?;
+            write!(
+                f,
+                "; the TLSF heap has {:.1} MiB of pools from malloc",
+                mib(rust.heap_pools),
+            )?;
             if rust.large_fallbacks != 0 {
                 write!(
                     f,

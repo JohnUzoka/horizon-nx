@@ -15,17 +15,19 @@
 //! A large block the region can't place comes from malloc, and a small block malloc can't place
 //! goes to the region if one of its runs is free. The `[Memory]` lines count both.
 //!
-//! Blocks of up to 8 KiB, aligned to at most 16 bytes, go through a cache in front of malloc
+//! Below the region, Rust's blocks come from a TLSF heap (tlsf_heap.rs) that takes its memory
+//! from malloc in large pools: malloc's own `free` was half of the game's CPU time.
+//!
+//! Blocks of up to 8 KiB, aligned to at most 16 bytes, go through a cache in front of the heap
 //! (small_blocks.rs) unless `BH_ALLOC_CACHE=0`; blocks between that and [`LARGE`] go through a
 //! second cache (medium_blocks.rs) unless `BH_ALLOC_MEDIUM=0`.
 
 mod medium_blocks;
 mod small_blocks;
+mod tlsf_heap;
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-use std::alloc::System;
 
 use medium_blocks::Cache as MediumCache;
 use small_blocks::{Backend, Cache};
@@ -45,12 +47,6 @@ unsafe extern "C" {
     /// Frees a block, or the granules at the end of one, given the size asked for. Returns
     /// false, freeing nothing, when `ptr` isn't in the region.
     fn nouveau_horizon_region_free(ptr: *mut u8, size: usize) -> bool;
-    // newlib's (libc/stdlib/_mallocr.c). `malloc_usable_size` reads the block's own header and the
-    // next block's, without malloc's lock.
-    fn malloc(size: usize) -> *mut c_void;
-    fn calloc(count: usize, size: usize) -> *mut c_void;
-    fn free(ptr: *mut c_void);
-    fn malloc_usable_size(ptr: *mut c_void) -> usize;
 }
 
 #[global_allocator]
@@ -58,23 +54,26 @@ static GLOBAL: HorizonAllocator = HorizonAllocator;
 
 struct HorizonAllocator;
 
-/// The small-block cache's malloc.
+/// The caches' backend: the TLSF heap, every block aligned to the caches' [`MAX_ALIGN`].
 struct Newlib;
 
 impl Backend for Newlib {
     #[inline]
     unsafe fn alloc(size: usize, zeroed: bool) -> *mut u8 {
-        unsafe { if zeroed { calloc(1, size) } else { malloc(size) }.cast() }
+        match Layout::from_size_align(size, small_blocks::MAX_ALIGN) {
+            Ok(layout) => unsafe { tlsf_heap::alloc(layout, zeroed) },
+            Err(_) => core::ptr::null_mut(),
+        }
     }
 
     #[inline]
     unsafe fn free(ptr: *mut u8) {
-        unsafe { free(ptr.cast()) }
+        unsafe { tlsf_heap::free(ptr, small_blocks::MAX_ALIGN) }
     }
 
     #[inline]
     unsafe fn usable_size(ptr: *mut u8) -> usize {
-        unsafe { malloc_usable_size(ptr.cast()) }
+        unsafe { tlsf_heap::usable_size(ptr) }
     }
 
     /// The thread's local region (`tpidrro_el0`), which the kernel gives each thread, 0x200 bytes
@@ -132,6 +131,8 @@ pub(crate) struct Figures {
     pub(crate) malloc_medium: u64,
     pub(crate) large_fallbacks: usize,
     pub(crate) small_rescues: usize,
+    /// Bytes the TLSF heap took from malloc.
+    pub(crate) heap_pools: u64,
     pub(crate) cache: small_blocks::Stats,
     pub(crate) medium: medium_blocks::Stats,
 }
@@ -143,6 +144,7 @@ pub(crate) fn figures() -> Figures {
         malloc_medium: MALLOC_MEDIUM_BYTES.load(Relaxed) as u64,
         large_fallbacks: LARGE_FALLBACKS.load(Relaxed),
         small_rescues: SMALL_RESCUES.load(Relaxed),
+        heap_pools: tlsf_heap::POOL_BYTES.load(Relaxed) as u64,
         cache: CACHE.stats(),
         medium: MCACHE.stats(),
     }
@@ -190,13 +192,7 @@ unsafe fn region_alloc(layout: Layout, zeroed: bool) -> *mut u8 {
 }
 
 unsafe fn malloc_alloc(layout: Layout, zeroed: bool) -> *mut u8 {
-    let ptr = unsafe {
-        if zeroed {
-            System.alloc_zeroed(layout)
-        } else {
-            System.alloc(layout)
-        }
-    };
+    let ptr = unsafe { tlsf_heap::alloc(layout, zeroed) };
     if !ptr.is_null() {
         count_malloc(layout.size(), true);
     }
@@ -268,7 +264,7 @@ unsafe fn deallocate(ptr: *mut u8, layout: Layout) {
         return unsafe { MCACHE.free(ptr, class) };
     }
     count_malloc(layout.size(), false);
-    unsafe { System.dealloc(ptr, layout) }
+    unsafe { tlsf_heap::free(ptr, layout.align()) }
 }
 
 /// Shrinks a region block in place, freeing its granules past `new_rounded`.
@@ -367,9 +363,9 @@ unsafe impl GlobalAlloc for HorizonAllocator {
             }
             LARGE_FALLBACKS.fetch_add(1, Relaxed);
         }
-        let new = unsafe { System.realloc(ptr, layout, new_size) };
+        let new = unsafe { tlsf_heap::realloc(ptr, layout, new_size) };
         // A failed realloc leaves the block as it was.
-        let new = or_after_drain(new, || unsafe { System.realloc(ptr, layout, new_size) });
+        let new = or_after_drain(new, || unsafe { tlsf_heap::realloc(ptr, layout, new_size) });
         if !new.is_null() {
             count_malloc(layout.size(), false);
             count_malloc(new_size, true);
