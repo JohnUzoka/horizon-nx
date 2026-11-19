@@ -6,7 +6,7 @@ fn main() {
         println!("cargo:rustc-link-search=native=/opt/devkitpro/libnx/lib");
         println!("cargo:rustc-link-search=native=/opt/devkitpro/portlibs/switch/lib");
         println!("cargo:rustc-link-search=native=/opt/devkitpro/devkitA64/aarch64-none-elf/lib/pic");
-        println!("cargo:rustc-link-search=native=/opt/devkitpro/devkitA64/lib/gcc/aarch64-none-elf/16.1.0/pic");
+        println!("cargo:rustc-link-search=native={}/pic", gcc_dir().display());
         println!("cargo:rustc-link-lib=nx");
         println!("cargo:rustc-link-lib=sysbase");
         println!("cargo:rustc-link-lib=c");
@@ -16,6 +16,26 @@ fn main() {
             link_nvk();
         }
     }
+}
+
+/// devkitA64's GCC folder (libgcc): `lib/gcc/aarch64-none-elf/<version>`, whichever version the
+/// toolchain has (16.1.0 when devkitPro's packages are current; devkitPro's Docker image can be
+/// older), the newest if there are several.
+fn gcc_dir() -> PathBuf {
+    let root = PathBuf::from("/opt/devkitpro/devkitA64/lib/gcc/aarch64-none-elf");
+    let version = |p: &PathBuf| -> Vec<u32> {
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        name.split('.').map(|part| part.parse().unwrap_or(0)).collect()
+    };
+    std::fs::read_dir(&root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.join("pic").is_dir())
+        .max_by_key(version)
+        .unwrap_or_else(|| root.join("16.1.0"))
 }
 
 /// Links NVK as scripts/localize_nvk.sh leaves it: one object whose only global definitions are
