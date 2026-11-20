@@ -12,6 +12,12 @@ on:
         description: "Publish a GitHub release with the zip under this version tag (v0.1.0-nx.1); empty: build only"
         required: false
         default: ""
+      driver:
+        description: "Graphics driver: public (danfromtico/mesa-switch 606441c with bevy-horizon's patches) or johnuzoka (JohnUzoka/mesa-switch bevy-horizon 7789c1d, release 0.1.0's)"
+        required: false
+        default: public
+        type: choice
+        options: [public, johnuzoka]
   push:
     branches: [switch-build, switch-v010]
     # A version tag (v0.1.0-nx.1) also publishes a GitHub release with the zip; so does Run
@@ -28,7 +34,13 @@ concurrency:
 env:
   # The revisions packaging/switch/build.sh was written against.
   BEVY_HORIZON_REV: 3eac779b232ee47cd0eb957676c64386ac7b0f1d
-  MESA_SWITCH_REV: 606441c90e459028a50fca352daebfc20211f890
+  # The graphics driver (NVK): danfromtico's public mesa-switch, with bevy-horizon's patches applied
+  # by its build script, or JohnUzoka's mesa-switch at the revision release 0.1.0 linked (those
+  # patches and more already in it), picked with the `driver` input.
+  MESA_SWITCH_URL: ${{ inputs.driver == 'johnuzoka' && 'https://github.com/JohnUzoka/mesa-switch.git' || 'https://github.com/danfromtico/mesa-switch.git' }}
+  MESA_SWITCH_REV: ${{ inputs.driver == 'johnuzoka' && '7789c1de1d42120b3032696ad71d5b9a736a8d4f' || '606441c90e459028a50fca352daebfc20211f890' }}
+  # The public driver hangs the GPU with NAK's plat and ofold passes (horizon-nx lib.rs); 0.1.0's doesn't.
+  HORIZON_NX_NAK_SAFE: ${{ inputs.driver == 'johnuzoka' && '0' || '' }}
   # The Azure app for the title screen's Microsoft sign-in (crates/horizon-client-render/src/msa.rs).
   # A client ID is public: Microsoft's sign-in page shows it. Mojang has to approve it before
   # the Minecraft step accepts it.
@@ -83,8 +95,13 @@ jobs:
         if: steps.nvk.outputs.cache-hit != 'true'
         run: |
           set -o pipefail
-          git clone https://github.com/danfromtico/mesa-switch.git mesa-switch
+          git clone "$MESA_SWITCH_URL" mesa-switch
           git -C mesa-switch checkout --quiet "$MESA_SWITCH_REV"
+          if [ "${{ inputs.driver }}" = johnuzoka ]; then
+            # Its history already holds bevy-horizon's mesa-switch patches (and later changes to
+            # the same lines), so the build script must not apply them again.
+            rm -f bevy-horizon/patches/mesa-switch/*.patch
+          fi
           JOBS=4 horizon-nx/packaging/switch/build.sh nvk 2>&1 | tee -a build.log
 
       - name: Build horizon.nro

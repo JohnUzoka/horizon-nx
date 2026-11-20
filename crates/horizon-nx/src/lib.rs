@@ -168,6 +168,14 @@ pub const NAK_SAFE_DEBUG: &str = "-plat,-ofold";
 
 #[cfg(target_os = "horizon")]
 fn nak_safe_default() {
+    // A build linked with JohnUzoka's mesa-switch (the NVK of release 0.1.0, whose NAK passes
+    // played without hanging) keeps its driver's defaults: `HORIZON_NX_NAK_SAFE=0` at build time.
+    if option_env!("HORIZON_NX_NAK_SAFE") == Some("0") {
+        crate::logging::write_log_line(format_args!(
+            "[Boot] NAK_DEBUG left to the driver (built with HORIZON_NX_NAK_SAFE=0)"
+        ));
+        return;
+    }
     if std::env::var_os("NAK_DEBUG").is_some() {
         return;
     }

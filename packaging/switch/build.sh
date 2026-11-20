@@ -54,7 +54,7 @@ need_image() { "$ENGINE" image inspect "$IMAGE" >/dev/null 2>&1 || image; }
 
 nvk() {
     need_image
-    clone "$MESA_SWITCH" https://github.com/danfromtico/mesa-switch.git "$MESA_SWITCH_REV"
+    clone "$MESA_SWITCH" "${MESA_SWITCH_URL:-https://github.com/danfromtico/mesa-switch.git}" "$MESA_SWITCH_REV"
     (cd "$BEVY_HORIZON" && scripts/build_nvk.sh "$MESA_SWITCH" && scripts/localize_nvk.sh)
 }
 
@@ -82,6 +82,7 @@ nro() {
         -e CONFIG="$config" -e JOBS="${JOBS:-}" -e CARGO_ARGS="${CARGO_ARGS:-}" -e FEATURES="${FEATURES-audio,controllers,nx-allocator}" \
         -e HORIZON_NX_NVK_LIB=/src/bevy-horizon/nvk/lib \
         -e HORIZON_SWITCH_BUILD="${HORIZON_SWITCH_BUILD:-}" \
+        -e HORIZON_NX_NAK_SAFE="${HORIZON_NX_NAK_SAFE:-}" \
         -e HORIZON_MSA_CLIENT_ID="${HORIZON_MSA_CLIENT_ID:-}" \
         -e HORIZON_VERSION="${HORIZON_VERSION:-}" \
         -e HORIZON_SWITCH_VERSION="${HORIZON_SWITCH_VERSION:-}" \
