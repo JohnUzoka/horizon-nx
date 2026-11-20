@@ -13,7 +13,8 @@ checked against the real game by hundreds of differential tests. Horizon runs na
 with no Java and no emulation.
 
 The fork builds the Switch version in the open: the original port's build setup isn't public, so this repository
-rebuilds it, fixes what broke on a real console, and adds Microsoft sign-in on the console itself.
+rebuilds it, fixes what broke on a real console, and adds Microsoft sign-in, server resource packs, Horizon mods and
+much faster loading on the console itself.
 
 > **Unofficial.** Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.
 > This repository contains no Minecraft code, assets or game files: you need your own copy of Minecraft: Java Edition.
@@ -21,7 +22,7 @@ rebuilds it, fixes what broke on a real console, and adds Microsoft sign-in on t
 
 ## Status
 
-Tested on a Switch with Atmosphère, November 2026. Current release: **v1.0.0**.
+Tested on a Switch with Atmosphère, November 2026. Current release: **v1.2.0**.
 
 | | |
 |---|---|
@@ -30,17 +31,17 @@ Tested on a Switch with Atmosphère, November 2026. Current release: **v1.0.0**.
 | HOME button (leave and come back) | ✅ Works with Nintendo's HOME menu ([custom HOME menus](#the-console-freezes-when-i-press-home) can freeze) |
 | Microsoft sign-in on the title screen | ✅ Works (approved by Mojang) |
 | Multiplayer, online-mode servers included | ✅ Works (sign in first for online-mode servers) |
-| Server resource packs | ✅ Works in the test builds (Hypixel SkyBlock tested; about a minute to apply the first time); 1.0.0 disconnects |
-| Horizon mods (`.hmod`) | ✅ Works in the test builds; enable them in Options → Mods, then restart |
+| Server resource packs | ✅ Works (Hypixel SkyBlock tested; under a minute to apply) |
+| Horizon mods (`.hmod`) | ✅ Works: put them in `switch/horizon/horizon-mods/`, enable them in Options → Mods, then restart |
 | In-game updates | ✅ From this repository's releases (1.0.0 and later) |
 | Docked mode | ❔ Not tested yet |
-| Frame rate | Test builds: up to 60 fps with release 0.1.0's graphics driver; 1.1.0: around 30 fps |
-| Loading | Test builds: about 15 s to load after the first start (the first start packs the resources into one file in the background, about 20 minutes); 1.0.0: a few minutes |
+| Frame rate | ✅ Up to 60 fps in handheld mode |
+| Loading | ✅ About 15 s to the title screen. The very first start is slower: it compiles shaders and packs the resources into one file in the background (about 20 minutes, once) |
 
 ## What you need
 
 - A Nintendo Switch running **[Atmosphère](https://github.com/Atmosphere-NX/Atmosphere)** custom firmware.
-- About **1 GB free** on the SD card.
+- About **1.5 GB free** on the SD card (the resources, and the same resources packed into one file for fast loading).
 - A computer (Windows, macOS or Linux) to prepare the game files, and **your own copy of Minecraft: Java Edition**.
 - To play on online servers: the Microsoft account that owns Minecraft: Java Edition.
 
@@ -100,8 +101,10 @@ dot_clean -m "/Volumes/YOUR SD CARD"
 Horizon needs the memory of a full application, so **don't start it from the Album**. Hold **R** while starting
 any game to open the homebrew menu as an application, then choose Horizon. (A title override or a forwarder works too.)
 
-The first start is slow: the graphics driver compiles all of the game's shaders and keeps them on the SD card,
-so later starts are faster.
+The first start is slow: the graphics driver compiles all of the game's shaders and keeps them on the SD card, and
+once the game has loaded, it packs `resources/` into one file, `resources.hzpak` (about 520 MB), in the background
+(about 20 minutes; keep playing or leave it at the title screen). From the next start it loads in about 15 seconds.
+Keep the `resources` folder: the game still checks it and reads its largest files from it.
 
 ## Microsoft account
 
@@ -125,11 +128,13 @@ A text file `switch/horizon/env.txt`, next to `horizon.nro`, sets options at sta
 
 | Setting | What it does |
 |---|---|
-| `NAK_DEBUG=-plat,-ofold` | The graphics shader compiler's optimizations: the build's default. `-name` turns one off. See [the GPU hang](#the-game-closes-about-10-seconds-after-the-world-appears). |
+| `NAK_DEBUG=…` | The graphics shader compiler's optimizations; `-name` turns one off. Only for testing the driver. |
 | `MESA_SHADER_CACHE_DISABLE=true` | Compile every shader at every start instead of keeping them on the SD card. |
 | `HORIZON_MSA_CLIENT_ID=…` | A different Azure app for the Microsoft sign-in. |
 | `HORIZON_NX_CPU_BOOST=0` | Keep normal CPU clocks while loading (they're raised by default). |
 | `HORIZON_NX_LINKS=0` | Turn off the SD card links that resource packs and mods need (only to rule them out when something breaks). |
+| `HORIZON_NX_PACK=0` | Read the resources folder file by file instead of `resources.hzpak` (slow; only to rule the pack out). |
+| `BEVY_HORIZON_CPU_PROFILE=1` | Write `cpu-profile.txt`, where the processor's time goes, every 30 s (slows the game slightly). |
 
 ## Troubleshooting
 
@@ -143,10 +148,20 @@ macOS's hidden `._` files are in the resources folder. Run `dot_clean -m` on the
 
 ### The game closes about 10 seconds after the world appears
 
-The log shows `channel 2 lost: … (fifo idle timeout)`: the GPU hung. Two optimizations of the public Switch
-graphics driver's shader compiler, `plat` and `ofold`, each hang the GPU once terrain is drawn (found by turning
-them on one at a time on a console). Builds of this fork turn both off by default. If you set `NAK_DEBUG` in
-`env.txt`, keep `-plat,-ofold` in it.
+The log shows `channel 2 lost: … (fifo idle timeout)`: the GPU hung. That happened with versions 1.0.0 and 1.1.0,
+built with the public graphics driver, when two of its shader optimizations (`plat`, `ofold`) were on. 1.2.0 uses
+release 0.1.0's driver, which runs them without hanging. If it happens anyway, remove `NAK_DEBUG` from `env.txt`.
+
+### Loading is slow every time
+
+The resources pack (`switch/horizon/resources.hzpak`) isn't in use: the log says why on its `[Pack]` line. It's
+built once, about 20 minutes after the first start; if you quit before `[Pack] done`, it's built again next time.
+Preparing the resources again on your computer makes the game pack them again. Deleting `resources.hzpak` is safe.
+
+### A server's resource pack disconnects me with "Configuration took too long"
+
+The first time with a new pack, the game builds its files (and a mod's data, with mods on); a large pack can take
+longer than the server waits. Join again: the second time it's ready.
 
 ### The console freezes when I press HOME
 
@@ -169,12 +184,17 @@ packaging/switch/build.sh all     # the toolchain image, the graphics driver (sl
 ```
 
 It clones [bevy-horizon](https://github.com/JohnUzoka/bevy-horizon) (the Switch target, toolchain image and
-patched libraries) and [mesa-switch](https://github.com/danfromtico/mesa-switch) (the graphics driver) next to the
-repository. The result is `target/aarch64-nintendo-horizon/release/horizon.nro`. Every push to `switch-v010` runs
-the same build in [GitHub Actions](.github/workflows/switch-nro.yml); its log is also kept on the `ci-logs`
-branch. To publish a release, run the "Switch NRO" workflow by hand (**Run workflow**) with a version in
-`release` (for example `v0.1.0-nx.2`): it builds, tags the commit and attaches the zip. Details:
-[docs/switch.md](docs/switch.md).
+patched libraries) next to the repository. The result is `target/aarch64-nintendo-horizon/release/horizon.nro`.
+
+The graphics driver comes from [JohnUzoka/mesa-switch](https://github.com/JohnUzoka/mesa-switch) at the revision
+release 0.1.0 used (`7789c1d`): the same game built with the public driver ([danfromtico/mesa-switch](https://github.com/danfromtico/mesa-switch)
+`606441c`) runs at about 30 fps instead of 60. CI builds JohnUzoka's by default; the "Switch NRO" workflow's
+`driver` input picks `public` instead.
+
+Every push to `switch-v010` runs the same build in [GitHub Actions](.github/workflows/switch-nro.yml); its log and
+the build's function symbols (for naming the offsets in a `cpu-profile.txt`) are kept on the `ci-logs` branch. To
+publish a release, run the "Switch NRO" workflow by hand (**Run workflow**) with a version in `release` (for
+example `v1.3.0`): it builds, tags the commit and attaches the zip. Details: [docs/switch.md](docs/switch.md).
 
 ### Branches
 
@@ -183,6 +203,7 @@ branch. To publish a release, run the "Switch NRO" workflow by hand (**Run workf
 | **`switch-v010`** | **The one to use.** The source of the original port's release 0.1.0, with this fork's build setup and fixes. |
 | `switch` | The original port's newer development branch. It builds, but on a console it loads 2–3× slower and doesn't run well. |
 | `switch-build` | The build setup's first version, on top of `switch`. |
+| `pr/switch-shared-socket`, `pr/switch-controller-tutorial`, `pr/switch-packaging-ci` | Fixes and the build setup offered back to the original port, on top of its `switch` branch. |
 | `switch-skip-mac-metadata`, `switch-portable-data-file` | Fixes for macOS `._` files and a data file that works from the SD card; not yet moved to `switch-v010`. |
 | `ci-logs` | The CI build logs. |
 
@@ -190,10 +211,14 @@ branch. To publish a release, run the "Switch NRO" workflow by hand (**Run workf
 
 - **A public build:** `packaging/switch/` and the patched graphics, window and network libraries in `third_party/`,
   which the original port built in a private setup.
-- **GPU hang fixed:** the shader compiler's `plat` and `ofold` optimizations are off by default (`crates/horizon-nx`).
+- **60 fps:** built with release 0.1.0's graphics driver (JohnUzoka/mesa-switch `7789c1d`) instead of the public one.
 - **HOME:** the game waits in the background without drawing instead of asking the system to suspend it.
 - **Microsoft sign-in on the console** (`crates/horizon-client-render/src/msa.rs`, the title screen's account screen).
-- **No mimalloc on the Switch:** the console's own allocator is used.
+- **A faster memory allocator:** the Switch's own (newlib's malloc) took about half of the game's CPU time; Rust's
+  blocks now come from a TLSF heap (`crates/horizon-nx/src/allocator/tlsf_heap.rs`, [rlsf](https://github.com/yvt/rlsf)).
+- **Resources in one file:** each file opened on the SD card costs about 10 ms, and the resources are 28,000 files.
+  `crates/horizon-nx/src/vlinks/pack.rs` packs them into `resources.hzpak` and serves opens, listings and reads from
+  it, keeping the folder as the source of truth: loading went from about 3.5 minutes to 15 seconds.
 - **Links on the SD card:** resource packs and mods are folders of links into the game files, which the SD card's
   file system (FAT) can't store. `crates/horizon-nx/src/vlinks` keeps each folder's links in a small `.hzlinks`
   file in it and makes the SD card's device follow them, so packs and mods load without copying ~650 MB.
@@ -204,7 +229,8 @@ branch. To publish a release, run the "Switch NRO" workflow by hand (**Run workf
 - **The Switch port**: [JohnUzoka](https://github.com/JohnUzoka) ([horizon-nx](https://github.com/JohnUzoka/horizon-nx),
   [bevy-horizon](https://github.com/JohnUzoka/bevy-horizon)).
 - **The Switch graphics driver**: [mesa-switch](https://github.com/danfromtico/mesa-switch) by danfromtico and
-  NaGaa95, built on Mesa's NVK.
+  NaGaa95, built on Mesa's NVK, with [JohnUzoka's changes](https://github.com/JohnUzoka/mesa-switch).
+- **The TLSF allocator**: [rlsf](https://github.com/yvt/rlsf) by yvt.
 - **The Switch homebrew toolchain**: [devkitPro](https://devkitpro.org) and [libnx](https://github.com/switchbrew/libnx).
 - **This fork**: [KoHaku743](https://github.com/KoHaku743).
 
