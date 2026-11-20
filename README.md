@@ -22,17 +22,18 @@ much faster loading on the console itself.
 
 ## Status
 
-Tested on a Switch with Atmosphère, November 2026. Current release: **v1.2.0**.
+Tested on a Switch with Atmosphère, November 2026. Current release: **v1.3.0**.
 
 | | |
 |---|---|
 | Single player: create and play worlds | ✅ Works |
-| Joy-Con and touch screen | ✅ Works |
+| Joy-Con and touch screen | ✅ Works: touch in menus and on the keyboard; gyro aiming (off by default) |
 | HOME button (leave and come back) | ✅ Works with Nintendo's HOME menu ([custom HOME menus](#the-console-freezes-when-i-press-home) can freeze) |
 | Microsoft sign-in on the title screen | ✅ Works (approved by Mojang) |
 | Multiplayer, online-mode servers included | ✅ Works (sign in first for online-mode servers) |
-| Server resource packs | ✅ Works (Hypixel SkyBlock tested; under a minute to apply) |
-| Horizon mods (`.hmod`) | ✅ Works: put them in `switch/horizon/horizon-mods/`, enable them in Options → Mods, then restart |
+| Server resource packs | ✅ Works (Hypixel SkyBlock tested): under a minute the first time, about 7 s after that |
+| Clickable chat (server buttons, links) | ✅ Works: open the chat and tap (Hypixel SkyBlock's NPC choices tested) |
+| Horizon mods (`.hmod`) | ✅ Works: install them from Options → Mods → Get Mods (or put them in `switch/horizon/horizon-mods/` and enable them in Options → Mods), then restart. Many of the registry's mods need a newer Horizon than this one; Get Mods says which |
 | In-game updates | ✅ From this repository's releases (1.0.0 and later) |
 | Docked mode | ❔ Not tested yet |
 | Frame rate | ✅ Up to 60 fps in handheld mode |
@@ -161,7 +162,8 @@ Preparing the resources again on your computer makes the game pack them again. D
 ### A server's resource pack disconnects me with "Configuration took too long"
 
 The first time with a new pack, the game builds its files (and a mod's data, with mods on); a large pack can take
-longer than the server waits. Join again: the second time it's ready.
+longer than the server waits. Join again: the second time it's ready. After a join, the pack is bundled into one file
+next to it in the background (`.horizon-cache/resourcepacks/*.hzpak`), and later joins apply it in seconds.
 
 ### The console freezes when I press HOME
 
@@ -203,7 +205,7 @@ example `v1.3.0`): it builds, tags the commit and attaches the zip. Details: [do
 | **`switch-v010`** | **The one to use.** The source of the original port's release 0.1.0, with this fork's build setup and fixes. |
 | `switch` | The original port's newer development branch. It builds, but on a console it loads 2–3× slower and doesn't run well. |
 | `switch-build` | The build setup's first version, on top of `switch`. |
-| `pr/switch-shared-socket`, `pr/switch-controller-tutorial`, `pr/switch-packaging-ci` | Fixes and the build setup offered back to the original port, on top of its `switch` branch. |
+| `pr/*` | Fixes and features offered back to the original port as pull requests (socket sharing, the controller tutorial, the build setup, the app icon, the keyboard's touch, gyro aiming, loading diagnostics on its `switch` branch; Microsoft sign-in on its `switch-release` line). |
 | `switch-skip-mac-metadata`, `switch-portable-data-file` | Fixes for macOS `._` files and a data file that works from the SD card; not yet moved to `switch-v010`. |
 | `ci-logs` | The CI build logs. |
 
@@ -219,6 +221,12 @@ example `v1.3.0`): it builds, tags the commit and attaches the zip. Details: [do
 - **Resources in one file:** each file opened on the SD card costs about 10 ms, and the resources are 28,000 files.
   `crates/horizon-nx/src/vlinks/pack.rs` packs them into `resources.hzpak` and serves opens, listings and reads from
   it, keeping the folder as the source of truth: loading went from about 3.5 minutes to 15 seconds.
+- **Server resource packs in one file too:** a pack's overlay folder is bundled the same way after the first join
+  (`.horizon-cache/resourcepacks/<hash>.hzpak`), so joining again applies it in about 7 s instead of 40.
+- **Get Mods:** Horizon's mod registry in the game (`crates/horizon-client/src/game/mod_browser.rs`): content mods and
+  resource packs, checked against the registry before they're installed.
+- **Switch controls:** touch on Horizon's on-screen keyboard (the default on the Switch), gyro aiming
+  (`crates/horizon-nx/src/motion.rs`), and server click actions in chat (`ClickEvent.Custom`).
 - **Links on the SD card:** resource packs and mods are folders of links into the game files, which the SD card's
   file system (FAT) can't store. `crates/horizon-nx/src/vlinks` keeps each folder's links in a small `.hzlinks`
   file in it and makes the SD card's device follow them, so packs and mods load without copying ~650 MB.
