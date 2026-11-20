@@ -56,6 +56,19 @@ pub use lifecycle::{
 pub use logging::nro_path;
 pub use logging::{flush_switch_logs, init_switch_logging, nro_dir};
 
+/// Runs the calling thread just ahead of the game's own threads (which start at priority 0x3b):
+/// for a thread that mostly waits on the network (a download), so it isn't left waiting for a
+/// core while world generation and meshing keep every core busy. Equal priorities on Horizon
+/// don't share a core by turns. Whether the kernel took it.
+#[cfg(target_os = "horizon")]
+pub fn favour_waiting_thread() -> bool {
+    unsafe extern "C" {
+        fn svcSetThreadPriority(handle: u32, priority: u32) -> u32;
+    }
+    // SAFETY: the calling thread's own pseudo-handle; no pointers.
+    unsafe { svcSetThreadPriority(0xFFFF_8000, 0x3a) == 0 }
+}
+
 /// One line on the malloc heap: what malloc has in use and has taken from the heap, and how
 /// much of the heap nvmap objects hold. On the Switch that one heap holds everything: the
 /// game's allocations and, with the `vulkan` feature, every GPU buffer and image. Walks the

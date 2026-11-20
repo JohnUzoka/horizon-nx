@@ -226,6 +226,8 @@ impl Game<'_> {
         let spawned = std::thread::Builder::new()
             .name("mod-index".into())
             .spawn(move || {
+                #[cfg(target_os = "horizon")]
+                horizon_nx::favour_waiting_thread();
                 let index = fetch(INDEX_URL, INDEX_MAX).and_then(|body| {
                     let text = String::from_utf8(body).map_err(|e| e.to_string())?;
                     // An entry newer than this build (a native mod's new format) must not hide
@@ -340,9 +342,18 @@ impl Game<'_> {
         let spawned = std::thread::Builder::new()
             .name("mod-check".into())
             .spawn(move || {
+                #[cfg(target_os = "horizon")]
+                horizon_nx::favour_waiting_thread();
                 for (p, v) in mods {
+                    let started = Instant::now();
                     let check =
                         known(&v).unwrap_or_else(|| download_and_check(&index, &p, &v, "check"));
+                    log::info!(
+                        "Horizon: Get Mods: checked {} ({} KB) in {:.1} s",
+                        p.id,
+                        v.file.size / 1000,
+                        started.elapsed().as_secs_f64()
+                    );
                     if send.send((p.id.clone(), check)).is_err() {
                         return;
                     }
@@ -382,6 +393,8 @@ impl Game<'_> {
         let spawned = std::thread::Builder::new()
             .name("mod-install".into())
             .spawn(move || {
+                #[cfg(target_os = "horizon")]
+                horizon_nx::favour_waiting_thread();
                 let done = install(&index, &p, &v, &dest).map(|()| match kind {
                     BrowserKind::Mods => {
                         format!("{name} is installed and on: restart Horizon to play with it.")
@@ -433,13 +446,10 @@ impl Game<'_> {
         while let Some(receive) = &self.mods.browser.checking {
             match receive.try_recv() {
                 Ok((id, check)) => {
-                    let installed = self
-                        .ui
-                        .options
-                        .browser
-                        .entries
-                        .iter()
-                        .any(|e| e.id == id && e.state == BrowserState::Installing);
+                    let installed = self.ui.options.browser.entries.iter().any(|e| {
+                        e.id == id
+                            && matches!(e.state, BrowserState::Installing | BrowserState::Installed)
+                    });
                     if installed {
                         continue;
                     }
