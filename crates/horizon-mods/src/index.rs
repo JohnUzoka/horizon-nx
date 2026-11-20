@@ -233,6 +233,55 @@ impl Index {
         Ok(index)
     }
 
+    /// [`Index::parse`] that keeps going past projects it can't read: each project is checked
+    /// alone and one that fails is left out, with why. For a reader that offers only some kinds
+    /// (the game's own Get Mods page) and must not lose them to an entry of a kind, or a format,
+    /// newer than this build. A modpack is checked with the rest of the index (its mods).
+    pub fn parse_lenient(text: &str) -> Result<(Index, Vec<String>), String> {
+        #[derive(Deserialize)]
+        struct Head {
+            schema: u32,
+        }
+        let head: Head = serde_json::from_str(text).map_err(|e| format!("not a mod index: {e}"))?;
+        if head.schema > SCHEMA {
+            return Err(format!(
+                "the mod index is schema {}; this build reads {SCHEMA}: update Horizon",
+                head.schema
+            ));
+        }
+        let mut index: Index = serde_json::from_str(text).map_err(|e| format!("mod index: {e}"))?;
+        let mut skipped = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        index.projects.retain(|p| {
+            // Alone: a modpack's mods are checked when it is installed, not here.
+            let mut alone = p.clone();
+            alone.versions.iter_mut().for_each(|v| v.requires.clear());
+            let checked = Index {
+                schema: head.schema,
+                generated: String::new(),
+                projects: vec![alone],
+                revoked: Vec::new(),
+            }
+            .check()
+            .and_then(|()| {
+                seen.insert(p.id.clone())
+                    .then_some(())
+                    .ok_or_else(|| format!("{}: listed twice", p.id))
+            });
+            match checked {
+                Ok(()) => true,
+                Err(e) => {
+                    skipped.push(e);
+                    false
+                }
+            }
+        });
+        index
+            .revoked
+            .retain(|r| r.sha256.as_deref().is_none_or(|h| hex64(h).is_ok()));
+        Ok((index, skipped))
+    }
+
     /// Every rule a reader relies on: unique valid ids, at least one
     /// version each, plain file names with the kind's extension, `https`
     /// URLs, hex hashes, keys and signatures that decode, and each

@@ -257,3 +257,21 @@ fn shader_packs_pass_the_game_s_own_check() {
     assert_eq!(Kind::Shader.extension(), Some("hshader"));
     assert!(open(&Kind::Shader).is_ok());
 }
+
+#[test]
+fn a_lenient_reader_leaves_out_what_it_cant_read_and_keeps_the_rest() {
+    let text = std::fs::read_to_string(fixtures().join("index-v1.json")).unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let projects = json["projects"].as_array_mut().unwrap();
+    let total = projects.len();
+    let broken = projects[0]["id"].as_str().unwrap().to_owned();
+    // A file name this build doesn't take for its kind (a newer format's).
+    projects[0]["versions"][0]["file"]["name"] = "newer-format.bin".into();
+    let text = json.to_string();
+    assert!(Index::parse(&text).is_err());
+    let (index, skipped) = Index::parse_lenient(&text).unwrap();
+    assert_eq!(index.projects.len(), total - 1);
+    assert!(index.project(&broken).is_none());
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert!(skipped[0].starts_with(&broken));
+}

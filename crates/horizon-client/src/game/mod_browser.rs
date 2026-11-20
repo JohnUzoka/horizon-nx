@@ -160,7 +160,16 @@ impl Game<'_> {
             .spawn(move || {
                 let index = fetch(INDEX_URL, INDEX_MAX).and_then(|body| {
                     let text = String::from_utf8(body).map_err(|e| e.to_string())?;
-                    Index::parse(&text)
+                    // An entry newer than this build (a native mod's new format) must not hide
+                    // the rest: it is left out, with why in the log.
+                    let (index, skipped) = Index::parse_lenient(&text)?;
+                    for why in skipped.iter().take(5) {
+                        log::info!("Horizon: Get Mods: left out {why}");
+                    }
+                    if skipped.len() > 5 {
+                        log::info!("Horizon: Get Mods: {} more left out", skipped.len() - 5);
+                    }
+                    Ok(index)
                 });
                 let _ = send.send(index);
             });
