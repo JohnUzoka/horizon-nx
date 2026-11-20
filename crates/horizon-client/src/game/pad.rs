@@ -359,7 +359,13 @@ impl Game<'_> {
             if !settings.gyro.aims(held("key.attack"), held("key.use")) {
                 return (0.0, 0.0);
             }
-            gamepad::gyro_delta(m.rotation, self.pad.gyro_up, settings, seconds, self.scoping())
+            gamepad::gyro_delta(
+                m.rotation,
+                self.pad.gyro_up,
+                settings,
+                seconds,
+                self.scoping(),
+            )
         }
         #[cfg(not(target_os = "horizon"))]
         {
