@@ -205,8 +205,18 @@ fn object_style(o: &serde_json::Map<String, Value>) -> Style {
     style.font = o.get("font").and_then(crate::text::font_id);
     // ClickEvent.CODEC: the actions a chat line acts on here. A component
     // from a server never opens a file.
-    if let Some(e) = o.get("click_event").and_then(Value::as_object) {
-        let text = |k: &str| e.get(k).and_then(Value::as_str).map(str::to_owned);
+    //
+    // The names before 1.21.5 (`clickEvent`, its argument in `value`) are read too: some servers
+    // still send them to new clients (Hypixel's "[Yes!]" through its proxy), and vanilla reads
+    // nothing there, so the button did nothing.
+    let click = o.get("click_event").or_else(|| o.get("clickEvent"));
+    if let Some(e) = click.and_then(Value::as_object) {
+        let text = |k: &str| {
+            e.get(k)
+                .or_else(|| e.get("value"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
         style.click = match e.get("action").and_then(Value::as_str) {
             // ClickEvent.OpenUrl.CODEC: ExtraCodecs.UNTRUSTED_URI allows http and
             // https only, the scheme in any case (Util.parseAndValidateUntrustedUri).
@@ -238,10 +248,11 @@ fn object_style(o: &serde_json::Map<String, Value>) -> Style {
         };
     }
     // HoverEvent.ShowText, ShowItem and ShowEntity.
-    if let Some(e) = o.get("hover_event").and_then(Value::as_object) {
+    let hover = o.get("hover_event").or_else(|| o.get("hoverEvent"));
+    if let Some(e) = hover.and_then(Value::as_object) {
         match e.get("action").and_then(Value::as_str) {
             Some("show_text") => {
-                if let Some(value) = e.get("value") {
+                if let Some(value) = e.get("value").or_else(|| e.get("contents")) {
                     style.hover = Some(Box::new(to_text(value, &mut |s| Text::literal(s))));
                 }
             }
@@ -442,6 +453,28 @@ pub fn name_text(tag: &Tag) -> Text {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_style_click_and_hover_events_are_read() {
+        let old = serde_json::json!({"text": "Select an option: ", "extra": [{
+            "text": "[Yes!]",
+            "clickEvent": {"action": "run_command", "value": "/selectnpcoption enid r_1_1"},
+            "hoverEvent": {"action": "show_text", "value": "Click"}
+        }]});
+        let text = to_text(&old, &mut |_| Text::empty());
+        let yes = &text.spans[1].style;
+        assert_eq!(
+            yes.click,
+            Some(crate::text::ClickEvent::RunCommand(
+                "/selectnpcoption enid r_1_1".into()
+            ))
+        );
+        assert!(yes.hover.is_some());
+        let new = serde_json::json!({"text": "[Yes!]",
+            "click_event": {"action": "run_command", "command": "/selectnpcoption enid r_1_1"}});
+        let text = to_text(&new, &mut |_| Text::empty());
+        assert_eq!(text.spans[0].style.click, yes.click);
+    }
 
     #[test]
     fn shadow_color_accepts_packed_and_rgba_styles() {

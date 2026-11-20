@@ -702,6 +702,11 @@ impl Chat {
         }
         None
     }
+    /// The chat line under (`x`, `y`) as a component, for the log.
+    pub fn component_at(&self, height: i32, x: f64, y: f64) -> Option<serde_json::Value> {
+        self.line_at(height, x, y)
+            .map(|(line, _)| line.content.component())
+    }
     /// Whether the cursor is on a line's indicator bar while chat is focused
     /// (`DrawingFocusedGraphicsAccess.handleTag`), whose tooltip is the
     /// message tag's text.

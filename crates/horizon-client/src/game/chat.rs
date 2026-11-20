@@ -989,6 +989,18 @@ impl Game<'_> {
                 None => "text with no click action".into(),
             }
         );
+        if style.click.is_none()
+            && let Some(line) =
+                self.ui
+                    .chat
+                    .component_at(height as i32, cursor.0 as f64, cursor.1 as f64)
+        {
+            let line = line.to_string();
+            log::info!(
+                "Horizon: the line clicked: {}",
+                line.chars().take(800).collect::<String>()
+            );
+        }
         // ChatScreen.handleComponentClicked: with Shift held only an
         // insertion acts, else only the click event.
         if self.has_shift_down() {
