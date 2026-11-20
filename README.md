@@ -34,7 +34,7 @@ Tested on a Switch with Atmosphère, November 2026. Current release: **v1.0.0**.
 | Horizon mods (`.hmod`) | ✅ Works in the test builds; enable them in Options → Mods, then restart |
 | In-game updates | ✅ From this repository's releases (1.0.0 and later) |
 | Docked mode | ❔ Not tested yet |
-| Frame rate | Around 35–45 fps in handheld mode |
+| Frame rate | Test builds: up to 60 fps with release 0.1.0's graphics driver; 1.1.0: around 30 fps |
 | Loading | Test builds: about 15 s to load after the first start (the first start packs the resources into one file in the background, about 20 minutes); 1.0.0: a few minutes |
 
 ## What you need
