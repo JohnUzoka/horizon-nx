@@ -633,6 +633,10 @@ impl Game<'_> {
             Mode::ConfirmUpdate { version } => {
                 json!({ "mode": "confirm-update", "version": version.to_string() })
             }
+            Mode::Account => json!({
+                "mode": "account",
+                "signed_in": horizon_client::auth::current().map(|a| a.name.clone()),
+            }),
         }
     }
 
