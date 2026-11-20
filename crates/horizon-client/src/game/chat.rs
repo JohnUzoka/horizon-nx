@@ -986,6 +986,8 @@ impl Game<'_> {
                 Some(ClickEvent::ShowDialog(_)) => "shows a dialog".into(),
                 Some(ClickEvent::OpenFile(_)) => "opens a file".into(),
                 Some(ClickEvent::ChangePage(_)) => "changes the page".into(),
+                Some(ClickEvent::Custom { id, .. }) => format!("a server action ({id})"),
+                Some(ClickEvent::Unknown(raw)) => format!("an unknown action: {raw}"),
                 None => "text with no click action".into(),
             }
         );
@@ -1029,8 +1031,11 @@ impl Game<'_> {
             // Screen.defaultHandleGameClickEvent: the dialog opens over the
             // screen, and closes back to it.
             Some(ClickEvent::ShowDialog(dialog)) => self.show_dialog_ref(&dialog),
+            // Screen.defaultHandleGameClickEvent: the server hears it
+            // (ServerboundCustomClickActionPacket).
+            Some(ClickEvent::Custom { id, payload }) => self.send_custom_click(&id, payload),
             // Screen.defaultHandleClickEvent: a page link means nothing in chat.
-            Some(ClickEvent::ChangePage(_)) | None => {}
+            Some(ClickEvent::ChangePage(_) | ClickEvent::Unknown(_)) | None => {}
         }
     }
     /// `Screen.clickUrlAction`: nothing with Web Links off, else the link

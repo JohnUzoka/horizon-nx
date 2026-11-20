@@ -159,7 +159,9 @@ impl Game<'_> {
             ClickEvent::ShowDialog(dialog) => self.show_dialog_ref(&dialog),
             // SuggestCommand's insertText does nothing on a book; a server's
             // text never opens a file.
-            ClickEvent::SuggestCommand(_) | ClickEvent::OpenFile(_) => {}
+            ClickEvent::SuggestCommand(_) | ClickEvent::OpenFile(_) | ClickEvent::Unknown(_) => {}
+            // Screen.defaultHandleGameClickEvent: the server hears it.
+            ClickEvent::Custom { id, payload } => self.send_custom_click(&id, payload),
         }
     }
     /// `WritableBookItem.use` / `WrittenBookItem.use` (`Player.openItemGui`).

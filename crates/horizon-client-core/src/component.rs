@@ -244,7 +244,14 @@ fn object_style(o: &serde_json::Map<String, Value>) -> Style {
             Some("show_dialog") => e.get("dialog").map(|dialog| {
                 crate::text::ClickEvent::ShowDialog(crate::scoreboard::json_to_tag(dialog))
             }),
-            _ => None,
+            // ClickEvent.Custom.CODEC: an id and an optional payload, for the server.
+            Some("custom") => text("id").map(|id| crate::text::ClickEvent::Custom {
+                id,
+                payload: e.get("payload").map(crate::scoreboard::json_to_tag),
+            }),
+            _ => Some(crate::text::ClickEvent::Unknown(
+                Value::Object(e.clone()).to_string(),
+            )),
         };
     }
     // HoverEvent.ShowText, ShowItem and ShowEntity.

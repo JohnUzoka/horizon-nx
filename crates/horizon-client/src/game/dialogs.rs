@@ -229,6 +229,12 @@ impl Game<'_> {
     }
 
     /// A `show_dialog` click event's dialog: a registry id or the dialog itself.
+    /// `ClickEvent.Custom` from a text (chat, a book): the server hears its id and payload.
+    pub(super) fn send_custom_click(&mut self, id: &str, payload: Option<Tag>) {
+        if let Some(r) = &self.remote {
+            r.session.send_custom_click(id, payload);
+        }
+    }
     pub(super) fn show_dialog_ref(&mut self, dialog: &Tag) {
         match dialog {
             Tag::String(id) => {
@@ -635,7 +641,8 @@ impl Game<'_> {
                 Some(ClickEvent::RunCommand(command)) => Click::RunCommand(command),
                 Some(ClickEvent::CopyToClipboard(value)) => Click::CopyToClipboard(value),
                 Some(ClickEvent::ShowDialog(dialog)) => Click::ShowDialog(dialog),
-                Some(ClickEvent::OpenFile(_)) | None => return Ok(()),
+                Some(ClickEvent::Custom { id, payload }) => Click::Custom { id, payload },
+                Some(ClickEvent::OpenFile(_) | ClickEvent::Unknown(_)) | None => return Ok(()),
             };
             let after = open.dialog.after_action;
             return self.run_dialog_action(Some(click), after);

@@ -56,6 +56,15 @@ pub enum ClickEvent {
     /// A local file to open with the system handler.
     /// Only allow this in locally constructed messages, never server/LAN text.
     OpenFile(String),
+    /// `ClickEvent.Custom`: sent back to the server as is
+    /// (`ServerboundCustomClickActionPacket`), which decides what it does.
+    Custom {
+        id: String,
+        payload: Option<horizon_world::nbt::Tag>,
+    },
+    /// An action this game doesn't know, kept as it came (the log shows it); a click does
+    /// nothing.
+    Unknown(String),
 }
 
 /// A non-character `minecraft:object` embedded in a text component.
@@ -582,6 +591,17 @@ fn style_json(style: &Style) -> Vec<(String, Value)> {
                 "dialog": crate::scoreboard::tag_to_json(dialog),
             }),
             ClickEvent::OpenFile(path) => json!({ "action": "open_file", "path": path }),
+            ClickEvent::Custom { id, payload } => match payload {
+                Some(payload) => json!({
+                    "action": "custom",
+                    "id": id,
+                    "payload": crate::scoreboard::tag_to_json(payload),
+                }),
+                None => json!({ "action": "custom", "id": id }),
+            },
+            ClickEvent::Unknown(raw) => {
+                serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.clone()))
+            }
         };
         out.push(("click_event".to_owned(), event));
     }
