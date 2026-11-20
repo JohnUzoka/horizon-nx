@@ -96,7 +96,12 @@ pub(super) struct MenuCursor {
 impl MenuCursor {
     /// The startup title's pad state, carried into the game at the handoff so the
     /// focus stays where it was (`startup_menu.rs`).
-    pub(super) fn carry(&mut self, focus: Option<Target>, pos: Option<(f32, f32)>, os_hidden: bool) {
+    pub(super) fn carry(
+        &mut self,
+        focus: Option<Target>,
+        pos: Option<(f32, f32)>,
+        os_hidden: bool,
+    ) {
         self.focus = focus;
         self.pos = pos;
         self.os_hidden = os_hidden;
@@ -154,7 +159,10 @@ pub(super) fn pointer_moved(batch: &HudBatch, at: (f32, f32)) -> WindowEvent {
     );
     WindowEvent::CursorMoved {
         device_id: DeviceId::dummy(),
-        position: PhysicalPosition::new(f64::from(at.0 * batch.scale), f64::from(at.1 * batch.scale)),
+        position: PhysicalPosition::new(
+            f64::from(at.0 * batch.scale),
+            f64::from(at.1 * batch.scale),
+        ),
     }
 }
 
@@ -189,7 +197,11 @@ pub(super) fn wheel(x: f32, y: f32) -> WindowEvent {
 /// pointer, and list rows and fields get vanilla's white one-pixel outline
 /// (`AbstractSelectionList`'s focused selection, `EditBox`'s highlighted
 /// border).
-pub(super) fn draw_focus(batch: &mut HudBatch, atlas: &horizon_client::hud::HudAtlas, focus: Target) {
+pub(super) fn draw_focus(
+    batch: &mut HudBatch,
+    atlas: &horizon_client::hud::HudAtlas,
+    focus: Target,
+) {
     let [x, y, w, h] = focus.rect;
     if matches!(focus.kind, Kind::Row | Kind::Field) {
         let white = rgba(255, 255, 255, 255);
@@ -1138,9 +1150,19 @@ impl Game<'_> {
         if !pressed {
             return std::mem::take(&mut self.pad.menu.osk_tapped);
         }
-        let (w, h) = self.gui_size();
-        let at_top = self.osk_at_top(h);
-        let (x, y) = self.cursor;
+        // The keyboard is laid out in a Ui's units, not GUI pixels (`draw_pad_cursor`).
+        let size = self
+            .renderer
+            .as_ref()
+            .map_or([1280, 720], |r| [r.config.width, r.config.height]);
+        let batch = HudBatch::new(size);
+        let at_top = self.osk_at_top(batch.height);
+        let (w, h, (x, y), _) = horizon_client::ui_theme::Ui::space(
+            batch.width,
+            batch.height,
+            batch.scale,
+            self.cursor,
+        );
         let Some(keyboard) = self.pad.menu.osk.as_mut() else {
             return false;
         };
