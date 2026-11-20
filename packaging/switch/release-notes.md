@@ -10,6 +10,10 @@ On a Mac, run `dot_clean -m` on the SD card before ejecting it, or copy over FTP
 
 Already on 1.0.0 or later? The title screen offers new releases itself (the button left of Sign In).
 
+### New in 1.2.0
+
+- **60 fps.** Built with the graphics driver release 0.1.0 used ([JohnUzoka/mesa-switch](https://github.com/JohnUzoka/mesa-switch)), which compiles the game's shaders much better: about twice the frame rate of 1.0.0 and 1.1.0.
+
 ### New in 1.1.0
 
 - **Much faster loading.** After the first start, the game's resources load in about 15 seconds instead of 2-4 minutes. The first start after installing packs the resources folder into one file, `switch/horizon/resources.hzpak` (about 520 MB), in the background while you play; that takes about 20 minutes, and the next start uses it. The resources folder itself stays as it is.
@@ -27,7 +31,6 @@ Already on 1.0.0 or later? The title screen offers new releases itself (the butt
 
 ### Known issues
 
-- The frame rate is about 30 fps; release 0.1.0 used a faster graphics driver that isn't public.
 - The very first start is slow (shaders compile and are kept on the SD card, and the resources are packed).
 - Docked mode isn't tested yet.
 - Need the SD card space: the resources pack is about 520 MB on top of the resources folder. Deleting `resources.hzpak` makes the game use the folder again (and pack it again); `HORIZON_NX_PACK=0` in `env.txt` turns packing off.
