@@ -332,7 +332,7 @@ impl Game<'_> {
         #[cfg(target_os = "horizon")]
         {
             let settings = &self.settings.controller;
-            if !settings.gyro || !self.pad.in_use {
+            if !settings.gyro.on() || !self.pad.in_use {
                 if std::mem::take(&mut self.pad.gyro_running) {
                     horizon_nx::stop_motion();
                 }
@@ -350,7 +350,16 @@ impl Game<'_> {
                     *u += (a - *u) * (seconds * 4.0).min(1.0);
                 }
             }
-            gamepad::gyro_delta(m.rotation, *up, settings, seconds, self.scoping())
+            // The sensor keeps running between presses, so gravity stays known.
+            let held = |action| {
+                settings
+                    .binding(action)
+                    .is_some_and(|b| self.pad.edges.held(b))
+            };
+            if !settings.gyro.aims(held("key.attack"), held("key.use")) {
+                return (0.0, 0.0);
+            }
+            gamepad::gyro_delta(m.rotation, self.pad.gyro_up, settings, seconds, self.scoping())
         }
         #[cfg(not(target_os = "horizon"))]
         {

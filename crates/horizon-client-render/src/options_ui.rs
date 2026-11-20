@@ -734,7 +734,13 @@ impl Opt {
             Opt::PadAdaptiveTriggers => on_off(s.controller.adaptive_triggers),
             Opt::PadInvertX => on_off(s.controller.invert_x),
             Opt::PadInvertY => on_off(s.controller.invert_y),
-            Opt::PadGyro => on_off(s.controller.gyro),
+            Opt::PadGyro => tr(match s.controller.gyro {
+                gamepad::GyroMode::Off => "options.off",
+                gamepad::GyroMode::Always => "horizon.options.gyro.always",
+                gamepad::GyroMode::Attack => "horizon.options.gyro.attack",
+                gamepad::GyroMode::Use => "horizon.options.gyro.use",
+                gamepad::GyroMode::AttackOrUse => "horizon.options.gyro.attack_or_use",
+            }),
             Opt::PadToggleSneak => tr(if s.controller.toggle_sneak {
                 "options.key.toggle"
             } else {
@@ -1028,7 +1034,14 @@ impl Opt {
             }
             Opt::PadInvertX => s.controller.invert_x = !s.controller.invert_x,
             Opt::PadInvertY => s.controller.invert_y = !s.controller.invert_y,
-            Opt::PadGyro => s.controller.gyro = !s.controller.gyro,
+            Opt::PadGyro => {
+                let all = gamepad::GyroMode::ALL;
+                let i = all
+                    .iter()
+                    .position(|m| *m == s.controller.gyro)
+                    .unwrap_or(0) as u8;
+                s.controller.gyro = all[usize::from(next(i, all.len() as u8))];
+            }
             Opt::PadToggleSneak => s.controller.toggle_sneak = !s.controller.toggle_sneak,
             Opt::PadLightbar => {
                 let all = gamepad::Lightbar::ALL;

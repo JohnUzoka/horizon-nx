@@ -226,6 +226,10 @@ impl Edges {
             .map(|b| (b, now & b.bit() != 0))
             .collect()
     }
+    /// The button is down (a trigger past the threshold) as of the last update.
+    pub fn held(&self, button: Button) -> bool {
+        self.held & button.bit() != 0
+    }
     /// Release everything (the pad was unplugged or turned off).
     pub fn release_all(&mut self) -> Vec<(Button, bool)> {
         let held = std::mem::take(&mut self.held);
@@ -390,6 +394,61 @@ impl TextKeyboard {
     }
 }
 
+/// When gyro aiming turns the view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GyroMode {
+    #[default]
+    Off,
+    Always,
+    /// While the attack button is held (mining, fighting).
+    Attack,
+    /// While the use button is held (placing blocks, drawing a bow).
+    Use,
+    AttackOrUse,
+}
+impl GyroMode {
+    pub const ALL: [GyroMode; 5] = [
+        GyroMode::Off,
+        GyroMode::Always,
+        GyroMode::Attack,
+        GyroMode::Use,
+        GyroMode::AttackOrUse,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            GyroMode::Off => "off",
+            GyroMode::Always => "always",
+            GyroMode::Attack => "attack",
+            GyroMode::Use => "use",
+            GyroMode::AttackOrUse => "attack_or_use",
+        }
+    }
+    /// Also reads the first build's on/off.
+    pub fn parse(name: &str) -> Self {
+        match name {
+            "always" | "true" => GyroMode::Always,
+            "attack" => GyroMode::Attack,
+            "use" => GyroMode::Use,
+            "attack_or_use" => GyroMode::AttackOrUse,
+            _ => GyroMode::Off,
+        }
+    }
+    /// The sensor runs at all.
+    pub fn on(self) -> bool {
+        self != GyroMode::Off
+    }
+    /// It turns the view now, with attack and use held or not.
+    pub fn aims(self, attacking: bool, using: bool) -> bool {
+        match self {
+            GyroMode::Off => false,
+            GyroMode::Always => true,
+            GyroMode::Attack => attacking,
+            GyroMode::Use => using,
+            GyroMode::AttackOrUse => attacking || using,
+        }
+    }
+}
+
 /// Whether A on a text field asks Steam for its keyboard
 /// (`steam://open/keyboard`) instead of opening Horizon's: chosen, or `Auto`
 /// on a Steam Deck (Steam sets `SteamDeck=1` for the games it starts).
@@ -433,8 +492,8 @@ pub struct PadSettings {
     /// How the pad drives menus: a focus highlight or a virtual pointer.
     pub menu_nav: MenuNav,
     pub keyboard: TextKeyboard,
-    /// Aim by turning the controller (its motion sensor), on top of the right stick.
-    pub gyro: bool,
+    /// Aim by turning the controller (its motion sensor), on top of the right stick: when.
+    pub gyro: GyroMode,
     /// Gyro aiming's speed, 0..1: [`gyro_delta`] turns the view `4 *` this times the
     /// controller's own turn (0.25 turns the view as much as the controller).
     pub gyro_sensitivity: f32,
@@ -459,7 +518,7 @@ impl Default for PadSettings {
             nintendo_letters: cfg!(target_os = "horizon"),
             menu_nav: MenuNav::Focus,
             keyboard: TextKeyboard::Auto,
-            gyro: false,
+            gyro: GyroMode::Off,
             gyro_sensitivity: 0.5,
             bindings: BTreeMap::new(),
         }
@@ -519,7 +578,7 @@ impl PadSettings {
                 "nintendoLetters" => s.nintendo_letters = flag(s.nintendo_letters),
                 "menuNavigation" => s.menu_nav = MenuNav::parse(value),
                 "keyboard" => s.keyboard = TextKeyboard::parse(value),
-                "gyro" => s.gyro = flag(s.gyro),
+                "gyro" => s.gyro = GyroMode::parse(value),
                 "gyroSensitivity" => s.gyro_sensitivity = unit(s.gyro_sensitivity),
                 other => {
                     if let Some(action) = other.strip_prefix("bind_") {
@@ -555,7 +614,7 @@ impl PadSettings {
             bool_text(self.nintendo_letters),
             self.menu_nav.name(),
             self.keyboard.name(),
-            bool_text(self.gyro),
+            self.gyro.name(),
             self.gyro_sensitivity,
         );
         for (action, button) in &self.bindings {
@@ -696,7 +755,8 @@ pub fn gyro_delta(
     let tilt = still(rotation[0]);
     let speed =
         360.0 * 4.0 * settings.gyro_sensitivity * if scoping { 0.25 } else { 1.0 } * seconds;
-    let x = -turn * if settings.invert_x { -1.0 } else { 1.0 };
+    // The Switch's sensor turns positive to the right around `up` (checked on a console).
+    let x = turn * if settings.invert_x { -1.0 } else { 1.0 };
     let y = tilt * if settings.invert_y { -1.0 } else { 1.0 };
     (x * speed, -y * speed)
 }
@@ -1651,14 +1711,14 @@ mod tests {
     fn gyro_turns_with_the_controller_and_ignores_its_noise() {
         let s = PadSettings::default();
         // Held upright, turned right a quarter turn a second for a second: 4 * 0.5 * 90 degrees.
-        let (yaw, pitch) = gyro_delta([0.0, -0.25, 0.0], [0.0, 1.0, 0.0], &s, 1.0, false);
+        let (yaw, pitch) = gyro_delta([0.0, 0.25, 0.0], [0.0, 1.0, 0.0], &s, 1.0, false);
         assert!(
             (yaw - 2.0 * (0.25 - GYRO_STILL) * 360.0).abs() < 1e-3,
             "{yaw}"
         );
         assert_eq!(pitch, 0.0);
         // Lying flat, the same turn is around the face's axis.
-        let (flat, _) = gyro_delta([0.0, 0.0, -0.25], [0.0, 0.0, 0.98], &s, 1.0, false);
+        let (flat, _) = gyro_delta([0.0, 0.0, 0.25], [0.0, 0.0, 0.98], &s, 1.0, false);
         assert!((flat - yaw).abs() < 1e-3);
         // Tilting the back up looks up (pitch negative).
         assert!(gyro_delta([0.1, 0.0, 0.0], [0.0, 1.0, 0.0], &s, 1.0, false).1 < 0.0);
@@ -1668,7 +1728,7 @@ mod tests {
             (0.0, 0.0)
         );
         let mut t = s.clone();
-        t.gyro = true;
+        t.gyro = GyroMode::AttackOrUse;
         t.gyro_sensitivity = 0.75;
         assert_eq!(PadSettings::parse(&t.serialize()), t);
     }
