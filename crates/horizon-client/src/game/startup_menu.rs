@@ -847,6 +847,11 @@ impl Loading {
                     self.settings.shader_packs =
                         horizon_client::shader_pack_list::scan(&Game::shader_packs_dir());
                 }
+                // The game's own options screens (after loading) run Get Mods.
+                Event::BrowseMods | Event::InstallMod(_) => {
+                    self.menu.options.browser.status =
+                        Some("Get Mods opens once the game has loaded.".into());
+                }
                 Event::ShaderPack => self.save_menu_settings(),
                 Event::OpenShaderPackFolder => {
                     let dir = Game::shader_packs_dir();

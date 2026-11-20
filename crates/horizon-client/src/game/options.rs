@@ -273,6 +273,8 @@ impl Game<'_> {
                     self.settings.shader_packs =
                         horizon_client::shader_pack_list::scan(&Self::shader_packs_dir());
                 }
+                Event::BrowseMods => self.browse_mods(),
+                Event::InstallMod(id) => self.install_mod(&id),
                 // Saved; the next frame's `shader_pack_inputs` loads the pick.
                 Event::ShaderPack => self.settings.save(&Self::options_path()),
                 Event::OpenShaderPackFolder => {

@@ -157,6 +157,7 @@ mod minecarts;
 mod mob_blocks;
 mod mob_gear;
 mod mob_sounds;
+mod mod_browser;
 mod mods;
 mod mount_menu;
 mod mounts;

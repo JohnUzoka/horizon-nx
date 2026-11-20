@@ -1226,6 +1226,8 @@ pub enum Page {
     Skin,
     /// OnlineOptionsScreen: server listing, Realms and friends notifications.
     Online,
+    /// Get Mods: Horizon's registry, installed from the game (`mod_list::Browser`).
+    ModBrowser,
 }
 #[derive(Clone, Debug, PartialEq)]
 enum Act {
@@ -1254,6 +1256,9 @@ enum Act {
     /// Credits & Attribution's Credits button (WinScreen without the poem).
     Credits,
     CopyAgentDetails,
+    /// Get Mods: show a tab; install `browser.entries[i]`.
+    BrowseTab(crate::mod_list::BrowserKind),
+    BrowseInstall(usize),
 }
 enum WKind {
     Button {
@@ -1325,6 +1330,10 @@ pub enum Event {
     Credits,
     /// Copy how an agent connects (the AI Agent page).
     CopyAgentDetails,
+    /// Get Mods opened: the game reads the registry's index into `browser`.
+    BrowseMods,
+    /// Get Mods: install this project of the registry.
+    InstallMod(String),
 }
 /// `SliderableValueSet.applyValueImmediately`: these apply 600 ms after
 /// the last change (`OptionInstanceSliderButton.delayedApplyAt`).
@@ -1391,6 +1400,8 @@ pub struct OptionsUi {
     pub graphics: crate::graphics_ui::GraphicsUi,
     /// The AI Agent page's status lines (set by the game while it shows).
     pub agent_status: Vec<String>,
+    /// Get Mods (set by the game while it shows).
+    pub browser: crate::mod_list::Browser,
 }
 impl Default for OptionsUi {
     fn default() -> Self {
@@ -1419,6 +1430,7 @@ impl Default for OptionsUi {
             data_pack_dir: None,
             data_pack_resources: Default::default(),
             data_pack_stamp: (Vec::new(), Instant::now()),
+            browser: Default::default(),
             resource_error: None,
             pack_focus: Instant::now(),
             in_world: false,
@@ -1497,6 +1509,53 @@ fn pairs(opts: &[Opt]) -> Vec<Row> {
         .collect()
 }
 impl OptionsUi {
+    /// Get Mods: the tabs, the status line, then a button and a line of text per project.
+    fn browser_rows(&self) -> Vec<Row> {
+        use crate::mod_list::{BrowserKind, BrowserState, shorten};
+        let b = &self.browser;
+        let tab = |kind: BrowserKind, label: &'static str| {
+            let w = button(0.0, 0.0, 150.0, tr(label), Act::BrowseTab(kind));
+            if b.tab == kind { inactive(w) } else { w }
+        };
+        let mut rows = vec![Row::Buttons(
+            tab(BrowserKind::Mods, "horizon.mod_browser.mods"),
+            Some(tab(
+                BrowserKind::ResourcePacks,
+                "horizon.mod_browser.resource_packs",
+            )),
+        )];
+        if let Some(status) = &b.status {
+            rows.push(Row::Note(shorten(status, 70)));
+        }
+        for (i, e) in b
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.kind == b.tab)
+        {
+            let name = shorten(&format!("{} {}", e.name, e.version), 30);
+            let (what, active) = match e.state {
+                BrowserState::Available => (
+                    Text::translate(
+                        "horizon.mod_browser.install",
+                        &[Text::literal(e.size_text())],
+                    ),
+                    true,
+                ),
+                BrowserState::Update => (tr("horizon.mod_browser.update"), true),
+                BrowserState::Installing => (tr("horizon.mod_browser.installing"), false),
+                BrowserState::Installed => (tr("horizon.mod_browser.installed"), false),
+                BrowserState::Failed => (tr("horizon.mod_browser.retry"), true),
+            };
+            let label = Text::literal(format!("{name}: ")).append(what);
+            let w = button(0.0, 0.0, 310.0, label, Act::BrowseInstall(i));
+            rows.push(Row::Buttons(if active { w } else { inactive(w) }, None));
+            if !e.summary.is_empty() {
+                rows.push(Row::Note(shorten(&e.summary, 70)));
+            }
+        }
+        rows
+    }
     /// A switch of `horizon-extras.txt` as the Extras page draws it: "Caption: On".
     fn extra_button(&self, s: &Settings, item: crate::extras::Item) -> Widget {
         let label = format!("{}: {}", item.caption(), item.value(&s.extras));
@@ -1612,6 +1671,7 @@ impl OptionsUi {
             Page::Font => "options.font.title",
             Page::Packs => "resourcePack.title",
             Page::Mods => "horizon.pages.mods",
+            Page::ModBrowser => "horizon.pages.mod_browser",
             Page::NativeMod(_) => "Mod Settings",
             Page::ShaderPacks => "horizon.pages.shader_packs",
             Page::Graphics | Page::GraphicsAdvanced | Page::GraphicsHdr => "options.videoTitle",
@@ -2033,6 +2093,7 @@ impl OptionsUi {
                     .collect()
             }
             Page::NativeMod(i) => self.native_rows(s, i),
+            Page::ModBrowser => self.browser_rows(),
             Page::ShaderPacks => {
                 if s.shader_packs.is_empty() {
                     return vec![Row::Header("horizon.shader_packs.empty")];
@@ -2555,6 +2616,10 @@ impl OptionsUi {
                 content = y + self.scroll - top + 2.0;
                 out[list_start..].iter_mut().for_each(|w| w.list = true);
                 let folder = match page {
+                    // The Switch has no file manager to open the folder in: its footer gets mods.
+                    Page::Mods if cfg!(target_os = "horizon") => {
+                        Some(("horizon.mod_browser.open", Act::Push(Page::ModBrowser)))
+                    }
                     Page::Mods => Some(("horizon.mods.open_folder", Act::OpenModFolder)),
                     Page::ShaderPacks => Some(("pack.openFolder", Act::OpenShaderPackFolder)),
                     _ => None,
@@ -3023,6 +3088,9 @@ impl OptionsUi {
                             if p == Page::ShaderPacks {
                                 events.push(Event::ListShaderPacks);
                             }
+                            if p == Page::ModBrowser {
+                                events.push(Event::BrowseMods);
+                            }
                             self.push(p)
                         }
                         Act::Done => events.extend(self.back(s)),
@@ -3071,6 +3139,15 @@ impl OptionsUi {
                         }
                         Act::NativeButton(i, b) => events.push(Event::NativeButton(i, b)),
                         Act::OpenModFolder => events.push(Event::OpenModFolder),
+                        Act::BrowseTab(kind) => {
+                            self.browser.tab = kind;
+                            self.scroll = 0.0;
+                        }
+                        Act::BrowseInstall(i) => {
+                            if let Some(entry) = self.browser.entries.get(i) {
+                                events.push(Event::InstallMod(entry.id.clone()));
+                            }
+                        }
                         Act::PickShaderPack(i) => {
                             if let Some(pack) = s.shader_packs.get(i) {
                                 s.horizon.shader_pack = if s.horizon.shader_pack == pack.file {

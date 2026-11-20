@@ -203,3 +203,71 @@ mod tests {
         assert_eq!(list.serialize(), "mod.c:true\n");
     }
 }
+
+/// The Get Mods page (Options > Mods > Get Mods): what Horizon's registry offers that this game
+/// installs by itself, filled by the game (`game/mod_browser.rs`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Browser {
+    /// The tab shown.
+    pub tab: BrowserKind,
+    /// A line above the list: loading, an error, what to do after an install.
+    pub status: Option<String>,
+    pub entries: Vec<BrowserEntry>,
+}
+
+/// What the page lists, by tab.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BrowserKind {
+    /// Content mods (`.hmod`), into `horizon-mods/`.
+    #[default]
+    Mods,
+    /// Resource packs, into `resourcepacks/`.
+    ResourcePacks,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrowserEntry {
+    /// The registry's project id.
+    pub id: String,
+    pub kind: BrowserKind,
+    pub name: String,
+    pub version: String,
+    pub summary: String,
+    /// The file's size in bytes.
+    pub size: u64,
+    pub state: BrowserState,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum BrowserState {
+    Available,
+    Installing,
+    Installed,
+    /// Installed, an older version: this one replaces it.
+    Update,
+    Failed,
+}
+
+impl BrowserEntry {
+    /// "1.2 MB", "262 KB".
+    pub fn size_text(&self) -> String {
+        let kb = self.size as f64 / 1000.0;
+        if kb >= 1000.0 {
+            format!("{:.1} MB", kb / 1000.0)
+        } else {
+            format!("{} KB", kb.ceil() as u64)
+        }
+    }
+}
+
+/// `text` cut to `max` characters, with "…" when cut.
+pub fn shorten(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut cut: String = text.chars().take(max.saturating_sub(1)).collect();
+    cut = cut.trim_end().to_owned();
+    cut.push('…');
+    cut
+}

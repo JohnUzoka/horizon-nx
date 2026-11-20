@@ -14,6 +14,8 @@ pub(super) struct ModsState {
     pub(super) dev: Vec<PathBuf>,
     /// The WebAssembly mods found that no longer run, for the one-time notice.
     stopped: Vec<String>,
+    /// Get Mods (`mod_browser.rs`).
+    pub(super) browser: super::mod_browser::State,
 }
 
 /// `root` with the content mods that are on layered over it

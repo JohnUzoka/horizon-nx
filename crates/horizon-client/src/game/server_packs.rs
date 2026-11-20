@@ -340,6 +340,7 @@ impl Game<'_> {
     /// that finished, the ones to start, a resource reload when the active
     /// packs change, and the statuses for the server.
     pub(super) fn tick_server_packs(&mut self) {
+        self.drive_mod_browser();
         self.server_packs.notifiers.retain_mut(PackNotifier::poll);
         // A reload waits for the world's resources (`reload_packs`).
         if self.rest_loader.is_some() || self.world_loader.is_some() {
