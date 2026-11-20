@@ -30,6 +30,7 @@
   "horizon.options.keyboard.auto": "Auto",
   "horizon.options.keyboard.horizon": "Horizon",
   "horizon.options.keyboard.steam": "Steam",
+  "horizon.options.keyboard.switch": "Switch",
   "horizon.options.unavailable": "This feature is not yet available in Horizon.",
   "horizon.options.search": "Search settings...",
   "horizon.pages.mods": "Mods",

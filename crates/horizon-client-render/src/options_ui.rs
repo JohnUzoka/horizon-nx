@@ -765,6 +765,7 @@ impl Opt {
                 gamepad::TextKeyboard::Auto => "horizon.options.keyboard.auto",
                 gamepad::TextKeyboard::Horizon => "horizon.options.keyboard.horizon",
                 gamepad::TextKeyboard::Steam => "horizon.options.keyboard.steam",
+                gamepad::TextKeyboard::Switch => "horizon.options.keyboard.switch",
             }),
             _ => Text::empty(),
         }
@@ -1065,12 +1066,12 @@ impl Opt {
                 }
             }
             Opt::PadKeyboard => {
-                let all = gamepad::TextKeyboard::ALL;
+                let all = gamepad::TextKeyboard::choices();
                 let i = all
                     .iter()
                     .position(|k| *k == s.controller.keyboard)
                     .unwrap_or(0) as u8;
-                s.controller.keyboard = all[usize::from(next(i, 3))];
+                s.controller.keyboard = all[usize::from(next(i, all.len() as u8))];
             }
             _ => {}
         }

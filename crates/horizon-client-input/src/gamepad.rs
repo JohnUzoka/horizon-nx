@@ -366,11 +366,14 @@ impl MenuNav {
 /// The on-screen keyboard A opens on a text field in focus mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TextKeyboard {
-    /// Steam's on a Steam Deck under Steam, the Switch's on a Switch, else Horizon's.
+    /// Steam's on a Steam Deck under Steam, else Horizon's (on a Switch too: it takes taps,
+    /// and taps on chat's messages still reach them).
     #[default]
     Auto,
     Horizon,
     Steam,
+    /// The Switch's own keyboard (the system applet).
+    Switch,
 }
 impl TextKeyboard {
     pub const ALL: [TextKeyboard; 3] = [
@@ -378,17 +381,31 @@ impl TextKeyboard {
         TextKeyboard::Horizon,
         TextKeyboard::Steam,
     ];
+    /// The choices this platform offers: the Switch's keyboard on a Switch, Steam's elsewhere.
+    pub fn choices() -> &'static [TextKeyboard] {
+        if cfg!(target_os = "horizon") {
+            &[
+                TextKeyboard::Auto,
+                TextKeyboard::Horizon,
+                TextKeyboard::Switch,
+            ]
+        } else {
+            &TextKeyboard::ALL
+        }
+    }
     pub fn name(self) -> &'static str {
         match self {
             TextKeyboard::Auto => "auto",
             TextKeyboard::Horizon => "horizon",
             TextKeyboard::Steam => "steam",
+            TextKeyboard::Switch => "switch",
         }
     }
     pub fn parse(name: &str) -> Self {
         match name {
             "horizon" => TextKeyboard::Horizon,
             "steam" => TextKeyboard::Steam,
+            "switch" => TextKeyboard::Switch,
             _ => TextKeyboard::Auto,
         }
     }
@@ -455,15 +472,15 @@ impl GyroMode {
 pub fn steam_keyboard(choice: TextKeyboard) -> bool {
     match choice {
         TextKeyboard::Steam => true,
-        TextKeyboard::Horizon => false,
+        TextKeyboard::Horizon | TextKeyboard::Switch => false,
         TextKeyboard::Auto => std::env::var("SteamDeck").is_ok_and(|v| v == "1"),
     }
 }
 
 /// Whether A on a text field opens the Switch's own keyboard (the system applet) instead of
-/// Horizon's: `Auto` on a Switch.
+/// Horizon's: chosen, on a Switch.
 pub fn switch_keyboard(choice: TextKeyboard) -> bool {
-    cfg!(target_os = "horizon") && choice == TextKeyboard::Auto
+    cfg!(target_os = "horizon") && choice == TextKeyboard::Switch
 }
 
 /// The controller settings (`horizon-controller.txt`).
