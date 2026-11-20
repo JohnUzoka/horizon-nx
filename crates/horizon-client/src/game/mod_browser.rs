@@ -8,7 +8,7 @@
 use super::Game;
 use horizon_client::mod_list::{self, BrowserEntry, BrowserKind, BrowserState};
 use horizon_mods::index::{self, Index, Kind, Project, Version};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -120,7 +120,10 @@ fn install(index: &Index, p: &Project, v: &Version, dest: &Path) -> Result<(), S
         let mut out =
             std::io::BufWriter::new(std::fs::File::create(&part).map_err(|e| e.to_string())?);
         std::io::copy(&mut input, &mut out).map_err(|e| format!("download: {e}"))?;
-        out.flush().map_err(|e| e.to_string())?;
+        let file = out.into_inner().map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        // Closed before it is read again: the Switch's file system won't open a file twice.
+        drop(file);
         index::check_file(index, p, v, &part)
     })();
     if let Err(e) = downloaded {
