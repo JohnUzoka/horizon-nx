@@ -33,6 +33,8 @@ mod clocks;
 mod keyboard;
 #[cfg(target_os = "horizon")]
 mod main_stack;
+#[cfg(target_os = "horizon")]
+mod motion;
 
 pub use compat::{
     ThreadCorePolicy, set_thread_core_policy, set_thread_logging, thread_core_policy,
@@ -46,6 +48,8 @@ pub use keyboard::software_keyboard;
 pub use lifecycle::relaunch_on_exit;
 #[cfg(target_os = "horizon")]
 pub use main_stack::run_on_main_stack;
+#[cfg(target_os = "horizon")]
+pub use motion::{Motion, motion, stop_motion};
 pub use lifecycle::{
     flush_logs, init_horizon_services, process_applet_messages, register_release_hook,
     suspend_until_out_of_background,
