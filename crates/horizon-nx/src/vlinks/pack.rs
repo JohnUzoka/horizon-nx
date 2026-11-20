@@ -339,14 +339,42 @@ pub(crate) fn top_level(folder: &Path) -> io::Result<Vec<Top>> {
     Ok(top)
 }
 
+/// The top-level entry a pack keeps for its folder's stamp ([`build`]): a name no file has.
+pub(crate) fn stamp_top(stamp: &str) -> Top {
+    Top {
+        name: format!("\u{1}stamp {stamp}"),
+        dir: false,
+        size: 0,
+    }
+}
+
+/// A stamp for the file `marker` (the cache's own record of what a cached folder was built
+/// from): its contents' hash, `None` without the file.
+pub(crate) fn stamp_of(marker: &Path) -> Option<String> {
+    let bytes = std::fs::read(marker).ok()?;
+    let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x100_0000_01b3)
+    });
+    Some(format!("{hash:016x}-{}", bytes.len()))
+}
+
 /// Packs `folder` into its `.hzpak`, through a temporary file renamed into place at the end.
 /// `progress` hears each file packed. Returns how many files and bytes were packed.
-pub(crate) fn build(folder: &Path, mut progress: impl FnMut(usize)) -> io::Result<(usize, u64)> {
+///
+/// A folder with links (`super::MANIFEST`s) packs its own files only: the links stay links,
+/// read from their manifests, which the index lists as loose so they are still looked for.
+/// `stamp`, when given, is kept with the top level: the pack only fits while the stamp does.
+pub(crate) fn build(
+    folder: &Path,
+    stamp: Option<&str>,
+    mut progress: impl FnMut(usize),
+) -> io::Result<(usize, u64)> {
     let target = pack_path(folder);
     let mut temporary = target.clone().into_os_string();
     temporary.push(".tmp");
     let temporary = PathBuf::from(temporary);
-    let top = top_level(folder)?;
+    let mut top = top_level(folder)?;
+    top.extend(stamp.map(stamp_top));
     let mut out = BufWriter::with_capacity(1 << 20, std::fs::File::create(&temporary)?);
     out.write_all(MAGIC)?;
     let mut offset = MAGIC.len() as u64;
@@ -378,10 +406,13 @@ pub(crate) fn build(folder: &Path, mut progress: impl FnMut(usize)) -> io::Resul
             } else {
                 format!("{dir}/{name}")
             };
-            if rel.contains('\n') {
+            if rel.contains('\n') || name == super::MANIFEST {
                 continue;
             }
-            let meta = std::fs::metadata(folder.join(&rel))?;
+            let meta = std::fs::symlink_metadata(folder.join(&rel))?;
+            if meta.file_type().is_symlink() {
+                continue;
+            }
             if meta.is_dir() {
                 entries.push((
                     rel.clone(),
@@ -422,6 +453,21 @@ pub(crate) fn build(folder: &Path, mut progress: impl FnMut(usize)) -> io::Resul
             ));
             files += 1;
             progress(files);
+        }
+        let manifest = if dir.is_empty() {
+            super::MANIFEST.to_string()
+        } else {
+            format!("{dir}/{}", super::MANIFEST)
+        };
+        if let Ok(meta) = std::fs::metadata(folder.join(&manifest)) {
+            entries.push((
+                manifest,
+                Entry {
+                    kind: Kind::Loose,
+                    size: meta.len(),
+                    mtime: mtime(&meta),
+                },
+            ));
         }
     }
     let block = encode(&entries, &top);
@@ -470,7 +516,7 @@ mod tests {
     fn a_pack_holds_every_file_and_folder() {
         let dir = scratch("build");
         let folder = dir.join("res");
-        let (files, bytes) = build(&folder, |_| {}).unwrap();
+        let (files, bytes) = build(&folder, None, |_| {}).unwrap();
         assert_eq!((files, bytes), (3, 14));
         let (file, index) = load(&folder);
         let Found::Indexed(stone) = index.find("assets/minecraft/textures/stone.png") else {
@@ -502,7 +548,7 @@ mod tests {
     fn what_the_game_changes_comes_from_the_folder() {
         let dir = scratch("changes");
         let folder = dir.join("res");
-        build(&folder, |_| {}).unwrap();
+        build(&folder, None, |_| {}).unwrap();
         let (_, index) = load(&folder);
         // The game writes its sprite cache at the top: the file and its folder's listing.
         let lines = index.note_change("horizon-sprites.cache").unwrap();
@@ -528,6 +574,41 @@ mod tests {
         again.load_changes(&lines);
         assert_eq!(again.find("horizon-sprites.cache"), Found::Folder);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_cache_folder_keeps_its_links_and_its_stamp() {
+        let dir = scratch("links");
+        let folder = dir.join("res");
+        let textures = folder.join("assets/minecraft/textures");
+        std::fs::write(
+            textures.join(crate::vlinks::MANIFEST),
+            b"+linked\t/elsewhere\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(textures.join("stone.png"), textures.join("real-link.png"))
+            .unwrap();
+        build(&folder, Some("abc"), |_| {}).unwrap();
+        let (_, index) = load(&folder);
+        // The links stay links: the pack holds the folder's own files only.
+        assert_eq!(
+            index.find("assets/minecraft/textures/real-link.png"),
+            Found::Missing
+        );
+        // Their manifest is listed, left to the folder, so it is still read.
+        let manifest = format!("assets/minecraft/textures/{}", crate::vlinks::MANIFEST);
+        let Found::Indexed(entry) = index.find(&manifest) else {
+            panic!("the manifest is indexed");
+        };
+        assert_eq!(entry.kind, Kind::Loose);
+        // The stamp is part of what must still fit.
+        let mut now = top_level(&folder).unwrap();
+        assert!(!index.fits(&now));
+        now.push(stamp_top("abc"));
+        assert!(index.fits(&now));
+        now.pop();
+        now.push(stamp_top("rebuilt"));
+        assert!(!index.fits(&now));
     }
 
     #[test]

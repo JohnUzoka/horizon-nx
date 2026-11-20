@@ -909,6 +909,11 @@ pub fn able_to_clear_any_pack(all: &[Pack], selected: &[String]) -> bool {
     !enabled(all, selected).is_empty()
 }
 /// Resource root for a pack selection: vanilla itself when no pack is on.
+/// The overlay cache's record of the overlay built at `out`: rewritten only when it is rebuilt.
+pub fn overlay_marker(out: &Path) -> PathBuf {
+    cache::marker_path(out)
+}
+
 pub fn resource_root(vanilla: &Path, packs: &[Pack], cache: &Path) -> io::Result<PathBuf> {
     if packs.is_empty() {
         return Ok(vanilla.to_path_buf());

@@ -5,10 +5,10 @@ use super::pack::{self, Entry, Found, Index, Kind};
 use super::{Parts, normalize, render};
 use core::ffi::{c_int, c_void};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 type Stat = libc::stat;
@@ -33,13 +33,34 @@ pub(super) struct Mount {
     pub(super) index: Index,
     /// libnx's file record for the open pack (`fsdev_file_t`, whose first field is the `FsFile`).
     file: Vec<u64>,
+    /// What the folder was built from, for a cache folder ([`use_cache_pack`]).
+    stamp: Option<String>,
 }
 
-static MOUNT: OnceLock<Mount> = OnceLock::new();
-/// The folder [`use_pack`] was asked about, to build its pack later when it has none.
-static FOLDER: OnceLock<(Parts, PathBuf)> = OnceLock::new();
-/// Changes noted while no pack is in use (lines already in the changes file).
-static NOTED: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+impl Drop for Mount {
+    fn drop(&mut self) {
+        let o = super::devoptab::original();
+        unsafe { o.close_r.unwrap()(super::devoptab::reent(), self.file.as_mut_ptr().cast()) };
+    }
+}
+
+/// The packs in use: the resources folder's, and cache folders' ([`use_cache_pack`]). A file
+/// open from one keeps it alive when it is dropped from here.
+static MOUNTS: RwLock<Vec<Arc<Mount>>> = RwLock::new(Vec::new());
+
+/// A folder that has or will have a pack.
+struct Folder {
+    root: Parts,
+    folder: PathBuf,
+    /// The cache's record of the folder ([`use_cache_pack`]); `None` for the resources folder.
+    marker: Option<PathBuf>,
+    /// Changes noted while no pack is in use (lines already in the changes file).
+    noted: HashSet<String>,
+    /// A build was started for it in this run.
+    tried: bool,
+}
+
+static FOLDERS: Mutex<Vec<Folder>> = Mutex::new(Vec::new());
 static BUILDING: AtomicBool = AtomicBool::new(false);
 
 fn log(line: std::fmt::Arguments) {
@@ -51,6 +72,44 @@ fn disabled() -> bool {
     std::env::var_os("HORIZON_NX_PACK").is_some_and(|v| v == "0")
 }
 
+fn mounts() -> std::sync::RwLockReadGuard<'static, Vec<Arc<Mount>>> {
+    MOUNTS.read().unwrap_or_else(|e| e.into_inner())
+}
+
+fn folders() -> std::sync::MutexGuard<'static, Vec<Folder>> {
+    FOLDERS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn under(real: &[String], root: &[String]) -> bool {
+    real.len() >= root.len() && real[..root.len()] == root[..]
+}
+
+/// The folder's absolute parts and its path as the card names it.
+fn place(folder: &Path) -> Option<(Parts, PathBuf)> {
+    let root = normalize(folder.to_str()?, &super::devoptab::cwd());
+    let folder = PathBuf::from(render(&root));
+    Some((root, folder))
+}
+
+fn register(root: &Parts, folder: &Path, marker: Option<&Path>) {
+    let mut all = folders();
+    if !all.iter().any(|f| f.root == *root) {
+        all.push(Folder {
+            root: root.clone(),
+            folder: folder.to_path_buf(),
+            marker: marker.map(Path::to_path_buf),
+            noted: HashSet::new(),
+            tried: false,
+        });
+    }
+}
+
+fn mount(m: Mount) {
+    let mut all = MOUNTS.write().unwrap_or_else(|e| e.into_inner());
+    all.retain(|old| old.root != m.root);
+    all.push(Arc::new(m));
+}
+
 /// Uses `folder`'s pack from now on, when it has one that still fits it. Call once, before the
 /// game reads the folder.
 pub fn use_pack(folder: &Path) {
@@ -58,21 +117,20 @@ pub fn use_pack(folder: &Path) {
         log(format_args!("[Pack] off (HORIZON_NX_PACK=0)"));
         return;
     }
-    let Some(text) = folder.to_str() else { return };
-    let root = normalize(text, &super::devoptab::cwd());
-    let folder = PathBuf::from(render(&root));
-    let _ = FOLDER.set((root.clone(), folder.clone()));
+    let Some((root, folder)) = place(folder) else {
+        return;
+    };
+    register(&root, &folder, None);
     let started = Instant::now();
-    match open(&root, &folder) {
-        Ok(mount) => {
-            let files = mount.index.entries.len();
-            if MOUNT.set(mount).is_ok() {
-                log(format_args!(
-                    "[Pack] {} in use: {files} files and folders, opened in {} ms",
-                    pack::pack_path(&folder).display(),
-                    started.elapsed().as_millis()
-                ));
-            }
+    match open(&root, &folder, None) {
+        Ok(m) => {
+            let files = m.index.entries.len();
+            mount(m);
+            log(format_args!(
+                "[Pack] {} in use: {files} files and folders, opened in {} ms",
+                pack::pack_path(&folder).display(),
+                started.elapsed().as_millis()
+            ));
         }
         Err(why) => log(format_args!(
             "[Pack] {} not used: {why}; it is built once the game has loaded",
@@ -81,7 +139,59 @@ pub fn use_pack(folder: &Path) {
     }
 }
 
-fn open(root: &[String], folder: &Path) -> Result<Mount, String> {
+/// Uses the pack of a folder a cache built (a resource pack overlay), whose own record of what it
+/// was built from is the file `marker`: the pack fits while the record is the one it was packed
+/// with. Call it each time the folder is about to be read; a folder without a pack gets one from
+/// [`build_in_background`], used as soon as it is built.
+pub fn use_cache_pack(folder: &Path, marker: &Path) {
+    if disabled() {
+        return;
+    }
+    let Some((root, folder)) = place(folder) else {
+        return;
+    };
+    register(&root, &folder, Some(marker));
+    let stamp = pack::stamp_of(marker);
+    let current = mounts().iter().find(|m| m.root == root).cloned();
+    if let Some(m) = current {
+        if stamp.is_some() && m.stamp == stamp {
+            return;
+        }
+        // The cache rebuilt the folder: its pack no longer answers for it.
+        MOUNTS
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|old| old.root != root);
+        if let Some(f) = folders().iter_mut().find(|f| f.root == root) {
+            f.tried = false;
+        }
+        log(format_args!(
+            "[Pack] {} was rebuilt: its pack is set aside",
+            folder.display()
+        ));
+    }
+    let Some(stamp) = stamp else {
+        return;
+    };
+    let started = Instant::now();
+    match open(&root, &folder, Some(&stamp)) {
+        Ok(m) => {
+            let files = m.index.entries.len();
+            mount(m);
+            log(format_args!(
+                "[Pack] {} in use: {files} files and folders, opened in {} ms",
+                pack::pack_path(&folder).display(),
+                started.elapsed().as_millis()
+            ));
+        }
+        Err(why) => log(format_args!(
+            "[Pack] {} not used: {why}",
+            pack::pack_path(&folder).display()
+        )),
+    }
+}
+
+fn open(root: &[String], folder: &Path, stamp: Option<&str>) -> Result<Mount, String> {
     let path = pack::pack_path(folder);
     let c_path = CString::new(path.to_str().unwrap_or_default()).map_err(|e| e.to_string())?;
     let o = super::devoptab::original();
@@ -130,10 +240,11 @@ fn open(root: &[String], folder: &Path) -> Result<Mount, String> {
     if let Ok(changes) = std::fs::read_to_string(pack::changes_path(folder)) {
         index.load_changes(&changes);
     }
-    let now = pack::top_level(folder).map_err(|e| {
+    let mut now = pack::top_level(folder).map_err(|e| {
         close(&mut file);
         format!("listing the folder failed: {e}")
     })?;
+    now.extend(stamp.map(pack::stamp_top));
     if !index.fits(&now) {
         close(&mut file);
         return Err("the folder changed since it was packed".into());
@@ -143,84 +254,125 @@ fn open(root: &[String], folder: &Path) -> Result<Mount, String> {
         folder: folder.to_path_buf(),
         index,
         file,
+        stamp: stamp.map(str::to_string),
     })
 }
 
-/// Packs the folder in the background when it has no pack in use. Call once the game has loaded,
-/// so the build doesn't slow the loading down.
+/// Packs the folders with no pack in use, one after another on a background thread. Call it once
+/// the game has loaded (and after a reload), so the builds don't slow loading down. The resources
+/// folder's pack is used from the next start; a cache folder's as soon as it is built.
 pub fn build_in_background() {
-    if disabled() || MOUNT.get().is_some() || BUILDING.swap(true, Relaxed) {
+    if disabled() || BUILDING.swap(true, Relaxed) {
         return;
     }
-    let Some((_, folder)) = FOLDER.get().cloned() else {
+    let mounted: Vec<Parts> = mounts().iter().map(|m| m.root.clone()).collect();
+    let todo: Vec<(Parts, PathBuf, Option<PathBuf>)> = folders()
+        .iter_mut()
+        .filter(|f| !f.tried && !mounted.contains(&f.root))
+        .map(|f| {
+            f.tried = true;
+            (f.root.clone(), f.folder.clone(), f.marker.clone())
+        })
+        .collect();
+    if todo.is_empty() {
+        BUILDING.store(false, Relaxed);
         return;
-    };
+    }
     let spawned = std::thread::Builder::new()
         .name("pack-build".into())
         .spawn(move || {
-            let started = Instant::now();
-            log(format_args!(
-                "[Pack] packing {} into {} for the next start",
-                folder.display(),
-                pack::pack_path(&folder).display()
-            ));
-            let result = pack::build(&folder, |files| {
-                if files % 4000 == 0 {
-                    log(format_args!(
-                        "[Pack] {files} files packed, {:.0} s",
-                        started.elapsed().as_secs_f64()
-                    ));
-                }
-            });
-            match result {
-                Ok((files, bytes)) => log(format_args!(
-                    "[Pack] done: {files} files, {:.1} MiB in {:.0} s; used from the next start",
-                    bytes as f64 / 1048576.0,
-                    started.elapsed().as_secs_f64()
-                )),
-                Err(e) => log(format_args!(
-                    "[Pack] packing failed: {e}; the folder is used as it is"
-                )),
+            for (root, folder, marker) in todo {
+                build_one(&root, &folder, marker.as_deref());
             }
+            BUILDING.store(false, Relaxed);
         });
     if spawned.is_err() {
         BUILDING.store(false, Relaxed);
     }
 }
 
-/// The pack in use and `real`'s path in it, when `real` is under the packed folder.
-pub(super) fn locate(real: &[String]) -> Option<(&'static Mount, String)> {
-    let mount = MOUNT.get()?;
-    if real.len() < mount.root.len() || real[..mount.root.len()] != mount.root[..] {
-        return None;
+fn build_one(root: &Parts, folder: &Path, marker: Option<&Path>) {
+    let stamp = match marker {
+        Some(marker) => match pack::stamp_of(marker) {
+            Some(stamp) => Some(stamp),
+            // The cache has no record of the folder: it isn't finished.
+            None => return,
+        },
+        None => None,
+    };
+    let started = Instant::now();
+    log(format_args!(
+        "[Pack] packing {} into {}",
+        folder.display(),
+        pack::pack_path(folder).display()
+    ));
+    let result = pack::build(folder, stamp.as_deref(), |files| {
+        if files % 4000 == 0 {
+            log(format_args!(
+                "[Pack] {files} files packed, {:.0} s",
+                started.elapsed().as_secs_f64()
+            ));
+        }
+    });
+    match result {
+        Ok((files, bytes)) => {
+            log(format_args!(
+                "[Pack] done: {files} files, {:.1} MiB in {:.0} s",
+                bytes as f64 / 1048576.0,
+                started.elapsed().as_secs_f64()
+            ));
+            // A cache folder's pack is used right away (changes made meanwhile are in its
+            // changes file); the resources folder's from the next start.
+            if let Some(marker) = marker
+                && pack::stamp_of(marker) == stamp
+            {
+                match open(root, folder, stamp.as_deref()) {
+                    Ok(m) => {
+                        mount(m);
+                        log(format_args!(
+                            "[Pack] {} in use",
+                            pack::pack_path(folder).display()
+                        ));
+                    }
+                    Err(why) => log(format_args!(
+                        "[Pack] {} not used: {why}",
+                        pack::pack_path(folder).display()
+                    )),
+                }
+            }
+        }
+        Err(e) => log(format_args!(
+            "[Pack] packing {} failed: {e}; the folder is used as it is",
+            folder.display()
+        )),
     }
-    Some((mount, real[mount.root.len()..].join("/")))
 }
 
-/// Notes that the game changes `real` (when it's under the packed folder): from now on it comes
+/// The pack in use and `real`'s path in it, when `real` is under a packed folder.
+pub(super) fn locate(real: &[String]) -> Option<(Arc<Mount>, String)> {
+    let all = mounts();
+    let mount = all.iter().find(|m| under(real, &m.root))?;
+    Some((mount.clone(), real[mount.root.len()..].join("/")))
+}
+
+/// Notes that the game changes `real` (when it's under a packed folder): from now on it comes
 /// from the folder.
 ///
-/// Noted without a pack in use too (the first start, while the pack is built): the pack built then
-/// may hold the file as it was before the change.
+/// Noted without a pack in use too (while the pack is built): the pack built then may hold the
+/// file as it was before the change.
 pub(super) fn changing(real: &[String]) {
     let (folder, rel, lines) = if let Some((mount, rel)) = locate(real) {
         let Some(lines) = mount.index.note_change(&rel) else {
             return;
         };
-        (&mount.folder, rel, lines)
+        (mount.folder.clone(), rel, lines)
     } else {
-        let Some((root, folder)) = FOLDER.get() else {
+        let mut all = folders();
+        let Some(f) = all.iter_mut().find(|f| under(real, &f.root)) else {
             return;
         };
-        if real.len() < root.len() || real[..root.len()] != root[..] {
-            return;
-        }
-        let rel = real[root.len()..].join("/");
-        let mut noted = NOTED.lock().unwrap_or_else(|e| e.into_inner());
-        if !noted
-            .get_or_insert_with(Default::default)
-            .insert(rel.clone())
-        {
+        let rel = real[f.root.len()..].join("/");
+        if !f.noted.insert(rel.clone()) {
             return;
         }
         let parent = rel.rsplit_once('/').map_or("", |(dir, _)| dir);
@@ -228,13 +380,13 @@ pub(super) fn changing(real: &[String]) {
         if !rel.is_empty() {
             lines.push_str(&format!("L {parent}\n"));
         }
-        (folder, rel, lines)
+        (f.folder.clone(), rel, lines)
     };
     use std::io::Write;
     let appended = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(pack::changes_path(folder))
+        .open(pack::changes_path(&folder))
         .and_then(|mut f| f.write_all(lines.as_bytes()));
     if let Err(e) = appended {
         log(format_args!("[Pack] could not note a change to {rel}: {e}"));
@@ -281,6 +433,7 @@ pub(super) fn no_manifest(dir: &str) -> bool {
 
 /// A file opened from the pack.
 struct Open {
+    mount: Arc<Mount>,
     start: u64,
     size: u64,
     at: u64,
@@ -296,11 +449,12 @@ fn open_files() -> std::sync::MutexGuard<'static, Option<HashMap<usize, Open>>> 
 }
 
 /// Opens `entry` (packed at `start`) as the file record `file`.
-pub(super) fn open_packed(file: *mut c_void, start: u64, entry: &Entry) {
+pub(super) fn open_packed(file: *mut c_void, mount: Arc<Mount>, start: u64, entry: &Entry) {
     let mut open = open_files();
     open.get_or_insert_with(HashMap::new).insert(
         file as usize,
         Open {
+            mount,
             start,
             size: entry.size,
             at: 0,
@@ -320,10 +474,10 @@ pub(super) fn is_packed(file: *mut c_void) -> bool {
 }
 
 pub(super) fn read(r: *mut c_void, file: *mut c_void, buf: *mut u8, len: usize) -> isize {
-    let Some((start, at, size)) = open_files()
+    let Some((mount, start, at, size)) = open_files()
         .as_ref()
         .and_then(|open| open.get(&(file as usize)))
-        .map(|f| (f.start, f.at, f.size))
+        .map(|f| (f.mount.clone(), f.start, f.at, f.size))
     else {
         return super::devoptab::fail(r, libc::EBADF) as isize;
     };
@@ -331,7 +485,6 @@ pub(super) fn read(r: *mut c_void, file: *mut c_void, buf: *mut u8, len: usize) 
     if n == 0 {
         return 0;
     }
-    let mount = MOUNT.get().expect("a packed file without a pack");
     let mut got = 0u64;
     let rc = unsafe {
         fsFileRead(
@@ -407,7 +560,8 @@ pub(super) enum Answer {
     /// Not under the packed folder, or the index leaves it to the folder.
     Folder,
     Missing,
-    Entry(Entry),
+    /// In the index, and the pack holding it.
+    Entry(Entry, Arc<Mount>),
 }
 
 pub(super) fn answer(real: &[String]) -> Answer {
@@ -415,7 +569,7 @@ pub(super) fn answer(real: &[String]) -> Answer {
         return Answer::Folder;
     };
     match mount.index.find(&rel) {
-        Found::Indexed(entry) => Answer::Entry(*entry),
+        Found::Indexed(entry) => Answer::Entry(*entry, mount.clone()),
         Found::Missing => Answer::Missing,
         Found::Folder => Answer::Folder,
     }
@@ -429,6 +583,9 @@ pub(super) fn listing(real: &[String]) -> Option<Vec<(String, Entry)>> {
         names
             .iter()
             .filter_map(|name| {
+                if name == super::MANIFEST {
+                    return None;
+                }
                 let child = if rel.is_empty() {
                     name.clone()
                 } else {

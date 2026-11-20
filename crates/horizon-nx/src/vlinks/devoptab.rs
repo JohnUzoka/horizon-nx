@@ -308,9 +308,9 @@ unsafe fn open_inner(
     } else {
         match pack_device::answer(&real) {
             pack_device::Answer::Missing => return fail(r, super::ENOENT),
-            pack_device::Answer::Entry(entry) => {
+            pack_device::Answer::Entry(entry, mount) => {
                 if let Some(at) = pack_device::packed_at(&entry) {
-                    pack_device::open_packed(file, at, &entry);
+                    pack_device::open_packed(file, mount, at, &entry);
                     return 0;
                 }
             }
@@ -398,7 +398,7 @@ unsafe extern "C" fn fpathconf_r(r: R, file: *mut c_void, name: c_int) -> c_long
 /// `stat` from the pack's index when it can answer.
 unsafe fn stat_packed(r: R, real: &[String], st: *mut Stat) -> Option<c_int> {
     match pack_device::answer(real) {
-        pack_device::Answer::Entry(entry) => {
+        pack_device::Answer::Entry(entry, _) => {
             unsafe { pack_device::fill(st, &entry) };
             Some(0)
         }

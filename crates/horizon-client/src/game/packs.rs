@@ -65,7 +65,15 @@ pub fn startup_root(
     let all = packs::discover(vanilla, &packs_dir());
     let mut enabled = packs::enabled(&all, selected);
     enabled.extend_from_slice(server);
-    packs::resource_root(vanilla, &enabled, &cache_dir())
+    let root = packs::resource_root(vanilla, &enabled, &cache_dir())?;
+    // On the Switch the overlay's thousands of loose files cost seconds of SD card calls at
+    // each reload: once packed (in the background, after the first reload), they are read from
+    // its pack, as the resources folder is.
+    #[cfg(target_os = "horizon")]
+    if root != vanilla {
+        horizon_nx::vlinks::use_cache_pack(&root, &packs::overlay_marker(&root));
+    }
+    Ok(root)
 }
 fn info(p: &Pack) -> PackInfo {
     let built_in = !p.id.starts_with("file/");
@@ -257,6 +265,9 @@ impl Game<'_> {
             started.elapsed().as_secs_f64()
         );
         super::log_sd_io();
+        // Pack the new overlay for the next reload, if it has no pack yet.
+        #[cfg(target_os = "horizon")]
+        horizon_nx::vlinks::build_pack_in_background();
         applied
     }
     fn apply_staged_pack_now(&mut self, staged: StagedPack) -> horizon_client::Result<()> {
