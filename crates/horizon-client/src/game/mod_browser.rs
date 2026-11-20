@@ -26,6 +26,8 @@ pub(super) struct State {
     fetching: Option<mpsc::Receiver<Result<Index, String>>>,
     /// The project being installed, and what its install says when done.
     installing: Option<(String, mpsc::Receiver<Result<String, String>>)>,
+    /// The mods being checked in the background (whether this game reads them), one by one.
+    checking: Option<mpsc::Receiver<(String, Check)>>,
 }
 
 fn agent() -> ureq::Agent {
@@ -96,21 +98,60 @@ fn destination(kind: BrowserKind, p: &Project, v: &Version) -> Result<PathBuf, S
     }
 }
 
-/// Downloads `v` of `p`, checks it against the index and moves it to `dest`.
-fn install(index: &Index, p: &Project, v: &Version, dest: &Path) -> Result<(), String> {
+/// Get Mods' files: downloads in progress, and the files checked already (`checked/<sha256>`, or
+/// `checked/<sha256>.refused` with why this game can't read it).
+fn browser_dir() -> PathBuf {
+    Game::options_path().with_file_name("mod-browser")
+}
+
+fn checked_path(v: &Version) -> PathBuf {
+    browser_dir().join("checked").join(&v.file.sha256)
+}
+
+fn refused_path(v: &Version) -> PathBuf {
+    browser_dir()
+        .join("checked")
+        .join(format!("{}.refused", v.file.sha256))
+}
+
+/// What a check of a file found.
+enum Check {
+    /// Checked: at [`checked_path`].
+    Passed,
+    /// The file is the index's, but this game can't read it (made for a newer Horizon).
+    Refused(String),
+    /// It couldn't be downloaded: nothing is known (not kept).
+    Unreachable(String),
+}
+
+/// What is known of `v` already, from an earlier check.
+fn known(v: &Version) -> Option<Check> {
+    if checked_path(v).exists() {
+        return Some(Check::Passed);
+    }
+    std::fs::read_to_string(refused_path(v))
+        .ok()
+        .map(Check::Refused)
+}
+
+/// Downloads `v` of `p` and checks it against the index (`check_file`: size, SHA-256, signature,
+/// and that this game reads its manifest and content). A file that passes is kept at
+/// [`checked_path`], ready to install; one this game can't read is noted at [`refused_path`].
+/// `tag` keeps two downloads of the same file (a check and an install) apart.
+fn download_and_check(index: &Index, p: &Project, v: &Version, tag: &str) -> Check {
     let url = &v.file.url;
     // The registry's own releases, or a project's (docs/api/mod-index.md, `file`).
     if !url.starts_with("https://github.com/") || !url.contains("/releases/download/") {
-        return Err(format!("{}: not a GitHub release file", p.name));
+        return Check::Refused("not a GitHub release file".into());
     }
-    if v.file.size > index::MAX_FILE || !plain(&v.file.name) {
-        return Err(format!("{}: the index lists an odd file", p.name));
+    if v.file.size > index::MAX_FILE || !plain(&v.file.name) || !plain(&v.file.sha256) {
+        return Check::Refused("the index lists an odd file".into());
     }
-    let folder = Game::options_path()
-        .with_file_name("mod-browser")
-        .join("downloads");
-    std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
-    let part = folder.join(format!(".{}.part", v.file.name));
+    let folder = browser_dir().join("checked");
+    if let Err(e) = std::fs::create_dir_all(&folder) {
+        return Check::Unreachable(e.to_string());
+    }
+    let part = folder.join(format!(".{}.{tag}.part", v.file.sha256));
     let downloaded = (|| {
         let response = agent().get(url).call().map_err(|e| match e {
             ureq::Error::Status(code, _) => format!("download: HTTP {code}"),
@@ -124,20 +165,44 @@ fn install(index: &Index, p: &Project, v: &Version, dest: &Path) -> Result<(), S
         file.sync_all().map_err(|e| e.to_string())?;
         // Closed before it is read again: the Switch's file system won't open a file twice.
         drop(file);
-        index::check_file(index, p, v, &part)
+        Ok::<(), String>(())
     })();
     if let Err(e) = downloaded {
         let _ = std::fs::remove_file(&part);
-        return Err(format!("{}: {e}", p.name));
+        return Check::Unreachable(e);
+    }
+    match index::check_file(index, p, v, &part) {
+        Ok(_) => match std::fs::rename(&part, checked_path(v)) {
+            Ok(()) => Check::Passed,
+            Err(e) => {
+                let _ = std::fs::remove_file(&part);
+                Check::Unreachable(e.to_string())
+            }
+        },
+        Err(e) => {
+            let _ = std::fs::remove_file(&part);
+            // A wrong size or hash is a bad download, not the file's verdict.
+            if e.contains("bytes, the index lists") || e.contains("SHA-256") {
+                return Check::Unreachable(e);
+            }
+            let _ = std::fs::write(refused_path(v), &e);
+            Check::Refused(e)
+        }
+    }
+}
+
+/// Installs `v` of `p` at `dest`: its checked file, downloaded and checked now if it wasn't.
+fn install(index: &Index, p: &Project, v: &Version, dest: &Path) -> Result<(), String> {
+    match known(v).unwrap_or_else(|| download_and_check(index, p, v, "install")) {
+        Check::Passed => {}
+        Check::Refused(e) => return Err(format!("{} needs a newer Horizon: {e}", p.name)),
+        Check::Unreachable(e) => return Err(format!("{}: {e}", p.name)),
     }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let _ = std::fs::remove_file(dest);
-    std::fs::rename(&part, dest).map_err(|e| {
-        let _ = std::fs::remove_file(&part);
-        format!("{}: {e}", p.name)
-    })
+    std::fs::rename(checked_path(v), dest).map_err(|e| format!("{}: {e}", p.name))
 }
 
 impl Game<'_> {
@@ -208,9 +273,25 @@ impl Game<'_> {
         let mut projects: Vec<&Project> = index.projects.iter().collect();
         projects.sort_by(|a, b| b.downloads.cmp(&a.downloads).then(a.name.cmp(&b.name)));
         let mut entries = Vec::new();
+        let mut to_check = Vec::new();
+        let checking = self.mods.browser.checking.is_some();
         for p in projects {
             let Some((kind, v)) = offered(&index, p) else {
                 continue;
+            };
+            // A mod's file may use what this game can't read (made for a newer Horizon): each is
+            // downloaded and checked once, in the background, before it is offered.
+            let mut verdict = || match (kind, known(v)) {
+                (BrowserKind::ResourcePacks, _) | (_, Some(Check::Passed)) => {
+                    BrowserState::Available
+                }
+                (_, Some(Check::Refused(_))) => BrowserState::Unsupported,
+                _ if failed.contains(&p.id) => BrowserState::Failed,
+                _ if checking => BrowserState::Checking,
+                _ => {
+                    to_check.push((p.clone(), v.clone()));
+                    BrowserState::Checking
+                }
             };
             let state = if installing.as_deref() == Some(&p.id) {
                 BrowserState::Installing
@@ -220,12 +301,14 @@ impl Game<'_> {
                         // A mod keeps its name across versions: its hash tells.
                         BrowserKind::Mods => match index::sha256_file(&dest) {
                             Ok(hash) if hash == v.file.sha256 => BrowserState::Installed,
-                            _ => BrowserState::Update,
+                            _ => match verdict() {
+                                BrowserState::Available => BrowserState::Update,
+                                other => other,
+                            },
                         },
                         BrowserKind::ResourcePacks => BrowserState::Installed,
                     },
-                    _ if failed.contains(&p.id) => BrowserState::Failed,
-                    _ => BrowserState::Available,
+                    _ => verdict(),
                 }
             };
             entries.push(BrowserEntry {
@@ -238,6 +321,9 @@ impl Game<'_> {
                 state,
             });
         }
+        if !to_check.is_empty() {
+            self.check_mods(index.clone(), to_check);
+        }
         let browser = &mut self.ui.options.browser;
         if entries.is_empty() {
             browser.status = Some("Horizon's registry has nothing to install here yet.".into());
@@ -245,6 +331,26 @@ impl Game<'_> {
             browser.status = None;
         }
         browser.entries = entries;
+    }
+
+    /// Downloads and checks `mods` one after another on a thread; each verdict comes back to
+    /// [`Self::drive_mod_browser`].
+    fn check_mods(&mut self, index: Arc<Index>, mods: Vec<(Project, Version)>) {
+        let (send, receive) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("mod-check".into())
+            .spawn(move || {
+                for (p, v) in mods {
+                    let check =
+                        known(&v).unwrap_or_else(|| download_and_check(&index, &p, &v, "check"));
+                    if send.send((p.id.clone(), check)).is_err() {
+                        return;
+                    }
+                }
+            });
+        if spawned.is_ok() {
+            self.mods.browser.checking = Some(receive);
+        }
     }
 
     /// Get Mods' Install: one at a time, on a thread.
@@ -322,8 +428,64 @@ impl Game<'_> {
         }
     }
 
-    /// Each frame: the index and installs that finished.
+    /// Each frame: the index, the checks and the installs that finished.
     pub(super) fn drive_mod_browser(&mut self) {
+        while let Some(receive) = &self.mods.browser.checking {
+            match receive.try_recv() {
+                Ok((id, check)) => {
+                    let installed = self
+                        .ui
+                        .options
+                        .browser
+                        .entries
+                        .iter()
+                        .any(|e| e.id == id && e.state == BrowserState::Installing);
+                    if installed {
+                        continue;
+                    }
+                    let state = match check {
+                        Check::Passed => BrowserState::Available,
+                        Check::Refused(why) => {
+                            log::info!("Horizon: Get Mods: {id} needs a newer Horizon: {why}");
+                            BrowserState::Unsupported
+                        }
+                        Check::Unreachable(why) => {
+                            log::info!("Horizon: Get Mods: couldn't check {id}: {why}");
+                            BrowserState::Available
+                        }
+                    };
+                    let update = self.ui.options.browser.entries.iter().any(|e| {
+                        e.id == id && e.state == BrowserState::Checking && {
+                            let dest = Game::options_path()
+                                .with_file_name(mod_list::DIR)
+                                .join(format!("{id}.hmod"));
+                            dest.exists()
+                        }
+                    });
+                    let state = if update && state == BrowserState::Available {
+                        BrowserState::Update
+                    } else {
+                        state
+                    };
+                    self.set_browser_state(&id, state);
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.mods.browser.checking = None;
+                    // What wasn't checked (the page reopened meanwhile) is checked now.
+                    if self
+                        .ui
+                        .options
+                        .browser
+                        .entries
+                        .iter()
+                        .any(|e| e.state == BrowserState::Checking)
+                    {
+                        self.fill_mod_browser();
+                    }
+                }
+            }
+        }
         if let Some(receive) = &self.mods.browser.fetching {
             match receive.try_recv() {
                 Ok(Ok(index)) => {

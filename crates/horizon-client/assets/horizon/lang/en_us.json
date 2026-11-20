@@ -39,6 +39,8 @@
   "horizon.mod_browser.installing": "Installing...",
   "horizon.mod_browser.installed": "Installed",
   "horizon.mod_browser.retry": "Failed: Try Again",
+  "horizon.mod_browser.checking": "Checking...",
+  "horizon.mod_browser.unsupported": "Needs a newer Horizon",
   "horizon.options.keyboard.switch": "Switch",
   "horizon.options.unavailable": "This feature is not yet available in Horizon.",
   "horizon.options.search": "Search settings...",

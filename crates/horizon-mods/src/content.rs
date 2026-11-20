@@ -329,6 +329,11 @@ impl Content {
                 blocks.push((block, name.clone()));
             } else if let Some(item) = parse("item") {
                 items.push((item, name.clone()));
+            } else if decl.ends_with(".json") && decl.contains('/') {
+                // A declaration of a kind newer mods carry (creative tabs, entity types, menus):
+                // left out, with the mod's blocks and items still loaded. It stays an inert
+                // data file nothing reads.
+                continue;
             } else {
                 return Err(format!(
                     "{name}: data/{id}/horizon/ holds block/*.json and item/*.json only"
@@ -640,7 +645,19 @@ capabilities = ["registries"]
             ],
         );
         assert!(e.contains("also a block's item"), "{e}");
-        refused("other-kind", &[("data/ruby/horizon/entity/a.json", b"{}")]);
+        refused("loose-declaration", &[("data/ruby/horizon/a.json", b"{}")]);
+        // Newer mods' other declarations (creative tabs, entity types) are left out: the mod's
+        // blocks and items still load.
+        let content = hmod(
+            "other-kind",
+            MANIFEST_TEXT,
+            &[
+                ("data/ruby/horizon/creative_tab/tab.json", b"{}"),
+                ("data/ruby/horizon/block/a.json", BLOCK),
+            ],
+        )
+        .unwrap();
+        assert_eq!(content.blocks.len(), 1);
         refused(
             "stack",
             &[(

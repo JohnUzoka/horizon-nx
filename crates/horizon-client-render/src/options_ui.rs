@@ -1543,6 +1543,8 @@ impl OptionsUi {
                     true,
                 ),
                 BrowserState::Update => (tr("horizon.mod_browser.update"), true),
+                BrowserState::Checking => (tr("horizon.mod_browser.checking"), false),
+                BrowserState::Unsupported => (tr("horizon.mod_browser.unsupported"), false),
                 BrowserState::Installing => (tr("horizon.mod_browser.installing"), false),
                 BrowserState::Installed => (tr("horizon.mod_browser.installed"), false),
                 BrowserState::Failed => (tr("horizon.mod_browser.retry"), true),
