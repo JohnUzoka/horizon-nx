@@ -275,6 +275,7 @@ impl Game<'_> {
                 }
                 Event::BrowseMods => self.browse_mods(),
                 Event::InstallMod(id) => self.install_mod(&id),
+                Event::RemoveMod(id) => self.remove_mod(&id),
                 // Saved; the next frame's `shader_pack_inputs` loads the pick.
                 Event::ShaderPack => self.settings.save(&Self::options_path()),
                 Event::OpenShaderPackFolder => {

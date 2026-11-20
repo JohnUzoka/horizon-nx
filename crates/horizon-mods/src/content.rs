@@ -341,9 +341,26 @@ impl Content {
             }
         }
         let mut ids = BTreeSet::new();
-        for (block, name) in blocks {
+        // One reader for every declaration: opening a packaged mod reads its archive's whole
+        // index, so an open per file costs a mod with hundreds of blocks minutes on the Switch.
+        let declared = {
+            let mut reader = self.reader()?;
+            let mut read = |name: &str| reader.read(name);
+            (
+                blocks
+                    .into_iter()
+                    .map(|(id, name)| read(&name).map(|bytes| (id, name, bytes)))
+                    .collect::<Result<Vec<_>, String>>()?,
+                items
+                    .into_iter()
+                    .map(|(id, name)| read(&name).map(|bytes| (id, name, bytes)))
+                    .collect::<Result<Vec<_>, String>>()?,
+            )
+        };
+        let (blocks, items) = declared;
+        for (block, name, bytes) in blocks {
             let file: BlockFile =
-                serde_json::from_slice(&self.file(&name)?).map_err(|e| format!("{name}: {e}"))?;
+                serde_json::from_slice(&bytes).map_err(|e| format!("{name}: {e}"))?;
             check_block(&file).map_err(|e| format!("{name}: {e}"))?;
             if file.item {
                 ids.insert(block.clone());
@@ -357,9 +374,9 @@ impl Content {
                 item: file.item,
             });
         }
-        for (item, name) in items {
+        for (item, name, bytes) in items {
             let file: ItemFile =
-                serde_json::from_slice(&self.file(&name)?).map_err(|e| format!("{name}: {e}"))?;
+                serde_json::from_slice(&bytes).map_err(|e| format!("{name}: {e}"))?;
             if !vanilla_id(&file.template) {
                 return Err(format!(
                     "{name}: template {:?} is not a vanilla item (minecraft:...)",

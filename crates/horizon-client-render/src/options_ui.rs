@@ -1259,6 +1259,7 @@ enum Act {
     /// Get Mods: show a tab; install `browser.entries[i]`.
     BrowseTab(crate::mod_list::BrowserKind),
     BrowseInstall(usize),
+    BrowseRemove(usize),
 }
 enum WKind {
     Button {
@@ -1334,6 +1335,8 @@ pub enum Event {
     BrowseMods,
     /// Get Mods: install this project of the registry.
     InstallMod(String),
+    /// Get Mods: delete this project's installed file.
+    RemoveMod(String),
 }
 /// `SliderableValueSet.applyValueImmediately`: these apply 600 ms after
 /// the last change (`OptionInstanceSliderButton.delayedApplyAt`).
@@ -1548,9 +1551,28 @@ impl OptionsUi {
                 BrowserState::Installed => (tr("horizon.mod_browser.installed"), false),
                 BrowserState::Failed => (tr("horizon.mod_browser.retry"), true),
             };
-            let label = Text::literal(format!("{name}: ")).append(what);
-            let w = button(0.0, 0.0, 310.0, label, Act::BrowseInstall(i));
-            rows.push(Row::Buttons(if active { w } else { inactive(w) }, None));
+            // Installed: Remove beside it.
+            let installed = matches!(e.state, BrowserState::Installed | BrowserState::Update);
+            if installed {
+                let name = shorten(&e.name, 16);
+                let label = Text::literal(format!("{name}: ")).append(what);
+                let w = button(0.0, 0.0, 150.0, label, Act::BrowseInstall(i));
+                let remove = button(
+                    0.0,
+                    0.0,
+                    150.0,
+                    tr("horizon.mod_browser.remove"),
+                    Act::BrowseRemove(i),
+                );
+                rows.push(Row::Buttons(
+                    if active { w } else { inactive(w) },
+                    Some(remove),
+                ));
+            } else {
+                let label = Text::literal(format!("{name}: ")).append(what);
+                let w = button(0.0, 0.0, 310.0, label, Act::BrowseInstall(i));
+                rows.push(Row::Buttons(if active { w } else { inactive(w) }, None));
+            }
             if !e.summary.is_empty() {
                 rows.push(Row::Note(shorten(&e.summary, 70)));
             }
@@ -3147,6 +3169,11 @@ impl OptionsUi {
                         Act::BrowseInstall(i) => {
                             if let Some(entry) = self.browser.entries.get(i) {
                                 events.push(Event::InstallMod(entry.id.clone()));
+                            }
+                        }
+                        Act::BrowseRemove(i) => {
+                            if let Some(entry) = self.browser.entries.get(i) {
+                                events.push(Event::RemoveMod(entry.id.clone()));
                             }
                         }
                         Act::PickShaderPack(i) => {

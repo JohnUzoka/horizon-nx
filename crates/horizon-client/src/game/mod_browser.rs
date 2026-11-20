@@ -428,6 +428,63 @@ impl Game<'_> {
         self.set_browser_state(id, BrowserState::Installing);
     }
 
+    /// Get Mods' Remove: the installed file goes. A mod is turned off and gone from the Mods
+    /// page (its blocks stay in the game until a restart); a resource pack in use is turned off
+    /// first, which reloads the packs.
+    pub(super) fn remove_mod(&mut self, id: &str) {
+        if self
+            .mods
+            .browser
+            .installing
+            .as_ref()
+            .is_some_and(|(busy, _, _)| busy == id)
+        {
+            return;
+        }
+        let Some((index, _)) = &self.mods.browser.index else {
+            return;
+        };
+        let index = index.clone();
+        let Some(p) = index.project(id) else {
+            return;
+        };
+        let Some((kind, v)) = offered(&index, p) else {
+            return;
+        };
+        let dest = match destination(kind, p, v) {
+            Ok(dest) => dest,
+            Err(e) => {
+                self.ui.options.browser.status = Some(e);
+                return;
+            }
+        };
+        if let Err(e) = std::fs::remove_file(&dest) {
+            log::warn!("Horizon: Get Mods: removing {}: {e}", dest.display());
+            self.ui.options.browser.status = Some(format!("Can't remove {}: {e}", p.name));
+            return;
+        }
+        log::info!("Horizon: Get Mods: removed {}", dest.display());
+        let name = p.name.clone();
+        self.ui.options.browser.status = Some(match kind {
+            BrowserKind::Mods => {
+                self.settings.mods.enabled.remove(id);
+                self.settings.save(&Self::options_path());
+                self.start_mods();
+                format!("{name} is removed: restart Horizon to play without it.")
+            }
+            BrowserKind::ResourcePacks => {
+                let pack = format!("file/{}", v.file.name);
+                if self.settings.resource_packs.contains(&pack) {
+                    self.settings.resource_packs.retain(|p| *p != pack);
+                    self.settings.save(&Self::options_path());
+                    self.reload_packs();
+                }
+                format!("{name} is removed.")
+            }
+        });
+        self.set_browser_state(id, BrowserState::Available);
+    }
+
     fn browser_name(&self, id: &str) -> String {
         self.ui
             .options
