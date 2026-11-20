@@ -950,6 +950,7 @@ impl Game<'_> {
                 return;
             }
         } else {
+            log::info!("Horizon: chat click with the chat closed: open the chat to click messages");
             return;
         }
         let Some(style) = self.ui.chat.style_at(
@@ -958,8 +959,36 @@ impl Game<'_> {
             cursor.0 as f64,
             cursor.1 as f64,
         ) else {
+            log::info!(
+                "Horizon: chat click at ({:.0}, {:.0}) of {height:.0}: no message there",
+                cursor.0,
+                cursor.1
+            );
             return;
         };
+        // What a click on a message does, for reports of clicks that do nothing (a server's
+        // "[Yes!]"); a command is named by its first word only.
+        log::info!(
+            "Horizon: chat click at ({:.0}, {:.0}): {}",
+            cursor.0,
+            cursor.1,
+            match &style.click {
+                Some(ClickEvent::RunCommand(c)) => format!(
+                    "runs /{}",
+                    c.trim_start_matches('/')
+                        .split(' ')
+                        .next()
+                        .unwrap_or_default()
+                ),
+                Some(ClickEvent::SuggestCommand(_)) => "suggests a command".into(),
+                Some(ClickEvent::OpenUrl(_)) => "opens a link".into(),
+                Some(ClickEvent::CopyToClipboard(_)) => "copies text".into(),
+                Some(ClickEvent::ShowDialog(_)) => "shows a dialog".into(),
+                Some(ClickEvent::OpenFile(_)) => "opens a file".into(),
+                Some(ClickEvent::ChangePage(_)) => "changes the page".into(),
+                None => "text with no click action".into(),
+            }
+        );
         // ChatScreen.handleComponentClicked: with Shift held only an
         // insertion acts, else only the click event.
         if self.has_shift_down() {
