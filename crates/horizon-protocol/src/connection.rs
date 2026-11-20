@@ -142,9 +142,43 @@ impl Write for Pipe {
     }
 }
 
+/// A connection's socket, shared by its reader, writer and closer. On the Switch they share one
+/// socket instead of each holding a duplicate: libnx's sockets can't be duplicated (`dup` gives a
+/// descriptor that is not a socket, and every read or write on it fails with EBADF, "Bad file
+/// number"), and the reader and writer may use one socket from two threads.
+#[cfg(target_os = "horizon")]
+type Tcp = Arc<TcpStream>;
+#[cfg(not(target_os = "horizon"))]
+type Tcp = TcpStream;
+
+#[cfg(target_os = "horizon")]
+fn clone_tcp(s: &Tcp) -> std::io::Result<Tcp> {
+    Ok(s.clone())
+}
+#[cfg(not(target_os = "horizon"))]
+fn clone_tcp(s: &Tcp) -> std::io::Result<Tcp> {
+    s.try_clone()
+}
+
+/// The socket itself, for [`Connection::detach`]. On the Switch the writer's share is gone by
+/// then and no [`Closer`] holds one (they would have to be duplicated, which libnx can't do), so
+/// the reader's share is the only one.
+#[cfg(target_os = "horizon")]
+fn owned_tcp(s: Tcp) -> TcpStream {
+    Arc::try_unwrap(s).unwrap_or_else(|shared| {
+        shared
+            .try_clone()
+            .expect("a detached connection's socket is still shared, and libnx can't duplicate it")
+    })
+}
+#[cfg(not(target_os = "horizon"))]
+fn owned_tcp(s: Tcp) -> TcpStream {
+    s
+}
+
 /// What a connection runs over.
 enum Stream {
-    Tcp(TcpStream),
+    Tcp(Tcp),
     Memory(Pipe),
     /// Given up by [`Connection::detach`]: reads and writes fail.
     Detached,
@@ -155,7 +189,7 @@ fn detached() -> std::io::Error {
 impl Stream {
     fn try_clone(&self) -> std::io::Result<Self> {
         Ok(match self {
-            Self::Tcp(s) => Self::Tcp(s.try_clone()?),
+            Self::Tcp(s) => Self::Tcp(clone_tcp(s)?),
             Self::Memory(p) => Self::Memory(p.try_clone()),
             Self::Detached => Self::Detached,
         })
@@ -183,7 +217,10 @@ impl Stream {
 impl Read for Stream {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
         match self {
-            Self::Tcp(s) => s.read(out),
+            Self::Tcp(s) => {
+                let mut s: &TcpStream = s;
+                s.read(out)
+            }
             Self::Memory(p) => p.read(out),
             Self::Detached => Err(detached()),
         }
@@ -192,14 +229,20 @@ impl Read for Stream {
 impl Write for Stream {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         match self {
-            Self::Tcp(s) => s.write(data),
+            Self::Tcp(s) => {
+                let mut s: &TcpStream = s;
+                s.write(data)
+            }
             Self::Memory(p) => p.write(data),
             Self::Detached => Err(detached()),
         }
     }
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
-            Self::Tcp(s) => s.flush(),
+            Self::Tcp(s) => {
+                let mut s: &TcpStream = s;
+                s.flush()
+            }
             Self::Memory(p) => p.flush(),
             Self::Detached => Err(detached()),
         }
@@ -341,7 +384,7 @@ impl Connection {
     }
     pub fn from_stream(stream: TcpStream) -> Result<Self> {
         stream.set_nodelay(true)?;
-        Self::over(Stream::Tcp(stream))
+        Self::over(Stream::Tcp(stream.into()))
     }
     /// A connection over one end of an in-memory [`Pipe`].
     pub fn local(pipe: Pipe) -> Self {
@@ -415,7 +458,7 @@ impl Connection {
     pub fn detach(mut self) -> (Socket, ConnReader, ConnWriter) {
         self.writer.stream = Stream::Detached;
         let socket = match std::mem::replace(&mut self.reader.stream, Stream::Detached) {
-            Stream::Tcp(s) => Socket::Tcp(s),
+            Stream::Tcp(s) => Socket::Tcp(owned_tcp(s)),
             Stream::Memory(p) => Socket::Memory(p),
             Stream::Detached => unreachable!("a connection is detached once, by value"),
         };
