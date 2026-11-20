@@ -8,8 +8,9 @@
 use super::Game;
 use horizon_client::mod_list::{self, BrowserEntry, BrowserKind, BrowserState};
 use horizon_mods::index::{self, Index, Kind, Project, Version};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -19,15 +20,38 @@ const INDEX_URL: &str = "https://horizon-rust.github.io/horizon-mods/index.json"
 const REFRESH: Duration = Duration::from_secs(10 * 60);
 const INDEX_MAX: u64 = 32 << 20;
 const GAME: &str = horizon_core::version::VERSION_ID;
+/// What a refused mod's install says.
+const NEEDS_NEWER: &str = "needs a newer Horizon";
+/// An install stopped because the page was left.
+const CANCELLED: &str = "stopped: Get Mods was closed";
 
 #[derive(Default)]
 pub(super) struct State {
     index: Option<(Arc<Index>, Instant)>,
     fetching: Option<mpsc::Receiver<Result<Index, String>>>,
-    /// The project being installed, and what its install says when done.
-    installing: Option<(String, mpsc::Receiver<Result<String, String>>)>,
-    /// The mods being checked in the background (whether this game reads them), one by one.
-    checking: Option<mpsc::Receiver<(String, Check)>>,
+    /// The project being installed, what its install says when done, and its stop switch.
+    installing: Option<(
+        String,
+        mpsc::Receiver<Result<String, String>>,
+        Arc<AtomicBool>,
+    )>,
+}
+
+/// While it lives, the calling thread waits on the network ahead of the game's threads
+/// (`horizon_nx::favour_waiting_thread`).
+struct Waiting;
+impl Waiting {
+    fn start() -> Self {
+        #[cfg(target_os = "horizon")]
+        horizon_nx::favour_waiting_thread(true);
+        Waiting
+    }
+}
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        #[cfg(target_os = "horizon")]
+        horizon_nx::favour_waiting_thread(false);
+    }
 }
 
 fn agent() -> ureq::Agent {
@@ -41,6 +65,7 @@ fn agent() -> ureq::Agent {
 
 /// The body of `url`, at most `limit` bytes.
 fn fetch(url: &str, limit: u64) -> Result<Vec<u8>, String> {
+    let _waiting = Waiting::start();
     let response = agent().get(url).call().map_err(|e| match e {
         ureq::Error::Status(code, _) => format!("HTTP {code}"),
         ureq::Error::Transport(e) => e.to_string(),
@@ -137,8 +162,8 @@ fn known(v: &Version) -> Option<Check> {
 /// Downloads `v` of `p` and checks it against the index (`check_file`: size, SHA-256, signature,
 /// and that this game reads its manifest and content). A file that passes is kept at
 /// [`checked_path`], ready to install; one this game can't read is noted at [`refused_path`].
-/// `tag` keeps two downloads of the same file (a check and an install) apart.
-fn download_and_check(index: &Index, p: &Project, v: &Version, tag: &str) -> Check {
+/// It stops when `cancel` is set (the page was left).
+fn download_and_check(index: &Index, p: &Project, v: &Version, cancel: &AtomicBool) -> Check {
     let url = &v.file.url;
     // The registry's own releases, or a project's (docs/api/mod-index.md, `file`).
     if !url.starts_with("https://github.com/") || !url.contains("/releases/download/") {
@@ -151,20 +176,31 @@ fn download_and_check(index: &Index, p: &Project, v: &Version, tag: &str) -> Che
     if let Err(e) = std::fs::create_dir_all(&folder) {
         return Check::Unreachable(e.to_string());
     }
-    let part = folder.join(format!(".{}.{tag}.part", v.file.sha256));
+    let part = folder.join(format!(".{}.part", v.file.sha256));
     let downloaded = (|| {
+        let _waiting = Waiting::start();
         let response = agent().get(url).call().map_err(|e| match e {
             ureq::Error::Status(code, _) => format!("download: HTTP {code}"),
             ureq::Error::Transport(e) => format!("download: {e}"),
         })?;
         let mut input = response.into_reader().take(v.file.size + 1);
-        let mut out =
-            std::io::BufWriter::new(std::fs::File::create(&part).map_err(|e| e.to_string())?);
-        std::io::copy(&mut input, &mut out).map_err(|e| format!("download: {e}"))?;
-        let file = out.into_inner().map_err(|e| e.to_string())?;
-        file.sync_all().map_err(|e| e.to_string())?;
+        let mut out = std::fs::File::create(&part).map_err(|e| e.to_string())?;
+        let mut chunk = vec![0u8; 64 << 10];
+        loop {
+            if cancel.load(Relaxed) {
+                return Err(CANCELLED.to_owned());
+            }
+            let n = input
+                .read(&mut chunk)
+                .map_err(|e| format!("download: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            out.write_all(&chunk[..n]).map_err(|e| e.to_string())?;
+        }
+        out.sync_all().map_err(|e| e.to_string())?;
         // Closed before it is read again: the Switch's file system won't open a file twice.
-        drop(file);
+        drop(out);
         Ok::<(), String>(())
     })();
     if let Err(e) = downloaded {
@@ -192,10 +228,17 @@ fn download_and_check(index: &Index, p: &Project, v: &Version, tag: &str) -> Che
 }
 
 /// Installs `v` of `p` at `dest`: its checked file, downloaded and checked now if it wasn't.
-fn install(index: &Index, p: &Project, v: &Version, dest: &Path) -> Result<(), String> {
-    match known(v).unwrap_or_else(|| download_and_check(index, p, v, "install")) {
+fn install(
+    index: &Index,
+    p: &Project,
+    v: &Version,
+    dest: &Path,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    match known(v).unwrap_or_else(|| download_and_check(index, p, v, cancel)) {
         Check::Passed => {}
-        Check::Refused(e) => return Err(format!("{} needs a newer Horizon: {e}", p.name)),
+        Check::Refused(e) => return Err(format!("{} {NEEDS_NEWER}: {e}", p.name)),
+        Check::Unreachable(e) if e == CANCELLED => return Err(e),
         Check::Unreachable(e) => return Err(format!("{}: {e}", p.name)),
     }
     if let Some(parent) = dest.parent() {
@@ -226,8 +269,6 @@ impl Game<'_> {
         let spawned = std::thread::Builder::new()
             .name("mod-index".into())
             .spawn(move || {
-                #[cfg(target_os = "horizon")]
-                horizon_nx::favour_waiting_thread();
                 let index = fetch(INDEX_URL, INDEX_MAX).and_then(|body| {
                     let text = String::from_utf8(body).map_err(|e| e.to_string())?;
                     // An entry newer than this build (a native mod's new format) must not hide
@@ -262,7 +303,7 @@ impl Game<'_> {
             .browser
             .installing
             .as_ref()
-            .map(|(id, _)| id.clone());
+            .map(|(id, _, _)| id.clone());
         let failed: Vec<String> = self
             .ui
             .options
@@ -275,25 +316,16 @@ impl Game<'_> {
         let mut projects: Vec<&Project> = index.projects.iter().collect();
         projects.sort_by(|a, b| b.downloads.cmp(&a.downloads).then(a.name.cmp(&b.name)));
         let mut entries = Vec::new();
-        let mut to_check = Vec::new();
-        let checking = self.mods.browser.checking.is_some();
         for p in projects {
             let Some((kind, v)) = offered(&index, p) else {
                 continue;
             };
-            // A mod's file may use what this game can't read (made for a newer Horizon): each is
-            // downloaded and checked once, in the background, before it is offered.
-            let mut verdict = || match (kind, known(v)) {
-                (BrowserKind::ResourcePacks, _) | (_, Some(Check::Passed)) => {
-                    BrowserState::Available
-                }
-                (_, Some(Check::Refused(_))) => BrowserState::Unsupported,
+            // A mod is checked when its Install is pressed (whether this game reads it); one
+            // checked before and refused says so.
+            let verdict = || match known(v) {
+                Some(Check::Refused(_)) if kind == BrowserKind::Mods => BrowserState::Unsupported,
                 _ if failed.contains(&p.id) => BrowserState::Failed,
-                _ if checking => BrowserState::Checking,
-                _ => {
-                    to_check.push((p.clone(), v.clone()));
-                    BrowserState::Checking
-                }
+                _ => BrowserState::Available,
             };
             let state = if installing.as_deref() == Some(&p.id) {
                 BrowserState::Installing
@@ -323,9 +355,6 @@ impl Game<'_> {
                 state,
             });
         }
-        if !to_check.is_empty() {
-            self.check_mods(index.clone(), to_check);
-        }
         let browser = &mut self.ui.options.browser;
         if entries.is_empty() {
             browser.status = Some("Horizon's registry has nothing to install here yet.".into());
@@ -335,38 +364,9 @@ impl Game<'_> {
         browser.entries = entries;
     }
 
-    /// Downloads and checks `mods` one after another on a thread; each verdict comes back to
-    /// [`Self::drive_mod_browser`].
-    fn check_mods(&mut self, index: Arc<Index>, mods: Vec<(Project, Version)>) {
-        let (send, receive) = mpsc::channel();
-        let spawned = std::thread::Builder::new()
-            .name("mod-check".into())
-            .spawn(move || {
-                #[cfg(target_os = "horizon")]
-                horizon_nx::favour_waiting_thread();
-                for (p, v) in mods {
-                    let started = Instant::now();
-                    let check =
-                        known(&v).unwrap_or_else(|| download_and_check(&index, &p, &v, "check"));
-                    log::info!(
-                        "Horizon: Get Mods: checked {} ({} KB) in {:.1} s",
-                        p.id,
-                        v.file.size / 1000,
-                        started.elapsed().as_secs_f64()
-                    );
-                    if send.send((p.id.clone(), check)).is_err() {
-                        return;
-                    }
-                }
-            });
-        if spawned.is_ok() {
-            self.mods.browser.checking = Some(receive);
-        }
-    }
-
     /// Get Mods' Install: one at a time, on a thread.
     pub(super) fn install_mod(&mut self, id: &str) {
-        if let Some((busy, _)) = &self.mods.browser.installing {
+        if let Some((busy, _, _)) = &self.mods.browser.installing {
             let name = self.browser_name(busy);
             self.ui.options.browser.status = Some(format!("Installing {name} first..."));
             return;
@@ -390,12 +390,13 @@ impl Game<'_> {
         };
         let (send, receive) = mpsc::channel();
         let name = p.name.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stop = cancel.clone();
         let spawned = std::thread::Builder::new()
             .name("mod-install".into())
             .spawn(move || {
-                #[cfg(target_os = "horizon")]
-                horizon_nx::favour_waiting_thread();
-                let done = install(&index, &p, &v, &dest).map(|()| match kind {
+                let started = Instant::now();
+                let done = install(&index, &p, &v, &dest, &stop).map(|()| match kind {
                     BrowserKind::Mods => {
                         format!("{name} is installed and on: restart Horizon to play with it.")
                     }
@@ -403,6 +404,12 @@ impl Game<'_> {
                         format!("{name} is installed: turn it on in Options > Resource Packs.")
                     }
                 });
+                log::info!(
+                    "Horizon: Get Mods: {} ({} KB) took {:.1} s",
+                    p.id,
+                    v.file.size / 1000,
+                    started.elapsed().as_secs_f64()
+                );
                 let _ = send.send(done);
             });
         if let Err(e) = spawned {
@@ -413,8 +420,11 @@ impl Game<'_> {
             "Horizon: Get Mods: installing {id} {}",
             self.browser_name(id)
         );
-        self.mods.browser.installing = Some((id.to_owned(), receive));
-        self.ui.options.browser.status = Some(format!("Installing {}...", self.browser_name(id)));
+        self.mods.browser.installing = Some((id.to_owned(), receive, cancel));
+        self.ui.options.browser.status = Some(format!(
+            "Downloading and checking {}...",
+            self.browser_name(id)
+        ));
         self.set_browser_state(id, BrowserState::Installing);
     }
 
@@ -441,60 +451,13 @@ impl Game<'_> {
         }
     }
 
-    /// Each frame: the index, the checks and the installs that finished.
+    /// Each frame: the index and the install that finished.
     pub(super) fn drive_mod_browser(&mut self) {
-        while let Some(receive) = &self.mods.browser.checking {
-            match receive.try_recv() {
-                Ok((id, check)) => {
-                    let installed = self.ui.options.browser.entries.iter().any(|e| {
-                        e.id == id
-                            && matches!(e.state, BrowserState::Installing | BrowserState::Installed)
-                    });
-                    if installed {
-                        continue;
-                    }
-                    let state = match check {
-                        Check::Passed => BrowserState::Available,
-                        Check::Refused(why) => {
-                            log::info!("Horizon: Get Mods: {id} needs a newer Horizon: {why}");
-                            BrowserState::Unsupported
-                        }
-                        Check::Unreachable(why) => {
-                            log::info!("Horizon: Get Mods: couldn't check {id}: {why}");
-                            BrowserState::Available
-                        }
-                    };
-                    let update = self.ui.options.browser.entries.iter().any(|e| {
-                        e.id == id && e.state == BrowserState::Checking && {
-                            let dest = Game::options_path()
-                                .with_file_name(mod_list::DIR)
-                                .join(format!("{id}.hmod"));
-                            dest.exists()
-                        }
-                    });
-                    let state = if update && state == BrowserState::Available {
-                        BrowserState::Update
-                    } else {
-                        state
-                    };
-                    self.set_browser_state(&id, state);
-                }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.mods.browser.checking = None;
-                    // What wasn't checked (the page reopened meanwhile) is checked now.
-                    if self
-                        .ui
-                        .options
-                        .browser
-                        .entries
-                        .iter()
-                        .any(|e| e.state == BrowserState::Checking)
-                    {
-                        self.fill_mod_browser();
-                    }
-                }
-            }
+        // Only while the page shows: leaving it stops an install that is still downloading.
+        let open = self.screen == super::Screen::Options
+            && self.ui.options.page() == horizon_client::options_ui::Page::ModBrowser;
+        if !open && let Some((_, _, cancel)) = &self.mods.browser.installing {
+            cancel.store(true, Relaxed);
         }
         if let Some(receive) = &self.mods.browser.fetching {
             match receive.try_recv() {
@@ -517,7 +480,7 @@ impl Game<'_> {
                 Err(mpsc::TryRecvError::Disconnected) => self.mods.browser.fetching = None,
             }
         }
-        let Some((id, receive)) = &self.mods.browser.installing else {
+        let Some((id, receive, _)) = &self.mods.browser.installing else {
             return;
         };
         let id = id.clone();
@@ -547,10 +510,20 @@ impl Game<'_> {
                 self.ui.options.browser.status = Some(message);
                 self.set_browser_state(&id, BrowserState::Installed);
             }
+            Err(e) if e == CANCELLED => {
+                log::info!("Horizon: Get Mods: {id}: {e}");
+                self.ui.options.browser.status = None;
+                self.set_browser_state(&id, BrowserState::Available);
+            }
             Err(e) => {
                 log::warn!("Horizon: Get Mods: {e}");
+                let state = if e.contains(NEEDS_NEWER) {
+                    BrowserState::Unsupported
+                } else {
+                    BrowserState::Failed
+                };
                 self.ui.options.browser.status = Some(e);
-                self.set_browser_state(&id, BrowserState::Failed);
+                self.set_browser_state(&id, state);
             }
         }
     }

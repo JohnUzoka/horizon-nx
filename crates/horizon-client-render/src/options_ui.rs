@@ -1543,8 +1543,6 @@ impl OptionsUi {
                     true,
                 ),
                 BrowserState::Update => (tr("horizon.mod_browser.update"), true),
-                // Install doesn't wait for the check: it checks the file itself.
-                BrowserState::Checking => (tr("horizon.mod_browser.checking"), true),
                 BrowserState::Unsupported => (tr("horizon.mod_browser.unsupported"), false),
                 BrowserState::Installing => (tr("horizon.mod_browser.installing"), false),
                 BrowserState::Installed => (tr("horizon.mod_browser.installed"), false),

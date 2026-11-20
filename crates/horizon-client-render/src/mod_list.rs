@@ -240,8 +240,6 @@ pub struct BrowserEntry {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum BrowserState {
-    /// Being downloaded and checked: whether this game reads it.
-    Checking,
     /// A mod made for a newer Horizon than this one (its content uses what this game can't read).
     Unsupported,
     Available,

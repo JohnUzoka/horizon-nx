@@ -56,17 +56,19 @@ pub use lifecycle::{
 pub use logging::nro_path;
 pub use logging::{flush_switch_logs, init_switch_logging, nro_dir};
 
-/// Runs the calling thread just ahead of the game's own threads (which start at priority 0x3b):
-/// for a thread that mostly waits on the network (a download), so it isn't left waiting for a
-/// core while world generation and meshing keep every core busy. Equal priorities on Horizon
-/// don't share a core by turns. Whether the kernel took it.
+/// With `on`, runs the calling thread just ahead of the game's own threads (which start at
+/// priority 0x3b), else back among them: for the time a thread only waits on the network (a
+/// download), so it isn't left waiting for a core while world generation and meshing keep every
+/// core busy (equal priorities on Horizon don't share a core by turns). Never for work that
+/// keeps a core busy: that would hold frames back. Whether the kernel took it.
 #[cfg(target_os = "horizon")]
-pub fn favour_waiting_thread() -> bool {
+pub fn favour_waiting_thread(on: bool) -> bool {
     unsafe extern "C" {
         fn svcSetThreadPriority(handle: u32, priority: u32) -> u32;
     }
+    let priority = if on { 0x3a } else { 0x3b };
     // SAFETY: the calling thread's own pseudo-handle; no pointers.
-    unsafe { svcSetThreadPriority(0xFFFF_8000, 0x3a) == 0 }
+    unsafe { svcSetThreadPriority(0xFFFF_8000, priority) == 0 }
 }
 
 /// One line on the malloc heap: what malloc has in use and has taken from the heap, and how
