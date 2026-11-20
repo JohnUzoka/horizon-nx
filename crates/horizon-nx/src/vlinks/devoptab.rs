@@ -701,10 +701,10 @@ unsafe extern "C" fn dirnext_r(r: R, dir: *mut DirIter, name: *mut c_char, st: *
 
 unsafe fn dirnext_inner(r: R, dir: *mut DirIter, name: *mut c_char, st: *mut Stat) -> c_int {
     let listing = unsafe { listing(dir) };
-    if let Some((names, at)) = &mut listing.packed {
-        let Some((entry_name, entry)) = names.get(*at) else {
-            return fail(r, super::ENOENT);
-        };
+    // A packed folder's own entries, then its links (a resource pack overlay's folders mix both).
+    if let Some((names, at)) = &mut listing.packed
+        && let Some((entry_name, entry)) = names.get(*at)
+    {
         *at += 1;
         let bytes = entry_name.as_bytes_with_nul();
         let n = bytes.len().min(256);
