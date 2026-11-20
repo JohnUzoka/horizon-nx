@@ -14187,6 +14187,17 @@ impl ApplicationHandler for Game<'_> {
             self.physical_keys.clear();
             self.physical_buttons.clear();
         }
+        // Horizon's on-screen keyboard takes taps (the touch screen's) and clicks on its keys.
+        if let WindowEvent::MouseInput {
+            state,
+            button: MouseButton::Left,
+            ..
+        } = &event
+            && (self.pad.menu.osk.is_some() || *state == ElementState::Released)
+            && self.pad_osk_pointer(*state == ElementState::Pressed)
+        {
+            return;
+        }
         if let WindowEvent::ModifiersChanged(m) = &event {
             self.modifiers = m.state();
         }

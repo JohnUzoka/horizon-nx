@@ -89,6 +89,8 @@ pub(super) struct MenuCursor {
     pub(super) osk: Option<Keyboard>,
     /// The keyboard was closed on this screen (it doesn't open by itself again).
     osk_dismissed: bool,
+    /// A tap went down on the keyboard: its release is the keyboard's too.
+    osk_tapped: bool,
 }
 
 impl MenuCursor {
@@ -1118,6 +1120,42 @@ impl Game<'_> {
         }
     }
 
+    /// The keyboard sits at the top when the field it types into is in the lower half, and over
+    /// chat, whose box and messages are at the bottom.
+    fn osk_at_top(&self, height: f32) -> bool {
+        self.pad
+            .menu
+            .focus
+            .is_some_and(|f| f.center().1 > height / 2.0)
+            || self.screen == Screen::Chat
+    }
+
+    /// A left button (a tap on the touch screen is one) while the keyboard is open: a press on
+    /// the keyboard types the key under it, and it and its release are the keyboard's (true).
+    /// A press elsewhere goes to the screen under it as usual, so chat's clickable messages
+    /// (a server's "click here") still work while typing.
+    pub(super) fn pad_osk_pointer(&mut self, pressed: bool) -> bool {
+        if !pressed {
+            return std::mem::take(&mut self.pad.menu.osk_tapped);
+        }
+        let (w, h) = self.gui_size();
+        let at_top = self.osk_at_top(h);
+        let (x, y) = self.cursor;
+        let Some(keyboard) = self.pad.menu.osk.as_mut() else {
+            return false;
+        };
+        match keyboard.tap(x, y, w, h, at_top) {
+            osk::Tap::Outside => false,
+            osk::Tap::Inside(out) => {
+                self.pad.menu.osk_tapped = true;
+                if let Some(out) = out {
+                    self.pad_osk_output(out);
+                }
+                true
+            }
+        }
+    }
+
     // ---- drawing ----
 
     /// The pad's cursor (pointer mode) or focus highlight (focus mode), and
@@ -1127,12 +1165,7 @@ impl Game<'_> {
             return;
         }
         if let Some(keyboard) = &self.pad.menu.osk {
-            let at_top = self
-                .pad
-                .menu
-                .focus
-                .is_some_and(|f| f.center().1 > batch.height / 2.0)
-                || self.screen == Screen::Chat;
+            let at_top = self.osk_at_top(batch.height);
             let mut ui = horizon_client::ui_theme::Ui::new(&self.gui.atlas, batch, self.cursor);
             let options = &self.ui.options;
             keyboard.draw(&mut ui, at_top, options.pad_style, options.pad_by_letter);
