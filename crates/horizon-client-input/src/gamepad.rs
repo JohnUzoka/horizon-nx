@@ -433,6 +433,11 @@ pub struct PadSettings {
     /// How the pad drives menus: a focus highlight or a virtual pointer.
     pub menu_nav: MenuNav,
     pub keyboard: TextKeyboard,
+    /// Aim by turning the controller (its motion sensor), on top of the right stick.
+    pub gyro: bool,
+    /// Gyro aiming's speed, 0..1: [`gyro_delta`] turns the view `4 *` this times the
+    /// controller's own turn (0.25 turns the view as much as the controller).
+    pub gyro_sensitivity: f32,
     /// Action name -> button, `None` for unbound; missing means the default.
     bindings: BTreeMap<&'static str, Option<Button>>,
 }
@@ -454,6 +459,8 @@ impl Default for PadSettings {
             nintendo_letters: cfg!(target_os = "horizon"),
             menu_nav: MenuNav::Focus,
             keyboard: TextKeyboard::Auto,
+            gyro: false,
+            gyro_sensitivity: 0.5,
             bindings: BTreeMap::new(),
         }
     }
@@ -512,6 +519,8 @@ impl PadSettings {
                 "nintendoLetters" => s.nintendo_letters = flag(s.nintendo_letters),
                 "menuNavigation" => s.menu_nav = MenuNav::parse(value),
                 "keyboard" => s.keyboard = TextKeyboard::parse(value),
+                "gyro" => s.gyro = flag(s.gyro),
+                "gyroSensitivity" => s.gyro_sensitivity = unit(s.gyro_sensitivity),
                 other => {
                     if let Some(action) = other.strip_prefix("bind_") {
                         let button = if value == "none" {
@@ -530,7 +539,7 @@ impl PadSettings {
     }
     pub fn serialize(&self) -> String {
         let mut text = format!(
-            "enabled:{}\nvibration:{}\nadaptiveTriggers:{}\nlightbar:{}\nlookSensitivity:{}\ninvertX:{}\ninvertY:{}\nmoveDeadzone:{}\nlookDeadzone:{}\ntriggerThreshold:{}\ntoggleSneak:{}\nglyphs:{}\nnintendoLetters:{}\nmenuNavigation:{}\nkeyboard:{}\n",
+            "enabled:{}\nvibration:{}\nadaptiveTriggers:{}\nlightbar:{}\nlookSensitivity:{}\ninvertX:{}\ninvertY:{}\nmoveDeadzone:{}\nlookDeadzone:{}\ntriggerThreshold:{}\ntoggleSneak:{}\nglyphs:{}\nnintendoLetters:{}\nmenuNavigation:{}\nkeyboard:{}\ngyro:{}\ngyroSensitivity:{}\n",
             bool_text(self.enabled),
             bool_text(self.vibration),
             bool_text(self.adaptive_triggers),
@@ -546,6 +555,8 @@ impl PadSettings {
             bool_text(self.nintendo_letters),
             self.menu_nav.name(),
             self.keyboard.name(),
+            bool_text(self.gyro),
+            self.gyro_sensitivity,
         );
         for (action, button) in &self.bindings {
             text.push_str(&format!(
@@ -647,6 +658,47 @@ pub fn look_delta(
         x * YAW_SPEED * speed * seconds,
         -y * PITCH_SPEED * speed * seconds,
     )
+}
+
+/// Below this the controller is held still (turns per second, about 1.4 degrees a second): the
+/// sensor's noise must not drift the view.
+const GYRO_STILL: f32 = 0.004;
+
+/// The view turn from the controller's own turn over `seconds` (gyro aiming): `(yaw, pitch)`
+/// in degrees as [`look_delta`] gives them. `rotation` is the motion sensor's turning speed
+/// (turns per second around the controller's right, top and out-of-face axes) and `up` the
+/// direction gravity holds up, in the same axes. Yaw is the turn around `up`, so turning
+/// left and right works whether the console is held upright or the controller lies flat;
+/// pitch is the tilt around the controller's right axis. Aiming follows where the back of
+/// the controller points: tilting it up looks up, turning it right looks right.
+pub fn gyro_delta(
+    rotation: [f32; 3],
+    up: [f32; 3],
+    settings: &PadSettings,
+    seconds: f32,
+    scoping: bool,
+) -> (f32, f32) {
+    let len = (up[0] * up[0] + up[1] * up[1] + up[2] * up[2]).sqrt();
+    // No gravity reading yet: the controller held upright.
+    let up = if len > 0.3 {
+        [up[0] / len, up[1] / len, up[2] / len]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let still = |v: f32| {
+        if v.abs() < GYRO_STILL {
+            0.0
+        } else {
+            v - GYRO_STILL * v.signum()
+        }
+    };
+    let turn = still(rotation[0] * up[0] + rotation[1] * up[1] + rotation[2] * up[2]);
+    let tilt = still(rotation[0]);
+    let speed =
+        360.0 * 4.0 * settings.gyro_sensitivity * if scoping { 0.25 } else { 1.0 } * seconds;
+    let x = -turn * if settings.invert_x { -1.0 } else { 1.0 };
+    let y = tilt * if settings.invert_y { -1.0 } else { 1.0 };
+    (x * speed, -y * speed)
 }
 
 /// The hotbar slot after a bumper: one step with wrap-around.
@@ -1593,5 +1645,31 @@ mod tests {
         assert_eq!(GlyphStyle::of_vendor(Some(0x054c)), GlyphStyle::PlayStation);
         assert_eq!(GlyphStyle::of_vendor(Some(0x28de)), GlyphStyle::Xbox);
         assert_eq!(GlyphStyle::of_vendor(None), GlyphStyle::Xbox);
+    }
+
+    #[test]
+    fn gyro_turns_with_the_controller_and_ignores_its_noise() {
+        let s = PadSettings::default();
+        // Held upright, turned right a quarter turn a second for a second: 4 * 0.5 * 90 degrees.
+        let (yaw, pitch) = gyro_delta([0.0, -0.25, 0.0], [0.0, 1.0, 0.0], &s, 1.0, false);
+        assert!(
+            (yaw - 2.0 * (0.25 - GYRO_STILL) * 360.0).abs() < 1e-3,
+            "{yaw}"
+        );
+        assert_eq!(pitch, 0.0);
+        // Lying flat, the same turn is around the face's axis.
+        let (flat, _) = gyro_delta([0.0, 0.0, -0.25], [0.0, 0.0, 0.98], &s, 1.0, false);
+        assert!((flat - yaw).abs() < 1e-3);
+        // Tilting the back up looks up (pitch negative).
+        assert!(gyro_delta([0.1, 0.0, 0.0], [0.0, 1.0, 0.0], &s, 1.0, false).1 < 0.0);
+        // Sensor noise at rest.
+        assert_eq!(
+            gyro_delta([0.003, -0.002, 0.001], [0.0, 1.0, 0.0], &s, 1.0, false),
+            (0.0, 0.0)
+        );
+        let mut t = s.clone();
+        t.gyro = true;
+        t.gyro_sensitivity = 0.75;
+        assert_eq!(PadSettings::parse(&t.serialize()), t);
     }
 }

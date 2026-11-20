@@ -33,6 +33,8 @@ mod boost;
 mod clocks;
 #[cfg(target_os = "horizon")]
 mod keyboard;
+#[cfg(target_os = "horizon")]
+mod motion;
 
 pub use compat::{
     ThreadCorePolicy, set_thread_core_policy, set_thread_logging, thread_core_policy,
@@ -42,6 +44,8 @@ pub use compat::{
 pub use boost::loading_world;
 #[cfg(target_os = "horizon")]
 pub use keyboard::software_keyboard;
+#[cfg(target_os = "horizon")]
+pub use motion::{Motion, motion, stop_motion};
 #[cfg(target_os = "horizon")]
 pub use lifecycle::relaunch_on_exit;
 pub use lifecycle::{
