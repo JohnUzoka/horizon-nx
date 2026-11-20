@@ -16,8 +16,8 @@
 # Variables: JOBS (cargo's parallel jobs; each rustc can take 1-2 GB of RAM), CARGO_ARGS (more
 # `cargo build` arguments), FEATURES (horizon-client features; by default audio, controllers and
 # nx-allocator, which also links NVK), VERSION, AUTHOR, ICON (a 256x256 JPEG for the HOME menu;
-# without one, elf2nro's default) and HORIZON_SWITCH_BUILD (the build number the in-game updater
-# compares: docs/switch-updates.md).
+# packaging/switch/icon.jpg by default) and HORIZON_SWITCH_BUILD (the build number the in-game
+# updater compares: docs/switch-updates.md).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -31,6 +31,8 @@ IMAGE=horizon-switch-toolchain:local
 ENGINE="${CONTAINER_ENGINE:-$(command -v docker >/dev/null && echo docker || echo podman)}"
 VERSION="${VERSION:-0.1.0}"
 AUTHOR="${AUTHOR:-Horizon contributors}"
+# Horizon's app icon with an "NX" badge (packaging/switch/icon.jpg: how it is made is in docs/switch.md).
+ICON="${ICON:-$ROOT/packaging/switch/icon.jpg}"
 TITLE="${TITLE:-Horizon}"
 BIN=horizon-client
 OUT=target/aarch64-nintendo-horizon/release

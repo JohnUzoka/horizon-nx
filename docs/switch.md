@@ -28,6 +28,12 @@ as an artifact laid out like the SD card. It keeps the toolchain image and the N
 runs (`pkg.devkitpro.org` refuses some CI machines; `portlibs-fallback.sh` builds zlib, zstd and
 expat when the image lacks them).
 
+The HOME and homebrew menus show `packaging/switch/icon.jpg` (256×256, `ICON` picks another): Horizon's
+app icon, `packaging/icons/hicolor/256x256/apps/horizon.png`, on its own background colour (`#16181F`), with an
+"NX" badge: a pill in the icon's purple (`#9A86FF`) with "NX" in Geist SemiBold 36 px
+(`crates/horizon-theme/fonts/`, SIL Open Font License 1.1) in the background colour, 14 px above the bottom
+edge. Both are Horizon's own; nothing else is drawn on it.
+
 Prepared game files are never part of the build: `horizon-prepare switch-export` copies a
 player's own prepared folder for the SD card (`crates/horizon-prepare/src/switch_export.rs`).
 
