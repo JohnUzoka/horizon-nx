@@ -11,7 +11,7 @@ use horizon_client::shader_options::ShaderOptions;
 use horizon_client::text::Text;
 use horizon_shaders::{BlockIds, Macros, Pack, Properties, dimension_folder_named, load_post};
 
-use super::native_shaders::{fingerprint, outcome, refused, remember};
+use super::native_shaders::{fingerprint, outcome, remember};
 use super::{Dim, Game};
 use horizon_client_render::render_geometry::EntitySpan;
 use std::cell::RefCell;
@@ -94,9 +94,9 @@ pub(super) fn picked_pack(settings: &horizon_client::settings::Settings) -> &str
 /// drawing (`native_shaders::remember_look`), is missing or its owner is off.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct PickedPack {
-    /// It draws flat where the device can (`pack_draws_flat`): the sections are laid out so.
+    /// It draws flat where the device can: the sections are laid out so.
     pub draws_flat: bool,
-    /// Its passes read the solid quads' vertices (`pack_reads_vertices`): they start wide.
+    /// Its passes read the solid quads' vertices: they start wide.
     pub starts_wide: bool,
     /// It is one of Horizon's own packs, with its `[frame] blend`: the frame is float.
     pub linear: Option<horizon_shader_api::Blend>,
@@ -107,8 +107,36 @@ pub(crate) struct PickedPack {
     pub shaders_pack: bool,
     /// Its manifest declares `[ray_tracing]`: the device asks for ray queries (spec #16011).
     pub ray_tracing: bool,
+    /// Any of its stages can read resource-pack normal or specular maps.
+    material_maps: bool,
 }
 impl PickedPack {
+    /// Only disk facts: mod toggles and the loader's refusal can change between file polls.
+    pub(super) fn on_disk(path: &std::path::Path) -> Option<Self> {
+        if !path.exists() {
+            return None;
+        }
+        if !horizon_shader_api::package::is_pack(path) {
+            return Some(Self {
+                draws_flat: true,
+                starts_wide: true,
+                shaders_pack: true,
+                material_maps: true,
+                ..Self::default()
+            });
+        }
+        Some(horizon_shader_api::Pack::read_manifest(path).map_or_else(
+            |_| Self::default(),
+            |m| Self {
+                draws_flat: m.shadow.is_some(),
+                linear: Some(m.blend),
+                ray_tracing: m.ray_tracing.is_some(),
+                material_maps: native_material_maps(&m),
+                ..Self::default()
+            },
+        ))
+    }
+
     /// What it asks of the renderer's frame.
     pub(crate) fn frame(self) -> horizon_client::gfx::FrameRequest {
         horizon_client::gfx::FrameRequest {
@@ -120,16 +148,27 @@ impl PickedPack {
     }
 }
 
-/// `follow_frame`'s key for the pick: its path and outcome, which `look` reads from disk; with
-/// no pick, nothing is read (#19216: it asks every frame).
-pub(super) fn pick_key(
-    picked: &str,
-    look: impl FnOnce() -> (std::path::PathBuf, Option<bool>),
-) -> (std::path::PathBuf, Option<bool>) {
-    if picked.is_empty() {
-        return (std::path::PathBuf::new(), Some(false));
+/// `[displacement]` requires `[material]`; traced stages can also read maps at a hit.
+pub(super) fn native_material_maps(m: &horizon_shader_api::Manifest) -> bool {
+    m.material.is_some() || m.entity.is_some() || m.ray_tracing.is_some()
+}
+
+pub(super) fn active_shape(
+    path: &std::path::Path,
+    disk: Option<PickedPack>,
+    mods: &ModList,
+) -> (Option<bool>, PickedPack) {
+    if let Some(shape) = disk
+        && path
+            .file_name()
+            .is_none_or(|f| !active_pack(&f.to_string_lossy(), mods).is_empty())
+    {
+        let seen = outcome(path);
+        if seen != Some(false) {
+            return (seen, shape);
+        }
     }
-    look()
+    (Some(false), PickedPack::default())
 }
 
 pub(super) fn picked_pack_shape(settings: &horizon_client::settings::Settings) -> PickedPack {
@@ -152,40 +191,7 @@ fn shape_on_disk(settings: &horizon_client::settings::Settings, picked: &str) ->
     } else {
         horizon_client::shader_pack_list::resolve(&dir, picked).1
     };
-    let owned = !picked.is_empty()
-        && path
-            .file_name()
-            .is_none_or(|f| !active_pack(&f.to_string_lossy(), &settings.mods).is_empty());
-    let active = owned && path.exists() && outcome(&path) != Some(false);
-    // One whose manifest doesn't read is about to be refused: it asks as no pack does.
-    let own = horizon_shader_api::package::is_pack(&path);
-    // Read once, for the frame and ray tracing alike; a pack refused before is neither.
-    let manifest = (owned && own && outcome(&path) != Some(false))
-        .then(|| horizon_shader_api::Pack::read_manifest(&path).ok())
-        .flatten();
-    let linear = (manifest.as_ref()).filter(|_| active).map(|m| m.blend);
-    PickedPack {
-        draws_flat: active && pack_draws_flat(&path),
-        starts_wide: active && pack_reads_vertices(&path),
-        linear,
-        ray_tracing: manifest.is_some_and(|m| m.ray_tracing.is_some()),
-        shaders_pack: active && !own,
-    }
-}
-
-/// Whether the pack at `path` has passes that draw the terrain flat where the device can,
-/// reading translucent quads beside their section's solid ones: a `shaders/` pack, taken to
-/// draw terrain, or one of Horizon's own with a `[shadow]` pass.
-fn pack_draws_flat(path: &std::path::Path) -> bool {
-    !horizon_shader_api::package::is_pack(path)
-        || horizon_shader_api::Pack::read_manifest(path).is_ok_and(|m| m.shadow.is_some())
-}
-
-/// Whether the pack at `path` reads the solid quads as vertices, not their compact records: a
-/// `shaders/` pack, taken to draw terrain. Horizon's own read the records, `[displacement]`
-/// too (gfx/displace.rs).
-fn pack_reads_vertices(path: &std::path::Path) -> bool {
-    !horizon_shader_api::package::is_pack(path)
+    active_shape(&path, PickedPack::on_disk(&path), &settings.mods).1
 }
 
 // A native mod can bundle a pack as `native-<mod-id>`; its Mods toggle controls it too.
@@ -201,24 +207,9 @@ pub(super) fn active_pack<'a>(picked: &'a str, mods: &ModList) -> &'a str {
     }
 }
 
-/// A selected pack may read resource-pack material maps, whether native or GLSL.
+/// The initial resource load makes the same decision as an in-world pack change.
 pub(super) fn picks_material_pack(settings: &horizon_client::settings::Settings) -> bool {
-    let dev = std::env::var("HORIZON_SHADER_PACK").ok();
-    let picked = active_pack(
-        dev.as_deref().unwrap_or(&settings.horizon.shader_pack),
-        &settings.mods,
-    );
-    if picked.is_empty() {
-        return false;
-    }
-    let dir = Game::shader_packs_dir();
-    let path = if dev.is_some() {
-        dir.join(picked)
-    } else {
-        horizon_client::shader_pack_list::resolve(&dir, picked).1
-    };
-    path.file_name()
-        .is_none_or(|f| !active_pack(&f.to_string_lossy(), &settings.mods).is_empty())
+    picked_pack_shape(settings).material_maps
 }
 
 /// Prefer the connection's current block tags, including a local integrated server's.
@@ -371,17 +362,29 @@ impl Game<'_> {
                 .free(std::mem::take(&mut self.pending_uploads));
             self.streaming.reload_sections(&mut self.world);
         }
-        let selected = picked_pack(&self.settings).to_owned();
-        let path = self.native_shaders.resolve_path(
-            &Self::shader_packs_dir(),
-            &selected,
-            dev_pack().is_some(),
-        );
-        let file = path.file_name().unwrap_or_default().to_string_lossy();
-        let picked = if selected.is_empty() || active_pack(&file, &self.settings.mods).is_empty() {
-            String::new()
+        let selected = picked_pack(&self.settings);
+        let (resolved, native) = if selected.is_empty() {
+            (None, false)
         } else {
-            path.to_string_lossy().into_owned()
+            let (path, disk) = self.native_shaders.resolve_pack(
+                Self::shader_packs_dir,
+                selected,
+                dev_pack().is_some(),
+            );
+            let native = (dev_pack().is_none() && selected.starts_with("horizon:"))
+                || disk.is_some_and(|s| !s.shaders_pack);
+            (Some(std::sync::Arc::clone(path)), native)
+        };
+        let path = resolved
+            .as_ref()
+            .map_or(std::path::Path::new(""), |p| p.as_path());
+        let picked = if path
+            .file_name()
+            .is_some_and(|f| active_pack(&f.to_string_lossy(), &self.settings.mods).is_empty())
+        {
+            std::borrow::Cow::Borrowed("")
+        } else {
+            path.to_string_lossy()
         };
         if self.native_shaders.picked != picked {
             self.native_shaders.select(&picked);
@@ -397,7 +400,7 @@ impl Game<'_> {
         {
             match report {
                 Ok(Some((programs, notes))) => {
-                    remember(&path, fingerprint(&path), true);
+                    remember(path, fingerprint(path), true);
                     for note in notes {
                         log::warn!("shader pack {name}: {note}");
                     }
@@ -408,7 +411,7 @@ impl Game<'_> {
                         started.elapsed().as_millis()
                     );
                 }
-                Ok(None) => remember(&path, fingerprint(&path), false),
+                Ok(None) => remember(path, fingerprint(path), false),
                 // Stopped because it isn't wanted any more: not the pack's failure.
                 Err(refused) if refused.is_cancelled() => {}
                 Err(refused) => {
@@ -422,32 +425,31 @@ impl Game<'_> {
         if picked.is_empty() {
             return PackInputs::default();
         }
-        if !horizon_client::sprites::labpbr_maps() {
-            horizon_client::sprites::set_labpbr_maps(true);
-            self.reload_packs();
-            return PackInputs::default();
-        }
-        let name = selected.clone();
         let dimension = match self.dim {
             Dim::Overworld | Dim::Extra(_) => 0,
             Dim::Nether => -1,
             Dim::End => 1,
         };
-        if (dev_pack().is_none() && selected.starts_with("horizon:"))
-            || horizon_shader_api::package::is_pack(&path)
-        {
+        if native {
             // One of Horizon's own packs (game/modding/native_shaders.rs).
-            self.tick_native_shader_pack(&path);
+            self.tick_native_shader_pack(path);
+        } else if !horizon_client::sprites::labpbr_maps() {
+            // A classic pack can read material maps. Native packs decide from their stages
+            // after validation; a sky/post pack must not reload and remesh the entire world.
+            horizon_client::sprites::set_labpbr_maps(true);
+            self.reload_packs();
+            return PackInputs::default();
         } else if let Some(renderer) = &mut self.renderer
             && renderer.shader_pack_dimension() != Some(dimension)
-            && !refused(&path, fingerprint(&path))
+            && !self.native_shaders.classic_refused(path)
         {
-            let name = name.as_str();
+            let selected = picked_pack(&self.settings).to_owned();
+            let name = selected.as_str();
             let started = std::time::Instant::now();
             // A pack is not the game's own code: one that makes the shader compiler (or our
             // translation of it) panic is turned off instead of crashing every world load (#3525).
             let loaded = horizon_client::crash::contain(|| {
-                match Pack::open(&path).map(|p| p.with_chosen(chosen_shader_options(name))) {
+                match Pack::open(path).map(|p| p.with_chosen(chosen_shader_options(name))) {
                     Ok(pack) => {
                         let mut macros = Macros::standard();
                         renderer.define_pack_macros(&mut macros);
@@ -556,7 +558,7 @@ impl Game<'_> {
                         renderer.load_shader_pack(dimension, post, table, name.to_owned(), started);
                     }
                     Err(e) => {
-                        remember(&path, fingerprint(&path), false);
+                        remember(path, fingerprint(path), false);
                         self.pack_ids = None;
                         log::warn!("shader pack {name}: {e}");
                         // Without a pack this can't fail.
@@ -1243,18 +1245,46 @@ mod rendered_item_tests {
 
 #[cfg(test)]
 mod native_pack_tests {
-    use super::{active_pack, pack_draws_flat, pack_reads_vertices, picked_pack_shape};
+    use super::{PickedPack, active_pack, picked_pack_shape};
     use horizon_client::mod_list::{Installed, ModList, NativePage};
 
     /// With no pick neither the frame's key nor the shape looks at the disk (`follow_frame`
     /// asks every frame), so neither depends on whether `shaderpacks/` is there.
     #[test]
     fn no_pick_reads_nothing_from_disk() {
-        use super::{PickedPack, pick_key, shape_of};
-        let key = pick_key("", || panic!("the key looks at the disk"));
-        assert_eq!(key, (std::path::PathBuf::new(), Some(false)));
+        use super::shape_of;
+        let mut state = crate::game::native_shaders::NativeShaders::default();
+        let key = state.frame_pick("", &ModList::default(), || panic!("the key looks at the disk"));
+        assert_eq!(key, (std::path::Path::new(""), Some(false), PickedPack::default()));
         let shape = shape_of("", || panic!("the shape looks at the disk"));
         assert_eq!(shape, PickedPack::default());
+    }
+
+    #[test]
+    fn material_maps_follow_the_stages_that_can_read_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        let mut settings = horizon_client::settings::Settings::default();
+        settings.horizon.shader_pack = path.to_string_lossy().into_owned();
+        let classic = path.join("shaders");
+        std::fs::create_dir(&classic).unwrap();
+        assert!(super::picks_material_pack(&settings), "classic pack");
+        std::fs::remove_dir(classic).unwrap();
+        let golden_hour = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../horizon-shader-api/packs/golden_hour/horizon-shaders.toml"
+        ));
+        let file = path.join(horizon_shader_api::MANIFEST);
+        std::fs::write(&file, golden_hour).unwrap();
+        assert!(!super::picks_material_pack(&settings), "sky and post only");
+        for extra in [
+            "[material]\nfile = \"material.wgsl\"",
+            "[entity]\nfile = \"entity.wgsl\"",
+            "[ray_tracing]",
+        ] {
+            std::fs::write(&file, format!("{golden_hour}\n{extra}\n")).unwrap();
+            assert!(super::picks_material_pack(&settings), "{extra}");
+        }
     }
 
     #[test]
@@ -1439,17 +1469,15 @@ mod native_pack_tests {
             }
             dir
         };
-        assert!(pack_draws_flat(&pack("shaders_pack", None)));
-        assert!(!pack_draws_flat(&pack("unshadowed", Some(""))));
-        assert!(pack_draws_flat(&pack("shadowed", Some("[shadow]\n"))));
+        let shape = |path: &std::path::Path| PickedPack::on_disk(path).unwrap();
+        assert!(shape(&pack("shaders_pack", None)).draws_flat);
+        assert!(!shape(&pack("unshadowed", Some(""))).draws_flat);
+        assert!(shape(&pack("shadowed", Some("[shadow]\n"))).draws_flat);
         // Only a `shaders/` pack reads the solid quads' vertices: a material, a shadow pass
         // and `[displacement]` start in the compact layout.
-        assert!(pack_reads_vertices(&root.join("shaders_pack")));
-        assert!(!pack_reads_vertices(&root.join("shadowed")));
-        assert!(!pack_reads_vertices(&pack(
-            "displaced",
-            Some("[displacement]\n")
-        )));
+        assert!(shape(&root.join("shaders_pack")).starts_wide);
+        assert!(!shape(&root.join("shadowed")).starts_wide);
+        assert!(!shape(&pack("displaced", Some("[displacement]\n"))).starts_wide);
         std::fs::remove_dir_all(&root).ok();
     }
 

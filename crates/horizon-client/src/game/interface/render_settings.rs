@@ -3,22 +3,18 @@
 use super::*;
 
 #[derive(Default)]
-pub(super) struct FrameAttempt<K = FrameKey>(Option<K>);
-
-/// The frame the renderer would be made with (`Renderer::requested_frame`), the pick's path,
-/// its outcome.
-type FrameKey = (
-    Option<horizon_client::gfx::FrameConfiguration>,
-    PathBuf,
-    Option<bool>,
+pub(super) struct FrameAttempt<F = Option<horizon_client::gfx::FrameConfiguration>>(
+    Option<(F, PathBuf, Option<bool>)>,
 );
 
-impl<K: PartialEq> FrameAttempt<K> {
-    // Remember attempts, including failures, until the requested configuration changes.
-    fn changed(&mut self, key: K) -> bool {
-        let changed = self.0.as_ref() != Some(&key);
-        self.0 = Some(key);
-        changed
+impl<F: PartialEq> FrameAttempt<F> {
+    // Remember attempts, including failures, until the frame, path or loader outcome changes.
+    fn changed(&mut self, frame: F, path: &std::path::Path, outcome: Option<bool>) -> bool {
+        if self.0.as_ref().is_some_and(|(f, p, o)| *f == frame && p == path && *o == outcome) {
+            return false;
+        }
+        self.0 = Some((frame, path.to_owned(), outcome));
+        true
     }
 }
 
@@ -77,34 +73,16 @@ impl Game<'_> {
             return;
         }
         let picked = shader_packs::picked_pack(&self.settings);
-        if picked.is_empty() {
-            self.native_shaders.forget_selection();
-        }
-        let (path, outcome) = shader_packs::pick_key(picked, || {
-            let path = self.native_shaders.resolve_path(
-                &Self::shader_packs_dir(),
-                picked,
-                shader_packs::dev_pack().is_some(),
-            );
-            let available = path.exists()
-                && path.file_name().is_none_or(|f| {
-                    !shader_packs::active_pack(&f.to_string_lossy(), &self.settings.mods).is_empty()
-                });
-            let outcome = if available {
-                native_shaders::outcome(&path)
-            } else {
-                Some(false)
-            };
-            (path, outcome)
-        });
+        let (path, outcome, shape) =
+            self.native_shaders.frame_pick(picked, &self.settings.mods, Self::shader_packs_dir);
         // The renderer's offer can change while the game runs (Vulkan's formats follow desktop
         // HDR and the window's output), and the frame with it.
-        let request = shader_packs::picked_pack_shape(&self.settings).frame();
+        let request = shape.frame();
         let wanted = self
             .renderer
             .as_ref()
             .map(|r| r.requested_frame(&self.settings.horizon, request));
-        if !self.frame_attempted.changed((wanted, path, outcome)) {
+        if !self.frame_attempted.changed(wanted, path, outcome) {
             return;
         }
         if self
@@ -349,7 +327,7 @@ mod tests {
         let mut attempts = FrameAttempt::default();
         let mut rebuilds = 0;
         // The requested frame stands for itself here: the 8-bit one, then the float one.
-        for key in [
+        for (frame, path, outcome) in [
             ("8-bit", "p", None),
             ("8-bit", "p", None),
             // HDR output offered later, with HDR On: the frame is looked at again.
@@ -361,7 +339,7 @@ mod tests {
             ("float", "q", None),
             ("8-bit", "q", None),
         ] {
-            if attempts.changed(key) {
+            if attempts.changed(frame, std::path::Path::new(path), outcome) {
                 // A replacement fails: no success is recorded, just the attempted key.
                 rebuilds += 1;
             }

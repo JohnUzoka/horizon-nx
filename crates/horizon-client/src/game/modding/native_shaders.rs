@@ -11,6 +11,7 @@
 use std::{
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -19,6 +20,7 @@ use horizon_client::text::Text;
 use horizon_shader_api::{Manifest, Pack, Primaries, check};
 
 use super::Game;
+use super::shader_packs::{self, PickedPack};
 
 const LOOK_EVERY: Duration = Duration::from_millis(500);
 const RED: u32 = 0xFF5555;
@@ -67,8 +69,11 @@ pub(super) struct NativeShaders {
     stamp: Option<u64>,
     looked: Option<Instant>,
     selection: String,
-    resolved: PathBuf,
+    resolved: Arc<PathBuf>,
+    disk_shape: Option<PickedPack>,
     resolved_at: Option<Instant>,
+    /// Fingerprint of a refused classic pack, only if asked since the last file poll.
+    classic_stamp: Option<Option<u64>>,
     /// The runs of this frame's entity geometry that the pack's `[entity]` stage lights
     /// (`Game::lit_entity`), up to the renderer taking them (`Renderer::take_entity_runs`).
     pub entity_runs: std::cell::RefCell<EntityRuns>,
@@ -92,12 +97,18 @@ impl NativeShaders {
         renderer.take_ray_only(self.ray_only.get_mut(), self.ray_runs.get_mut());
     }
 
-    pub fn resolve_path(&mut self, dir: &Path, picked: &str, filesystem: bool) -> PathBuf {
+    pub fn resolve_pack(
+        &mut self,
+        dir: impl FnOnce() -> PathBuf,
+        picked: &str,
+        filesystem: bool,
+    ) -> (&Arc<PathBuf>, Option<PickedPack>) {
         if self.selection != picked || self.resolved_at.is_none_or(|t| t.elapsed() >= LOOK_EVERY) {
+            let dir = dir();
             let resolved = if filesystem {
                 dir.join(picked)
             } else {
-                horizon_client::shader_pack_list::resolve(dir, picked).1
+                horizon_client::shader_pack_list::resolve(&dir, picked).1
             };
             // A manifest being edited may be temporarily invalid. Keep its path so the
             // reload reports the error.
@@ -107,28 +118,48 @@ impl NativeShaders {
                 && self.selection == picked
                 && self.resolved_at.is_some()
                 && Pack::read_manifest(&self.resolved).is_err();
-            if !keep_path {
-                self.resolved = resolved;
+            if !keep_path && *self.resolved != resolved {
+                self.resolved = resolved.into();
             }
-            self.selection = picked.to_owned();
+            self.disk_shape = PickedPack::on_disk(&self.resolved);
+            self.classic_stamp = None;
+            picked.clone_into(&mut self.selection);
             self.resolved_at = Some(Instant::now());
         }
-        self.resolved.clone()
+        (&self.resolved, self.disk_shape)
     }
 
-    /// No pick: the next `resolve_path` looks again, as one asked with no pick would, without
-    /// the disk now (`follow_frame` asks every frame; title screens don't call `resolve_path`).
-    pub fn forget_selection(&mut self) {
-        if !self.selection.is_empty() {
+    /// The pick's path and on-disk requirements are refreshed together at the file-poll
+    /// cadence. A mod toggle or a loader refusal still takes effect on this very frame.
+    pub fn frame_pick(
+        &mut self,
+        picked: &str,
+        mods: &horizon_client::mod_list::ModList,
+        dir: impl FnOnce() -> PathBuf,
+    ) -> (&Path, Option<bool>, PickedPack) {
+        if picked.is_empty() {
             self.selection.clear();
             self.resolved_at = None;
+            return (Path::new(""), Some(false), PickedPack::default());
         }
+        let (path, disk) = self.resolve_pack(dir, picked, shader_packs::dev_pack().is_some());
+        let (seen, shape) = shader_packs::active_shape(path, disk, mods);
+        (path, seen, shape)
+    }
+
+    /// Don't walk a refused classic pack's files every drawn frame looking for a repair.
+    pub fn classic_refused(&mut self, path: &Path) -> bool {
+        if outcome(path) != Some(false) {
+            return false;
+        }
+        refused(path, *self.classic_stamp.get_or_insert_with(|| fingerprint(path)))
     }
 
     pub fn select(&mut self, name: &str) {
         self.picked = name.to_owned();
         self.stamp = None;
         self.looked = None;
+        self.classic_stamp = None;
     }
 
     pub fn picking(name: &str) -> Self {
@@ -324,9 +355,10 @@ impl Game<'_> {
             manifest_refused.is_some(),
             running,
         );
-        // The resources were loaded without a native pack, so without the resource packs'
-        // LabPBR maps its material stage reads: load them once, now that one runs.
-        if result.as_ref().is_ok_and(|(m, _, _)| m.material.is_some())
+        // Only reload all resources when an accepted pack could actually read their maps.
+        if result
+            .as_ref()
+            .is_ok_and(|(m, _, _)| shader_packs::native_material_maps(m))
             && !horizon_client::sprites::labpbr_maps()
         {
             horizon_client::sprites::set_labpbr_maps(true);
@@ -450,7 +482,12 @@ mod tests {
             assert_eq!(outcome(&root), Some(false));
             assert!(refused(&root, fingerprint(&root)));
         }
+        let mut state = NativeShaders::default();
+        assert!(state.classic_refused(&root));
         std::fs::write(&file, "repaired files with a different size").unwrap();
+        assert!(state.classic_refused(&root), "don't walk the files again between polls");
+        state.resolve_pack(|| root.clone(), ".", true);
+        assert!(!state.classic_refused(&root), "notice the repair at the next poll");
         assert!(!refused(&root, fingerprint(&root)));
         remember(&root, fingerprint(&root), true);
         assert_eq!(outcome(&root), Some(true));
@@ -476,13 +513,29 @@ mod tests {
             "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi = \"0.2\"\n[[post]]\nfile = \"post.wgsl\"\n").unwrap();
         std::fs::write(pack.join("post.wgsl"), "fixture").unwrap();
         let mut state = NativeShaders::default();
-        assert_eq!(state.resolve_path(&dir, "horizon:p", false), pack);
+        assert_eq!(
+            state.resolve_pack(|| dir.clone(), "horizon:p", false).0.as_path(),
+            pack
+        );
+        // Between polls the frame reads neither the directory nor the manifest; the pack
+        // loader's acceptance/refusal is still applied on the next frame.
+        let mods = horizon_client::mod_list::ModList::default();
+        state.resolved_at = Some(std::time::Instant::now() + super::LOOK_EVERY);
+        let no_io = || panic!("resolved a stable pick again between file polls");
+        assert!(state.frame_pick("horizon:p", &mods, no_io).2.linear.is_some());
+        super::remember(&pack, None, false);
+        assert!(state.frame_pick("horizon:p", &mods, no_io).2.linear.is_none());
+        super::remember(&pack, None, true);
         let first = fingerprint(&pack).unwrap();
         let manifest_path = pack.join(horizon_shader_api::MANIFEST);
         let manifest = std::fs::read_to_string(&manifest_path).unwrap();
         std::fs::write(&manifest_path, "temporarily invalid").unwrap();
         state.resolved_at = Some(std::time::Instant::now() - super::LOOK_EVERY);
-        assert_eq!(state.resolve_path(&dir, "horizon:p", false), pack);
+        assert_eq!(
+            state.resolve_pack(|| dir.clone(), "horizon:p", false).0.as_path(),
+            pack
+        );
+        assert!(state.frame_pick("horizon:p", &mods, || dir.clone()).2.linear.is_none());
         assert_ne!(fingerprint(&pack).unwrap(), first);
         std::fs::write(&manifest_path, manifest).unwrap();
         let first = fingerprint(&pack).unwrap();
@@ -494,7 +547,7 @@ mod tests {
         std::fs::rename(&pack, dir.join("renamed")).unwrap();
         state.resolved_at = None;
         assert_eq!(
-            state.resolve_path(&dir, "horizon:p", false),
+            state.resolve_pack(|| dir.clone(), "horizon:p", false).0.as_path(),
             dir.join("renamed")
         );
         let manifest_path = dir.join("renamed").join(horizon_shader_api::MANIFEST);
@@ -504,13 +557,13 @@ mod tests {
         std::fs::write(manifest_path, text).unwrap();
         state.resolved_at = Some(std::time::Instant::now() - super::LOOK_EVERY);
         assert_eq!(
-            state.resolve_path(&dir, "horizon:p", false),
+            state.resolve_pack(|| dir.clone(), "horizon:p", false).0.as_path(),
             dir.join("horizon:p"),
             "a valid different manifest ID must not replace the selected identity"
         );
         let mut override_state = NativeShaders::default();
         assert_eq!(
-            override_state.resolve_path(&dir, "native-test_mod", true),
+            override_state.resolve_pack(|| dir.clone(), "native-test_mod", true).0.as_path(),
             pack,
             "an explicit missing filesystem override must not switch to another installed pack"
         );

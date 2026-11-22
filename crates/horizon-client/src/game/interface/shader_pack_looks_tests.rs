@@ -182,6 +182,29 @@ fn terrain_looks_stay_with_their_quads_through_pack_changes() {
     });
 }
 
+#[test]
+#[ignore = "daily"]
+fn golden_hour_starts_in_world_without_reloading_resources() {
+    let name =
+        "game::shader_pack_looks_tests::golden_hour_starts_in_world_without_reloading_resources";
+    if run_fresh_cases(name, "HORIZON_TEST_SHADER_RELOAD", &["golden_hour"]) {
+        return;
+    }
+    with_client_game(|game| {
+        game.settings.horizon.shader_pack = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../horizon-shader-api/packs/golden_hour"
+        )
+        .into();
+        let _event_loop = frame_scene(game);
+        horizon_client::sprites::set_labpbr_maps(false);
+        game.shader_pack_inputs(glam::DVec3::ZERO, 0.0, &Default::default());
+        assert_eq!(game.renderer.as_ref().unwrap().shader_pack_kind(), Some("native"));
+        assert!(!horizon_client::sprites::labpbr_maps());
+        assert!(game.pack_reload.is_none() && !game.pending_pack_reload);
+    });
+}
+
 /// A renderer made again on the same device for another frame takes the world
 /// (`Renderer::take_world`, the game's `rebuild_renderer`): the sections' looks go with it,
 /// stay, with the layouts the pack had, through the frames drawn before the game loads its
