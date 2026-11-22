@@ -3407,10 +3407,9 @@ fn stamp(
     #[cfg(not(target_os = "horizon"))]
     parts.push(meta(&std::env::current_exe()?)?);
     #[cfg(target_os = "horizon")]
-    {
-        let nro = horizon_nx::nro_path().ok_or("the NRO path is unavailable")?;
-        parts.push(meta(Path::new(&nro))?);
-    }
+    // Some homebrew loaders do not pass argv[0]. An explicit build id keeps
+    // generated content roots distinct across NRO versions even on those loaders.
+    parts.push(env!("HORIZON_GAME_BUILD_ID").to_owned());
     let base = std::path::absolute(base)?;
     parts.push(
         String::from_utf8_lossy(&fs::read(base.join("horizon-resources.json"))?).into_owned(),
