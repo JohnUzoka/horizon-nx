@@ -230,6 +230,7 @@ pub(crate) fn release_horizon_services() {
         return;
     }
 
+    crate::boost::on_exit();
     write_log(b"[Exit] userAppExit: main has returned; releasing services before the loader takes the heap back\n");
     // From here on every log line is written before the next step runs. The writer's stack is
     // closed with the other detached threads' below.
@@ -381,11 +382,10 @@ fn close_detached_threads() -> u32 {
 }
 
 /// Handles every applet message waiting, as `appletMainLoop` does for one. False once the system
-/// has asked the app to exit. The game calls it once a frame, so it also ends the loading CPU
-/// boost at the player's first input (boost.rs).
+/// asked the app to exit. Each frame also checks for cancelled world loads.
 #[cfg(target_os = "horizon")]
 pub fn process_applet_messages() -> bool {
-    crate::boost::end_on_input();
+    crate::boost::tick_loading();
     // The bound only stops a frame from spinning if messages kept coming.
     for _ in 0..16 {
         let mut message = 0;
@@ -425,6 +425,7 @@ pub fn suspend_until_out_of_background() -> Option<u32> {
     use core::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
+    let loading_boost = crate::boost::pause_loading();
     let ask_system = !SUSPEND_UNRELIABLE.load(Ordering::Relaxed);
     if ask_system {
         log::info!(
@@ -474,6 +475,7 @@ pub fn suspend_until_out_of_background() -> Option<u32> {
         );
         return None;
     }
+    crate::boost::resume_loading(loading_boost);
     if !ask_system {
         log::info!(
             "[Applet] {} again {:.2} s later, after {waits} wait(s) for the focus message",

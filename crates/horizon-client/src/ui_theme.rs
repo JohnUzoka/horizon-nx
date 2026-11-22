@@ -766,6 +766,33 @@ pub fn draw_boot(atlas: &HudAtlas, batch: &mut HudBatch, logs: &[String]) {
     draw_boot_log(atlas, batch, logs);
 }
 
+#[cfg(not(target_os = "horizon"))]
+pub use crate::level_loading::draw_loading_overlay;
+
+/// Switch loading overlay: keep Horizon's boot wordmark and show the current
+/// stage and progress above the existing mod progress rows.
+#[cfg(any(target_os = "horizon", test))]
+pub fn draw_horizon_loading_overlay(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    line: &str,
+    progress: f32,
+    _dark: bool,
+) {
+    draw_boot(atlas, batch, &[]);
+    let width = (batch.width * 0.65).min(200.0);
+    let left = (batch.width - width) * 0.5;
+    let top = (batch.height * 0.8325).floor();
+    batch.fill(atlas, left, top, width, 2.0, color::hex(0x44474B, 255));
+    batch.fill(atlas, left, top, width * progress.clamp(0.0, 1.0), 2.0, BOOT_TEXT);
+    let stage = crate::text::Text::literal(line);
+    let x = (batch.width - atlas.font.width_text(&stage)) * 0.5;
+    batch.text_styled(atlas, &stage, x, top - 12.0, BOOT_TEXT, false);
+}
+
+#[cfg(target_os = "horizon")]
+pub use draw_horizon_loading_overlay as draw_loading_overlay;
+
 /// The wordmark with its tagline, centred.
 fn wordmark(atlas: &HudAtlas, batch: &mut HudBatch) {
     let mut ui = Ui::new(atlas, batch, (0.0, 0.0));

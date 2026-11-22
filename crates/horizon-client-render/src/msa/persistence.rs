@@ -12,7 +12,7 @@ use std::{
 const FILE_NAME: &str = "account.json";
 const TEMP_NAME: &str = "account.json.tmp";
 const RENEW_BEFORE: u64 = 3600;
-const NOT_CONFIGURED: &str = "This build has no Microsoft sign-in (HORIZON_MSA_CLIENT_ID).";
+const NOT_CONFIGURED: &str = "Microsoft sign-in is not configured. Set HORIZON_MSA_CLIENT_ID in env.txt beside the NRO to an approved app's public client ID, then restart.";
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Saved {

@@ -1805,7 +1805,7 @@ impl Loading {
             }
         }
         if self.menu.pending.is_some() {
-            horizon_client::level_loading::draw_loading_overlay(
+            horizon_client::ui_theme::draw_loading_overlay(
                 batch,
                 &gui.atlas,
                 self.progress.line(),

@@ -2,18 +2,14 @@
 //! raises the CPU from 1020 to 1785 MHz and throttles the GPU to its minimum
 //! (switch/services/apm.h). Loading on the Switch is CPU-bound: in log14 the two big loader threads
 //! were on a core 88% and 90% of their lives, and with the boost (log16) resources loaded in 88 s
-//! instead of 174 s. But at the GPU's minimum the menus draw at about 8.5 fps and feel dead to the
-//! pad (log16: 8.4-8.9 fps for the first 160 s, until the world). So `init` switches the boost on,
-//! and it goes off as soon as the player touches a control (a pad button or stick, or the touch
-//! screen; checked once a frame from `process_applet_messages`) or the game grabs the cursor,
-//! which it does once the player is in a world (`horizon_nx_entered_world`), whichever comes first.
-//! It goes back on while a world opens (`loading_world`, called by the game while it draws a
-//! world's loading screens), and off at the world or once those screens are gone.
+//! instead of 174 s. The GPU runs slower during FastLoad, so menus can feel less responsive.
+//! Launch keeps the CPU boost through menu input until the first world. While opening later
+//! worlds, a cancelled load restores normal clocks too. Gameplay never requests a sustained
+//! CPU overclock. HOME/sleep temporarily releases the boost, and exit restores normal clocks.
 //! `HORIZON_NX_CPU_BOOST=0` in env.txt keeps the normal clocks throughout, to compare, and
 //! `HORIZON_NX_WORLD_BOOST=0` only while a world opens. Only an Application (title takeover) may
 //! boost; an applet (album) logs why and loads at the normal clocks.
 
-use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::time::Instant;
@@ -30,10 +26,6 @@ const APPLET_TYPE_APPLICATION: i32 = 0;
 unsafe extern "C" {
     fn appletGetAppletType() -> i32;
     fn appletSetCpuBoostMode(mode: u32) -> u32;
-    fn padConfigureInput(max_players: u32, style_set: u32);
-    fn padInitializeWithMask(pad: *mut PadState, pad_mask: u64);
-    fn padUpdate(pad: *mut PadState);
-    fn hidGetTouchScreenStates(states: *mut TouchScreenState, count: usize) -> usize;
 }
 
 /// The boost is on: set by `start_from_env` or `loading_world`, cleared by `end`.
@@ -41,7 +33,7 @@ static BOOSTED: AtomicBool = AtomicBool::new(false);
 /// When the launch boost went on (forced by `start_from_env` as it does): the clock the rest of
 /// this file's times count from.
 static STARTED: LazyLock<Instant> = LazyLock::new(Instant::now);
-/// What the boost is on for: the launch (ends at the first input or the world) or a world's
+/// What the boost is on for: the launch (ends at the world) or a world's
 /// loading screens (end at the world, or once those screens are gone).
 const FOR_LAUNCH: u8 = 1;
 const FOR_WORLD: u8 = 2;
@@ -56,58 +48,6 @@ static SINCE_MS: AtomicU64 = AtomicU64::new(0);
 static ITERATIONS_WITHOUT_LOADING: AtomicU32 = AtomicU32::new(0);
 /// That many iterations (about 2 s at 60 fps) without a loading screen: the open was cancelled.
 const LOADING_GONE: u32 = 120;
-
-/// libnx `HidAnalogStickState`.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct StickState {
-    x: i32,
-    y: i32,
-}
-
-/// libnx `PadState` (`switch/runtime/pad.h`), its layout asserted below.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct PadState {
-    id_mask: u8,
-    active_id_mask: u8,
-    read_handheld: bool,
-    active_handheld: bool,
-    style_set: u32,
-    attributes: u32,
-    _pad: u32,
-    buttons_cur: u64,
-    buttons_old: u64,
-    sticks: [StickState; 2],
-    gc_triggers: [u32; 2],
-}
-
-const _: () = {
-    assert!(core::mem::size_of::<PadState>() == 56);
-    assert!(core::mem::offset_of!(PadState, buttons_cur) == 16);
-    assert!(core::mem::offset_of!(PadState, sticks) == 32);
-};
-
-/// libnx `HidTouchScreenState`: the sampling number and the touch count lead it; the touches
-/// that follow (16 of 0x28 bytes) are not read here.
-#[repr(C)]
-struct TouchScreenState {
-    sampling_number: u64,
-    count: i32,
-    reserved: u32,
-    touches: [[u8; 0x28]; 16],
-}
-
-/// libnx `HidNpadStyleSet_NpadStandard`, and player 1 plus the handheld controls.
-const STYLE_SET_STANDARD: u32 = 0x1F;
-const PAD_MASK: u64 = (1 << 0) | (1 << 32);
-/// How far a stick must tilt (of 32767) to count as the player touching it.
-const STICK_TOUCHED: i32 = 8000;
-
-thread_local! {
-    /// The pad read while boosted; only the main thread (the game loop) asks.
-    static PAD: RefCell<Option<PadState>> = const { RefCell::new(None) };
-}
 
 /// Switches the boost on for the loading ahead, unless `HORIZON_NX_CPU_BOOST=0`. `init` calls it
 /// once, after env.txt is applied.
@@ -130,25 +70,30 @@ pub(crate) fn start_from_env() {
         ));
         return;
     }
-    // SAFETY: as above.
-    let rc = unsafe { appletSetCpuBoostMode(BOOST_FAST_LOAD) };
-    if rc == 0 {
-        LazyLock::force(&STARTED);
+    LazyLock::force(&STARTED);
+    if begin(FOR_LAUNCH) {
         ALLOWED.store(true, Ordering::Relaxed);
-        REASON.store(FOR_LAUNCH, Ordering::Relaxed);
-        BOOSTED.store(true, Ordering::SeqCst);
-        write_log_line(format_args!(
-            "[Boost] CPU boost on while loading (CPU 1785 MHz, GPU at its minimum) until the first input or the world\n"
-        ));
-    } else {
-        write_log_line(format_args!(
-            "[Boost] appletSetCpuBoostMode(FastLoad) failed: 0x{rc:x}; loading at the normal clocks\n"
-        ));
     }
 }
 
 fn elapsed_ms() -> u64 {
     u64::try_from(STARTED.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn begin(reason: u8) -> bool {
+    // SAFETY: appletInitialize has registered an application with the applet service.
+    let rc = unsafe { appletSetCpuBoostMode(BOOST_FAST_LOAD) };
+    if rc != 0 {
+        write_log_line(format_args!(
+            "[Boost] FastLoad failed: 0x{rc:x}; keeping normal clocks\n"
+        ));
+        return false;
+    }
+    SINCE_MS.store(elapsed_ms(), Ordering::Relaxed);
+    REASON.store(reason, Ordering::Relaxed);
+    BOOSTED.store(true, Ordering::SeqCst);
+    write_log_line(format_args!("[Boost] CPU boost on until world entry or cancelled load\n"));
+    true
 }
 
 /// The game draws a world's loading screen (opening a world, its server starting, "Loading
@@ -158,7 +103,11 @@ fn elapsed_ms() -> u64 {
 /// it: a button still held from picking the world would, and the boost would flicker. A launch
 /// boost still on (the world picked on the startup title) carries on as this one.
 pub fn loading_world() {
-    if !ALLOWED.load(Ordering::Relaxed) || !WORLD_BOOST.load(Ordering::Relaxed) {
+    if !WORLD_BOOST.load(Ordering::Relaxed) {
+        end("world loading boost disabled");
+        return;
+    }
+    if !ALLOWED.load(Ordering::Relaxed) {
         return;
     }
     ITERATIONS_WITHOUT_LOADING.store(0, Ordering::Relaxed);
@@ -166,28 +115,13 @@ pub fn loading_world() {
         REASON.store(FOR_WORLD, Ordering::Relaxed);
         return;
     }
-    // SAFETY: as in `start_from_env`.
-    let rc = unsafe { appletSetCpuBoostMode(BOOST_FAST_LOAD) };
-    if rc == 0 {
-        SINCE_MS.store(elapsed_ms(), Ordering::Relaxed);
-        REASON.store(FOR_WORLD, Ordering::Relaxed);
-        BOOSTED.store(true, Ordering::SeqCst);
-        write_log_line(format_args!(
-            "[Boost] CPU boost on while a world opens, until the world or its loading screens are gone\n"
-        ));
-    } else {
-        // Not again every frame.
+    if !begin(FOR_WORLD) {
         WORLD_BOOST.store(false, Ordering::Relaxed);
-        write_log_line(format_args!(
-            "[Boost] appletSetCpuBoostMode(FastLoad) failed while a world opens: 0x{rc:x}\n"
-        ));
     }
 }
 
-/// Once a frame, from `process_applet_messages`: while boosted for the launch, a pressed pad
-/// button, a tilted stick or a finger on the touch screen ends the boost, so the menus get the GPU
-/// back. While boosted for a world, it counts the iterations without a loading screen instead.
-pub(crate) fn end_on_input() {
+/// Detect a cancelled world open. Ordinary title input does not change the launch clocks.
+pub(crate) fn tick_loading() {
     if !BOOSTED.load(Ordering::Relaxed) {
         return;
     }
@@ -196,37 +130,28 @@ pub(crate) fn end_on_input() {
         if iterations >= LOADING_GONE {
             end("the world's loading screens are gone");
         }
-        return;
     }
-    let pad_touched = PAD.with(|pad| {
-        let mut pad = pad.borrow_mut();
-        let state = pad.get_or_insert_with(|| {
-            let mut state = PadState::default();
-            // SAFETY: libnx's pad setup; the controllers' own reader does the same, which is
-            // harmless twice. `state` is a plain struct libnx fills.
-            unsafe {
-                padConfigureInput(1, STYLE_SET_STANDARD);
-                padInitializeWithMask(&mut state, PAD_MASK);
-            }
-            state
-        });
-        // SAFETY: set up above; padUpdate only writes it.
-        unsafe { padUpdate(state) };
-        state.buttons_cur != 0
-            || state
-                .sticks
-                .iter()
-                .any(|s| s.x.abs() > STICK_TOUCHED || s.y.abs() > STICK_TOUCHED)
-    });
-    let touched = pad_touched || {
-        let mut state = core::mem::MaybeUninit::<TouchScreenState>::zeroed();
-        // SAFETY: libnx writes at most one state into the zeroed buffer.
-        let n = unsafe { hidGetTouchScreenStates(state.as_mut_ptr(), 1) };
-        n > 0 && unsafe { state.assume_init_ref() }.count > 0
-    };
-    if touched {
-        end("input in the menus");
+}
+
+/// Release FastLoad while HOME or sleep owns the display. Only a load that was actually
+/// boosted is eligible to resume when focus returns.
+pub(crate) fn pause_loading() -> Option<u8> {
+    if !BOOSTED.load(Ordering::Relaxed) {
+        return None;
     }
+    let reason = REASON.load(Ordering::Relaxed);
+    end("application in background");
+    Some(reason)
+}
+
+pub(crate) fn resume_loading(reason: Option<u8>) {
+    if let Some(reason) = reason {
+        begin(reason);
+    }
+}
+
+pub(crate) fn on_exit() {
+    end("application exiting");
 }
 
 /// The winit backend calls this whenever the game grabs the cursor; the first call means the player
