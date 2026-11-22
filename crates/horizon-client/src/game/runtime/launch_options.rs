@@ -145,6 +145,15 @@ impl Options {
                 .and_then(|()| std::env::set_current_dir(&dir))
                 .map_err(|e| format!("game folder {}: {e}", dir.display()))?;
         }
+        // Switch has no launcher to restore the title screen's saved account.
+        #[cfg(target_os = "horizon")]
+        if o.is_client_start()
+            && !o.developer_single_player
+            && horizon_client::auth::current().is_none()
+            && let Ok(dir) = std::env::current_dir()
+        {
+            horizon_client::msa::resume_in_background(dir);
+        }
         // Vanilla's quick play (Main, QuickPlay.joinSingleplayerWorld): only a
         // world that exists opens; else the title screen. --world also creates one.
         if let Some(world) = o.quick_play.take() {

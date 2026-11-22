@@ -96,6 +96,7 @@ pub mod models;
 pub mod mods_screen;
 pub mod monitor;
 pub mod multiline_edit;
+pub mod msa;
 pub mod native_emissive;
 pub mod options_file;
 pub mod options_fixes;

@@ -1,8 +1,8 @@
 //! The Microsoft account the launcher signed in, handed over in a session
 //! file (docs/microsoft-account.md), and the Minecraft services call
 //! online-mode servers need: authlib's MinecraftServicesSessionService.joinServer
-//! through the services discovery document. The access token stays in this
-//! process's memory: it is never logged, printed or written anywhere.
+//! through the services discovery document. Launcher credentials stay in memory after handoff;
+//! the Switch's own account persistence is handled separately by `msa`.
 use std::{
     path::Path,
     sync::{Arc, Mutex, OnceLock},
@@ -40,6 +40,21 @@ pub fn parse_uuid(text: &str) -> Option<u128> {
 }
 
 impl AuthSession {
+    /// A session signed in by the game itself.
+    pub(crate) fn signed_in(
+        name: String,
+        uuid: u128,
+        xuid: Option<String>,
+        access_token: String,
+    ) -> Self {
+        Self {
+            name,
+            uuid,
+            xuid,
+            access_token,
+        }
+    }
+
     /// For tests and harnesses.
     pub fn new(name: &str, uuid: u128, access_token: &str) -> Self {
         Self {
@@ -123,14 +138,23 @@ impl AuthSession {
     }
 }
 
-static CURRENT: OnceLock<Arc<AuthSession>> = OnceLock::new();
+static CURRENT: Mutex<Option<Arc<AuthSession>>> = Mutex::new(None);
 
-/// The account this game was started with (set once at start).
+/// The account handed over by the launcher (set once at startup).
 pub fn set_current(session: AuthSession) {
-    let _ = CURRENT.set(Arc::new(session));
+    CURRENT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(|| Arc::new(session));
 }
+
+/// The Switch title can sign into or out of an account without restarting the game.
+pub(crate) fn replace_current(session: Option<AuthSession>) {
+    *CURRENT.lock().unwrap_or_else(|e| e.into_inner()) = session.map(Arc::new);
+}
+
 pub fn current() -> Option<Arc<AuthSession>> {
-    CURRENT.get().cloned()
+    CURRENT.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// Why joining a server through the session service failed, like the

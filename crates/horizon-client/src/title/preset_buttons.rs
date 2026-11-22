@@ -24,7 +24,10 @@ impl Title {
             Mode::Main => {
                 let cx = (w / 2.0).floor();
                 let y = (h / 4.0).floor() + 48.0;
-                let mut buttons = vec![
+                let show_account = account::shown();
+                let realms_width = if show_account { 98.0 } else { 200.0 };
+                let mut buttons = Vec::with_capacity(9 + usize::from(show_account));
+                buttons.extend([
                     b(
                         cx - 100.0,
                         y,
@@ -43,12 +46,12 @@ impl Title {
                     ),
                     match update_button() {
                         Some((label, enabled)) => {
-                            owned_button(cx - 100.0, y + 48.0, 200.0, label, enabled, UPDATE)
+                            owned_button(cx - 100.0, y + 48.0, realms_width, label, enabled, UPDATE)
                         }
                         None => owned_button(
                             cx - 100.0,
                             y + 48.0,
-                            200.0,
+                            realms_width,
                             lang::get_or("menu.online", "Minecraft Realms"),
                             // TitleScreen.createNormalMenuOptions: Realms is off when
                             // multiplayer is. The Switch keeps the slot disabled
@@ -57,6 +60,15 @@ impl Title {
                             8,
                         ),
                     },
+                ]);
+                if show_account {
+                    let label = match crate::auth::current() {
+                        Some(session) => session.name.clone(),
+                        None => lang::get_or("horizon.account.button", "Sign In"),
+                    };
+                    buttons.push(owned_button(cx + 2.0, y + 48.0, 98.0, label, true, account::OPEN));
+                }
+                buttons.extend([
                     b(
                         cx - 100.0,
                         y + 96.0,
@@ -75,7 +87,7 @@ impl Title {
                         2,
                     )
                     .does(crate::widgets::Action::Exit),
-                ];
+                ]);
                 // CommonButtons' icon buttons; Horizon's Join a Friend (an
                 // invite code) sits behind vanilla's Friends button.
                 for (i, (key, plain, id, icon)) in [
@@ -391,6 +403,7 @@ impl Title {
                     .does(crate::widgets::Action::Cancel),
                 ]
             }
+            Mode::Account => self.account_buttons(w, h),
             Mode::MissingMods { .. } => {
                 let (_, _, narrow) = missing_mods::layout(w, h);
                 let button_width = if narrow { (w - 20.0).min(300.0) } else { 150.0 };

@@ -20,6 +20,7 @@ use std::{
     sync::mpsc,
 };
 
+mod account;
 mod buffet;
 mod confirm_experiments;
 mod create_world;
@@ -397,6 +398,8 @@ pub enum Mode {
     },
     /// `BanNoticeScreens`: a ConfirmLinkScreen `Gui.addInitialScreens` queued.
     BanNotice(crate::ban_notice::Notice),
+    /// Microsoft device-code sign-in for Switch.
+    Account,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
@@ -527,6 +530,7 @@ pub struct Title {
     preparing: bool,
     /// The confirm screen's Back: the Data Packs screen reopens.
     reopen_data_packs: bool,
+    account: account::Screen,
 }
 pub(crate) struct Button {
     x: f32,
@@ -825,6 +829,7 @@ impl Mode {
             Self::Onboarding(_) => "onboarding",
             Self::BanNotice(_) => "ban_notice",
             Self::ConfirmUpdate { .. } => "switch_update",
+            Self::Account => "account",
         }
     }
 }
@@ -997,6 +1002,7 @@ impl Title {
             confirm_experiments: RefCell::new(None),
             preparing: false,
             reopen_data_packs: false,
+            account: account::Screen::default(),
         }
     }
     /// Retain additional repository sources across world-creation screens.
@@ -2170,6 +2176,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                 let (title, message) = update_question(*build);
                 ScreenInfo::new("switch_update", join(&[&title, &message]))
             }
+            Mode::Account => self.account_narration(),
             Mode::Delete { world } => ScreenInfo::new(
                 "delete_world",
                 join(&[
@@ -2548,6 +2555,11 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             }
             (Mode::Main, Some(2)) => Action::Quit,
             (Mode::Main, Some(UPDATE)) => self.update_click(),
+            (Mode::Main, Some(account::OPEN)) => {
+                self.open_account();
+                Action::None
+            }
+            (Mode::Account, Some(button)) => self.account_click(button),
             (Mode::BanNotice(_), Some(id @ 120..=122)) => {
                 // BanNoticeScreens' callback: Open in Browser opens the link, Copy copies it
                 // and answers no; all of them run `next`.
@@ -3762,34 +3774,52 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         self.set_mode(mode);
     }
     /// The account fetches vanilla starts in `Minecraft`'s constructor
-    /// (`userPropertiesFuture`, `profileFuture`), run once per launch on a thread, only
-    /// for a real online session (offline and demo have none). Their result decides
+    /// (`userPropertiesFuture`, `profileFuture`), run once per signed-in session on a thread
+    /// (offline and demo have none). Their result decides
     /// `allowsMultiplayer` and queues `Gui.addInitialScreens`' ban notices, which open
     /// as soon as the title is showing.
     fn poll_account(&mut self) {
         use crate::ban_notice::{AccountStatus, initial_notices};
-        use std::sync::{
-            OnceLock,
-            atomic::{AtomicBool, Ordering},
-        };
-        static STATUS: OnceLock<AccountStatus> = OnceLock::new();
-        static STARTED: AtomicBool = AtomicBool::new(false);
-        static QUEUED: AtomicBool = AtomicBool::new(false);
+        use std::sync::{Arc, Mutex, OnceLock, Weak};
+        struct Check {
+            session: Weak<crate::auth::AuthSession>,
+            status: Arc<OnceLock<AccountStatus>>,
+            queued: bool,
+        }
+        static CHECK: Mutex<Option<Check>> = Mutex::new(None);
+        let mut active = CHECK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(session) = crate::auth::current() else {
+            if active.take().is_some() {
+                self.allows_multiplayer = true;
+                self.ban_queue.clear();
+            }
             return;
         };
-        if !STARTED.swap(true, Ordering::Relaxed) {
-            let session = session.clone();
+        // The Switch can sign out or replace a session without restarting. A worker for an
+        // older session must never set multiplayer permissions or a ban notice for this one.
+        let session_ref = Arc::downgrade(&session);
+        if active.as_ref().is_none_or(|check| !check.session.ptr_eq(&session_ref)) {
+            self.ban_queue.clear();
+            let status = Arc::new(OnceLock::new());
+            let worker_status = status.clone();
+            let worker_session = session.clone();
             let spawned = std::thread::Builder::new()
                 .name("Account status".into())
                 .spawn(move || {
-                    let _ = STATUS.set(crate::auth::fetch_account_status(&session));
+                    let _ = worker_status.set(crate::auth::fetch_account_status(&worker_session));
                 });
             if spawned.is_err() {
                 log::warn!("Horizon: could not start the account status fetch");
             }
+            *active = Some(Check {
+                session: session_ref,
+                status,
+                queued: false,
+            });
         }
-        let Some(status) = STATUS.get() else {
+        let check = active.as_mut().expect("account status check");
+        let Some(status) = check.status.get() else {
+            self.allows_multiplayer = true;
             return;
         };
         self.allows_multiplayer = status.allows_multiplayer();
@@ -3799,10 +3829,12 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             status.properties.friends_enabled,
             status.properties.accept_friend_invites,
         );
-        if !QUEUED.swap(true, Ordering::Relaxed) {
+        if !check.queued {
+            check.queued = true;
             self.ban_queue
                 .extend(initial_notices(status, &session.name));
         }
+        drop(active);
         if matches!(self.mode, Mode::Main) {
             self.next_ban_notice();
         }
@@ -3874,6 +3906,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             Mode::Onboarding(_) => self.onboarding_close(),
             // ConfirmScreen.keyPressed: Escape answers no, which runs `next`.
             Mode::BanNotice(_) => self.next_ban_notice(),
+            Mode::Account => self.leave_account(),
             _ => self.set_mode(Mode::Main),
         }
     }
