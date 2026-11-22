@@ -50,9 +50,14 @@ pub(super) const NO_ANSWER: &str =
     "the integrated server stopped or did not answer within 10 s (the game log says which)";
 
 /// The server thread holds its `Game` by value and runs every tick on it.
-/// It reserves the same guest limit and host headroom as the main thread.
-const SERVER_THREAD_STACK: usize =
-    horizon_guest_stack::GUEST_STACK_BYTES + horizon_guest_stack::HOST_HEADROOM;
+/// Code mods need the guest reservation. Switch only runs host code and backs thread stacks
+/// from the same limited heap as the world and renderer.
+const SERVER_THREAD_STACK: usize = horizon_guest_stack::HOST_HEADROOM
+    + if cfg!(target_os = "horizon") {
+        0
+    } else {
+        horizon_guest_stack::GUEST_STACK_BYTES
+    };
 
 /// `horizon_threads::server_core::take`, told in the log: the server thread keeps one physical
 /// core while cooperating workers avoid it, until the hold drops as the thread ends.
@@ -1655,7 +1660,7 @@ pub(super) mod tests {
     /// reaches it (arismoko/horizon#2430).
     #[test]
     fn the_server_thread_stack_keeps_guest_headroom_and_larger_overrides() {
-        let minimum = 136 * 1024 * 1024;
+        let minimum = if cfg!(target_os = "horizon") { 8 } else { 136 } * 1024 * 1024;
         assert_eq!(super::stack_for(None), minimum);
         assert_eq!(
             super::stack_for(Some("1048576")),
@@ -1663,7 +1668,7 @@ pub(super) mod tests {
             "smaller asks keep guest headroom"
         );
         assert_eq!(super::stack_for(Some("268435456")), 256 * 1024 * 1024);
-        assert_eq!(super::stack_for(Some("16777216")), minimum);
+        assert_eq!(super::stack_for(Some("16777216")), minimum.max(16 * 1024 * 1024));
         assert_eq!(
             super::stack_for(Some("lots")),
             minimum,
