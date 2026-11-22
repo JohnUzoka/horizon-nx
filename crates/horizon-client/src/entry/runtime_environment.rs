@@ -39,7 +39,9 @@ pub(super) fn switch_launch_arguments() -> crate::Result<LaunchArguments> {
     let mut launch = LaunchArguments::parse(
         std::env::args().skip(1).chain(file_args),
         &cwd,
-        &dir,
+        // horizon_nx::init already entered the NRO's folder. A devoptab path
+        // like sdmc:/foo is not absolute to Rust's Unix Path::join.
+        std::path::Path::new("."),
         std::env::var_os("HORIZON_HOME").as_deref(),
     )?;
     // Use the same parsed argument as explicit --dedicated so installation and
