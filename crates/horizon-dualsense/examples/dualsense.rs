@@ -5,19 +5,34 @@
 //!
 //! The pad's input report carries the triggers' active effect, and its accelerometer and gyro
 //! pick up the motors, so `rumble` measures the shake against the pad lying still.
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 use horizon_dualsense::device::{DualSense, Link, State};
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 use horizon_dualsense::{Output, TRIGGER_OFF};
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 use std::time::{Duration, Instant};
 
 /// Offsets in the input report's data, after the report ID (USB 0x01) or the ID and a tag byte
 /// (Bluetooth 0x31).
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 const GYRO: usize = 0x0f;
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 const ACCEL: usize = 0x15;
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 const RIGHT_TRIGGER_STATUS: usize = 0x29;
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 const LEFT_TRIGGER_STATUS: usize = 0x2a;
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 const TRIGGER_EFFECTS: usize = 0x2f;
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 const POWER: usize = 0x34;
 
+#[cfg(any(target_os = "ios", target_os = "horizon"))]
+fn main() -> Result<(), &'static str> {
+    Err("the DualSense example requires a HID backend")
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 fn main() {
     let what = std::env::args().nth(1).unwrap_or_else(|| "all".into());
     let api = hidapi::HidApi::new().expect("hidapi");
@@ -62,6 +77,7 @@ fn main() {
 }
 
 /// The data of the next full input report.
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 fn input(pad: &DualSense) -> Vec<u8> {
     let mut buf = [0; 80];
     // Skip the reports queued since the last read.
@@ -76,6 +92,7 @@ fn input(pad: &DualSense) -> Vec<u8> {
     }
 }
 
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 fn status(pad: &DualSense) {
     let d = input(pad);
     println!(
@@ -87,6 +104,7 @@ fn status(pad: &DualSense) {
     trigger_status(pad);
 }
 
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 fn trigger_status(pad: &DualSense) {
     let d = input(pad);
     println!(
@@ -97,6 +115,7 @@ fn trigger_status(pad: &DualSense) {
 
 /// How much the pad shakes over `time`: the standard deviation of the accelerometer and the
 /// gyro, summed over the axes.
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 fn shake(pad: &DualSense, time: Duration) -> (f64, f64) {
     let end = Instant::now() + time;
     let mut samples = Vec::new();
@@ -124,10 +143,12 @@ fn shake(pad: &DualSense, time: Duration) -> (f64, f64) {
     (deviation(0..3), deviation(3..6))
 }
 
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 fn write(pad: &mut DualSense, out: Output) {
     pad.write(&out).expect("write");
 }
 
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 fn rumble(pad: &mut DualSense) {
     let still = shake(pad, Duration::from_millis(400));
     println!(
@@ -168,6 +189,7 @@ fn rumble(pad: &mut DualSense) {
     }
 }
 
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 fn lightbar(pad: &mut DualSense) {
     write(
         pad,
@@ -194,6 +216,7 @@ fn lightbar(pad: &mut DualSense) {
     }
 }
 
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 fn leds(pad: &mut DualSense) {
     for (name, leds) in [
         ("player 1", 0b00100),
@@ -222,6 +245,7 @@ fn leds(pad: &mut DualSense) {
     );
 }
 
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 fn triggers(pad: &mut DualSense) {
     use horizon_dualsense::trigger;
     // The game's feels (docs/controllers.md "Adaptive triggers"); each holds two seconds so a
@@ -253,6 +277,7 @@ fn triggers(pad: &mut DualSense) {
 }
 
 /// The writer thread: a state, a two-step vibration, and the release when it drops.
+#[cfg(not(any(target_os = "ios", target_os = "horizon")))]
 fn link() {
     println!("link:");
     let link = Link::start();

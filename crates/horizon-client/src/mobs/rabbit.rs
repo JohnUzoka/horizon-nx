@@ -23,7 +23,25 @@ const CLIENT_JUMP_TICKS: usize = 4;
 const CLIENT_JUMP_DURATION: usize = 5;
 
 /// The killer bunny's variant id (`Rabbit.Variant.EVIL`).
-const EVIL: u8 = 99;
+pub const EVIL: u8 = 99;
+
+/// `Rabbit.getRandomRabbitVariant(level, pos)`: one `nextInt(100)` from the
+/// level's random, then the biome's tags pick the variant. The roll is drawn
+/// even where a tag decides alone (the gold rabbit).
+pub fn random_variant(white: bool, gold: bool, random: &mut impl RandomSource) -> u8 {
+    let roll = random.next_int_bound(100).unwrap_or(0);
+    if white {
+        if roll < 80 { 1 } else { 3 }
+    } else if gold {
+        4
+    } else if roll < 50 {
+        0
+    } else if roll < 90 {
+        5
+    } else {
+        2
+    }
+}
 
 /// Rabbit.registerGoals.
 pub fn register(m: &mut Mob) {
@@ -49,6 +67,9 @@ pub fn register(m: &mut Mob) {
     g.add(6, Stroll::avoiding_water(0.6));
     g.add(11, LookAtPlayer::new(10.0));
     m.ai.mov.kind = super::control::MoveKind::Custom;
+    // Rabbit's constructor ends with setSpeedModifier(0.0), which leaves the move control in
+    // MOVE_TO towards the default wanted position (0, 0, 0).
+    m.ai.mov.set_wanted(0.0, 0.0, 0.0, 0.0);
     m.ai.nav.can_float = true;
     m.extra.ints[IDLE_TIMEOUT] = m.random.next_int_bound(40).unwrap_or(0) + 180;
 }
@@ -98,7 +119,7 @@ impl Goal for RaidGarden {
             self.block.next_start -= 1;
             return false;
         }
-        if !cx.w.mob_griefing {
+        if !cx.w.can_grief(m.id) {
             return false;
         }
         self.can_raid = false;
@@ -410,18 +431,15 @@ fn jump_scale(m: &Mob) -> f32 {
 
 /// Rabbit.jumpFromGround: ordinary small hops, larger hops toward raised terrain.
 pub fn jump(m: &mut Mob, w: &MobWorld) {
-    let power = jump_power(m, block_jump_factor(m, w));
+    let power = m.jump_power_with(w, jump_scale(m));
     apply_jump(m, power);
 }
+
+#[cfg(test)]
 fn jump_power(m: &Mob, block_factor: f32) -> f32 {
-    let boost = m
-        .extra
-        .effects
-        .iter()
-        .find(|e| e.0 == "minecraft:jump_boost")
-        .map_or(0.0, |e| 0.1 * (e.2 + 1) as f32);
-    m.attrs.jump_strength as f32 * jump_scale(m) * block_factor + boost
+    m.attrs.jump_strength as f32 * jump_scale(m) * block_factor + m.jump_boost_power()
 }
+
 fn apply_jump(m: &mut Mob, power: f32) {
     if power > 1.0e-5 {
         m.velocity.y = f64::from(power).max(m.velocity.y);
@@ -447,29 +465,6 @@ pub fn hop_event(m: &mut Mob) {
     m.extra.ints[CLIENT_JUMP_TICKS] = 0;
 }
 
-fn block_jump_factor(m: &Mob, w: &MobWorld) -> f32 {
-    let properties = w.movement;
-    let current = w.world.block(
-        m.position.x.floor() as i32,
-        m.position.y.floor() as i32,
-        m.position.z.floor() as i32,
-    );
-    let below = m.on_pos(0.500_001);
-    // shortcut: use mobs' existing on_pos until they track supporting blocks like the player.
-    let lower = w.world.block(below[0], below[1], below[2]);
-    let current = properties
-        .get(current)
-        .expect("validated movement registry")
-        .coefficients
-        .jump_factor;
-    let lower = properties
-        .get(lower)
-        .expect("validated movement registry")
-        .coefficients
-        .jump_factor;
-    if current == 1.0 { lower } else { current }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,6 +483,7 @@ mod tests {
             &json!({"children": {"head": {}, "left_hind_foot": {}}}),
         ));
         let kind = Arc::new(MobType {
+            shadow: None,
             id: "minecraft:rabbit".into(),
             species: Species::Rabbit,
             width: 0.4,
@@ -506,6 +502,8 @@ mod tests {
             knockback_resistance: 0.0,
             jump_strength: 0.42,
             attributes: Arc::default(),
+            item_stack_limits: Default::default(),
+            attribute_bounds: Default::default(),
             gravity: 0.08,
             safe_fall_distance: 3.0,
             fall_damage_multiplier: 1.0,
@@ -527,9 +525,10 @@ mod tests {
             brain: Brain::Passive,
             anim: Anim::Rabbit,
             sounds: [""; 3],
-            step_sound: None,
+            sound_overrides: Default::default(),
             food: Arc::default(),
             tempt: Arc::default(),
+            passenger_attachments: Vec::new(),
         });
         Mob::new(1, kind, Vec3::ZERO, 0.0)
     }
@@ -546,7 +545,7 @@ mod tests {
             .insert("rabbit_baby#main".into(), kind.model.clone());
         let types = HashMap::from([(kind.id.clone(), template.kind.clone())]);
         for (age, baby) in [(-24000, true), (-1, true), (0, false), (6000, false)] {
-            let (tag, _) = horizon_world::nbt::parse_snbt(&format!(
+            let (tag, _) = horizon_core::nbt::parse_snbt(&format!(
                 "{{id:\"minecraft:rabbit\",Pos:[0.0d,0.0d,0.0d],Age:{age}}}"
             ))
             .unwrap();
@@ -591,8 +590,8 @@ mod tests {
         // Animal.addAdditionalSaveData / readAdditionalSaveData: "InLove" (#1396).
         let mut m = rabbit();
         m.extra.in_love = 570;
-        let tag = crate::entity_nbt::mob_to_nbt(&m, [0, 0, 0, 1], None, None);
-        assert_eq!(tag.get("InLove"), Some(&horizon_world::nbt::Tag::Int(570)));
+        let tag = crate::entity_nbt::mob_to_nbt(&m, [0, 0, 0, 1], None, None, |_| None);
+        assert_eq!(tag.get("InLove"), Some(&horizon_core::nbt::Tag::Int(570)));
         let types = HashMap::from([(m.kind.id.clone(), m.kind.clone())]);
         let back = crate::entity_nbt::mob_from_nbt(&tag, &types, 2, None).unwrap();
         assert_eq!(back.extra.in_love, 570);
@@ -733,7 +732,11 @@ mod tests {
         m.horizontal_collision = true;
         near(f64::from(jump_power(&m, 1.0)), 0.5);
         m.attrs.jump_strength = 0.84;
-        m.extra.effects.push(("minecraft:jump_boost", 100, 1));
+        m.extra.effects.push(crate::mobs::StoredEffect::new(
+            "minecraft:jump_boost",
+            100,
+            1,
+        ));
         near(f64::from(jump_power(&m, 0.5)), 0.7);
         apply_jump(&mut m, 0.2);
         near(m.velocity.z, 0.1 / 3.25_f64.sqrt());

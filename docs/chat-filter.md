@@ -22,9 +22,11 @@ tunes it. LAN worlds and single player don't filter.
 ## Muting by hand
 
 Operators of level 3 (`/ban`'s level) mute players themselves; the console takes the same words without the
-slash. These are Horizon extras, and exist only on servers that filter chat.
+slash. These are Horizon extras, and exist only on servers that filter chat. They are in the command tree of
+operators of level 3 and above, so their clients complete them; other players don't see them.
 
-- `/mute <player> [reason]`: muted until `/unmute`.
+- `/mute <player> [duration] [reason]`: muted until `/unmute`, or for the duration when the word after the name
+  is one (`/mute Steve 1h spam`).
 - `/tempmute <player> <duration> [reason]`: muted for a duration such as `30s`, `10m`, `2h`, `1d` or `1w`.
 - `/mutelist`: every mute in force, the filter's and the operators', with who muted, until when and why.
 - `/unmute <player>`: lifts either kind.
@@ -47,7 +49,9 @@ words_file = ""         # your own list, relative to the server's folder; "": th
 log = "logs/chat-filter.log"
 ```
 
-horizon-server checks the section before every start, and the game reads it from the same file.
+horizon-server checks the section before every start, and the game reads it from the same file. A start
+refuses `window_minutes` 0, and a `mute_minutes` or `tempban_hours` of 0 while its threshold is set: a
+punishment that lasts no time would lift itself as it is given.
 
 ## The list
 
@@ -64,4 +68,4 @@ in an entry must be doubled in the text, so Niger and Nigeria pass, and so do "s
 Keep the list to slurs: insults that aren't slurs are the moderators' to handle.
 
 Code: `crates/horizon-chat-filter` (settings, matcher, escalation, mutes), `lan/hub/chat_filter.rs` (the
-check before the server relays a text), `game/chat_filter.rs` (log, events, bans, the mute commands).
+check before the server relays a text), `game/interface/chat_filter.rs` (log, events, bans, the mute commands).

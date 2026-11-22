@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
-"""A dedicated server saves connected players on save-all/stop and keeps safe data after a panic.
+"""A dedicated server saves connected players on save-all/stop/SIGTERM and keeps safe data after a panic.
 
 `MinecraftServer.runServer` catches what the tick throws and still stops the server. Horizon's
-`stop_after_crash` does the same, but a panic can interrupt a guest's turn (the game holds that
-player's state swapped in) or a tick that has the hub out. `HORIZON_CRASH_FIXTURE` makes the tick
-panic at one of those points. Each run below joins a real Horizon client, panics the server, and
+`stop_after_crash` does the same, but a panic can interrupt a guest's turn (the turn's state is
+half done, and is written back into the player's record as the panic leaves the turn) or a
+network tick that has the hub out. `HORIZON_CRASH_FIXTURE` makes the tick panic at one of those
+points. Each run below joins a real Horizon client, panics the server, and
 checks, from the files the server leaves:
 
 - Connected player: save-all writes five diamonds while the player stays joined;
   stop writes the newer inventory of twelve diamonds.
-- `guest`: the panic comes in the joined player's turn (which runs with the hub out of the game,
-  as every network turn does). The player's file is byte for byte what the previous clean stop
-  wrote, and a block placed before the panic is still there on the next start.
-- `hub`: the panic comes while a console line has the hub out with a player in. Same checks.
+- `guest`: the panic comes in the joined player's turn, with the hub in the game. The log says
+  that player keeps their last saved file; the player's files are byte for byte what the previous
+  clean stop wrote, and a block placed before the panic is still there on the next start.
+- `hub`: the panic comes in the network tick, which has the hub out, with a player in. The log
+  says no player is saved; same checks.
 """
 import hashlib
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -26,10 +29,11 @@ import time
 from pathlib import Path
 
 try:
-    from . import lab
+    from . import fast_bins, lab
     from .integration_env import run_game
     from .test_dedicated_server_parity import Server, write_server_dir, free_port
 except ImportError:
+    import fast_bins
     import lab
     from integration_env import run_game
     from test_dedicated_server_parity import Server, write_server_dir, free_port
@@ -40,7 +44,7 @@ PLAYER = 'Tester'
 def binary():
     metadata = subprocess.check_output(['cargo', 'metadata', '--no-deps', '--format-version', '1'], cwd=lab.ROOT, text=True)
     import json
-    return Path(json.loads(metadata)['target_directory']) / 'fast' / 'horizon-client'
+    return lab.binary(Path(json.loads(metadata)['target_directory']) / 'fast', 'horizon-client')
 
 
 def start(directory, fixture=None):
@@ -102,8 +106,6 @@ def crash(directory, fixture, port, out, trigger):
             raise AssertionError('the block was never placed:\n' + '\n'.join(server.lines[-20:]))
         client = join(port, out)
         server.wait_for(rf'{PLAYER} joined the game', timeout=300)
-        if trigger.get('console'):
-            server.console('say crash now')
         deadline = time.time() + 120
         while server.process.poll() is None and time.time() < deadline:
             time.sleep(0.2)
@@ -125,7 +127,7 @@ def connected_saves(build):
     port = free_port()
     write_server_dir(directory, port)
     server = start(directory)
-    client = lan_e2e.Game('autosave', binary().with_name('horizon-ctl'), lab.RESOURCES)
+    client = lan_e2e.Game('autosave', lab.binary(binary().parent, 'horizon-ctl'), lab.RESOURCES)
     file = directory / 'world' / 'players' / 'data' / f'{offline_uuid(PLAYER)}.dat'
 
     def diamonds():
@@ -157,8 +159,51 @@ def connected_saves(build):
     print('connected player save-all and stop: ok', flush=True)
 
 
+def signal_saves(build):
+    """SIGTERM stops the server as `stop` does (vanilla's shutdown hook): a connected player's
+    inventory and ender chest changed since the last save are in their file afterwards."""
+    try:
+        from . import anvil_dump, lan_e2e
+    except ImportError:
+        import anvil_dump
+        import lan_e2e
+    directory = build / 'signal-server'
+    port = free_port()
+    write_server_dir(directory, port)
+    server = start(directory)
+    client = lan_e2e.Game('sigterm', lab.binary(binary().parent, 'horizon-ctl'), lab.RESOURCES)
+    file = directory / 'world' / 'players' / 'data' / f'{offline_uuid(PLAYER)}.dat'
+    try:
+        client.raw('launch', '--headless', '--game', binary())
+        client.raw('connect', f'127.0.0.1:{port}', PLAYER)
+        client.raw('wait-for', 'loaded', '--timeout', 300)
+        server.wait_for(rf'{PLAYER} joined the game')
+        server.console(f'give {PLAYER} minecraft:diamond 9')
+        server.console(f'item replace entity {PLAYER} enderchest.0 with minecraft:emerald 5')
+        server.console('say GIVEN-BEFORE-SIGTERM')
+        server.wait_for(r'\[Server\] GIVEN-BEFORE-SIGTERM')
+        assert not file.exists(), 'the player was saved before the signal'
+        server.process.send_signal(signal.SIGTERM)
+        try:
+            server.process.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            raise AssertionError('the server did not stop within 120 s of SIGTERM')
+        server.reader.join(timeout=10)
+        assert any('Saving players' in line for line in server.lines), \
+            'SIGTERM ended the server without saving:\n' + '\n'.join(server.lines[-10:])
+        assert file.exists(), 'SIGTERM ended the server without writing the player file'
+        player = anvil_dump.plain(anvil_dump.read_dat(file), full=True)
+        diamonds = sum(i['count'] for i in player['Inventory'] if i['id'] == 'minecraft:diamond')
+        emeralds = sum(i['count'] for i in player.get('EnderItems', []) if i['id'] == 'minecraft:emerald')
+        assert (diamonds, emeralds) == (9, 5), f'saved {diamonds} diamonds and {emeralds} ender chest emeralds, not 9 and 5'
+    finally:
+        client.close()
+        server.stop()
+    print('connected player saved on SIGTERM: ok', flush=True)
+
+
 def main():
-    subprocess.run(['cargo', 'build', '--profile', 'fast', '-p', 'horizon-client', '-p', 'horizon-client-lib', '--bin', 'horizon-client', '--bin', 'horizon-ctl'], cwd=lab.ROOT, check=True)
+    subprocess.run(fast_bins.command('horizon-client', 'horizon-ctl'), cwd=lab.ROOT, check=True)
     build = lab.LOCAL / 'dedicated-crash-save'
     shutil.rmtree(build, ignore_errors=True)
     build.mkdir(parents=True)
@@ -169,6 +214,7 @@ def main():
     out.mkdir()
     problems = []
     connected_saves(build)
+    signal_saves(build)
 
     # A clean stop writes the player's file.
     server = start(directory)
@@ -182,8 +228,8 @@ def main():
         problems.append('the clean run wrote no player file')
 
     for fixture, y, trigger, expect in (
-        ('guest', 0, {'y': 0}, 'The panic interrupted the network tick'),
-        ('hub', 1, {'y': 1, 'console': True}, 'The panic interrupted the network tick'),
+        ('guest', 0, {'y': 0}, "The panic interrupted a player's turn: that player keeps the last saved file"),
+        ('hub', 1, {'y': 1}, 'The panic interrupted the network tick'),
     ):
         log = crash(directory, fixture, port, out, trigger)
         if f'The server thread panicked: crash fixture at {fixture}' not in log:

@@ -14,10 +14,11 @@ import subprocess
 import time
 
 try:
-    from . import lab, test_rust_parity as base
+    from . import fast_bins, lab, test_rust_parity as base
     from .test_dedicated_server_parity import Server, free_port, game_time
     from .test_server_world_gen_parity import escape
 except ImportError:
+    import fast_bins
     import lab
     import test_rust_parity as base
     from test_dedicated_server_parity import Server, free_port, game_time
@@ -68,6 +69,8 @@ def run_side(command, out, label):
         reply('tick freeze')
         reply('tick rate 200')
         assert any('false' in m for m in reply('gamerule minecraft:spawn_mobs false'))
+        # Zombie horses burn in daylight (Mob.isSunBurnTick rolls each tick), which made Health random.
+        reply('time set midnight')
         reply('forceload add 0 0 31 31')
         deadline = time.monotonic() + 300
         while True:
@@ -130,8 +133,7 @@ def main():
     if args.binary:
         binary = args.binary.resolve(strict=True)
     else:
-        subprocess.run(['cargo', 'build', '--profile', 'fast', '-p', 'horizon-client',
-                        '--bin', 'horizon-client'], cwd=lab.ROOT, check=True)
+        subprocess.run(fast_bins.command('horizon-client'), cwd=lab.ROOT, check=True)
         metadata = json.loads(subprocess.check_output(
             ['cargo', 'metadata', '--no-deps', '--format-version', '1'], cwd=lab.ROOT, text=True))
         binary = Path(metadata['target_directory']) / 'fast' / (

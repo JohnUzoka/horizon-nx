@@ -12,9 +12,9 @@ address), op and deop, the whitelist, and metrics as Prometheus text.
 
 | | Count |
 | --- | --- |
-| Commands | 30 (`init`, `run`, `start`, `stop`, `restart`, `status`, `cmd`, `logs`, `console`, `backup`, `backups`, `restore`, `service`, `panel`, `update`, `rollback`, `config`, `config set`, `import`, `mcp`, `op`, `deop`, `whitelist`, `players`, `kick`, `ban`, `pardon`, `ban-ip`, `pardon-ip`, `version`) |
-| `server.toml` keys | 25 in 7 sections, plus `[properties]` for any other vanilla key |
-| Control API endpoints | 30 under `/api/v1` |
+| Commands | 32 (`init`, `run`, `start`, `stop`, `restart`, `status`, `cmd`, `report`, `logs`, `console`, `backup`, `backups`, `restore`, `service`, `panel`, `update`, `rollback`, `config`, `config set`, `import`, `import-resources`, `mcp`, `op`, `deop`, `whitelist`, `players`, `kick`, `ban`, `pardon`, `ban-ip`, `pardon-ip`, `version`) |
+| `server.toml` keys | 40 in 9 sections, plus `[properties]` for any other vanilla key |
+| Control API endpoints | 32 under `/api/v1` |
 
 ## Guide
 
@@ -30,7 +30,8 @@ address), op and deop, the whitelist, and metrics as Prometheus text.
    fixed address and token: `[api] bind` and `[api] token` in `server.toml` ([hosting.md](../hosting.md#a-bot-or-a-tool-of-your-own)).
 4. Moderate: `horizon-server players`, `horizon-server ban NAME [REASON]`, or `POST /api/v1/players/ban`. An
    action runs vanilla's console command on the running game, so it kicks, logs and saves `banned-players.json`
-   exactly as an operator's `/ban` does; the reply says whether anything `changed` and has the console's lines.
+   exactly as an operator's `/ban` does; the CLI also edits the vanilla list directly while stopped. The reply
+   says whether anything `changed` and has the console's lines.
 5. Monitor: point Prometheus (or any scraper that sends a bearer token) at `GET /api/v1/metrics/prometheus`.
 6. Watch: `GET /api/v1/events` with `Accept: text/event-stream` streams what happens as server-sent events: every
    log line (`log`), the supervisor's `phase`, and the game's typed `join`, `leave`, `kick`, `chat` and `death`
@@ -71,18 +72,45 @@ curl -s -H "Authorization: Bearer $token" -o world.zip "http://$address/api/v1/b
 ## Stability
 
 Stable ([stability.md](stability.md)): the commands, `server.toml`'s keys and `/api/v1`. A new key or endpoint is an
-addition; a change to one starts `/api/v2`, served beside `/api/v1`.
+addition; a change to one starts `/api/v2`, served beside `/api/v1`. The clean-break runtime mod
+inventory contract below is an explicit exception: the old build-only reply is replaced, not kept as a second path.
+
+## Runtime mod inventory
+
+`GET /api/v1/mods` asks the running engine over its authenticated control connection for its canonical
+`LoadedMods` package inventory. `mods` lists package ids and versions in inventory order, including
+native code, wasm code and content packages installed in that inventory. This is the startup inventory,
+not a new package rescan or a list inferred from resource namespaces.
+
+```json
+{
+  "mods": [{"id": "example", "version": "1.0"}],
+  "provenance": {
+    "engine": {"found": true, "target": "server", "base": "v1", "horizon": "abc", "hooks": 326},
+    "native": [{"id": "build_example", "version": "0.9", "sha256": "ff"}]
+  }
+}
+```
+
+`provenance` comes only from `native-mods.json` beside the **configured** game program; it does not
+claim which mods the running process loaded. A missing build record has `engine.found: false`, null
+build fields and an empty provenance `native` list. Build records never supply or replace `mods`.
+A successful query with no installed packages returns `mods: []`. A stopped, unreachable or incompatible
+engine (including one that cannot answer the inventory query) returns HTTP 409 with an `error`, not an
+empty successful inventory or a build-record fallback.
+
+Diverges from upstream: runtime inventory replaces the old top-level build-only `engine` and `native`
+answer; those fields now live only under `provenance`.
 
 ## Not there yet
 
-- **Metrics**: entities and per-dimension counts in the Prometheus text.
 - **Mods on a dedicated server**: turn on and off, and their settings, once native mods can be built for the
-  server ([mods.md](../mods.md), [native-mods.md](../native-mods.md#multiplayer)). `GET /api/v1/mods` lists the native
-  mods the game program was built with.
-- **Vanilla's management protocol**: `serversettings/*` (the live settings not yet done) and the world
-  upgrade's notifications (the others are sent). The methods answer
-  an internal error saying so; a kick's translatable message is sent as its key.
-- **Compatibility tests**: golden replies per endpoint, and a `server.toml` from each release line.
+  server ([content mods](../modding/src/how-to/content-mods.md), [native mods](../modding/src/how-to/native-mods/11-multiplayer.md)).
+- **Vanilla's management protocol**: the world upgrade's notifications are not yet sent (the other
+  advertised methods, including `serversettings/*`, are implemented). A kick's translatable message is
+  sent as its key.
+- **Compatibility tests**: golden replies for the remaining endpoint groups (the lifecycle replies are pinned),
+  and a `server.toml` from each release line.
 
 ## Changelog
 
@@ -91,13 +119,17 @@ addition; a change to one starts `/api/v2`, served beside `/api/v1`.
 - Commands: `players`, `kick`, `ban`, `pardon`, `ban-ip`, `pardon-ip`.
 - `/api/v1` additions: `players`, `players/{kick,ban,pardon,ban-ip,pardon-ip,op,deop}`, `whitelist`,
   `whitelist/{add,remove}`, stopped-server list edits, `metrics/prometheus`, `GET`/`PATCH config`,
-  `DELETE backups`, `GET backups/download`; `POST start` resumes a stopped supervisor;
+  `DELETE backups`, `GET backups/download`, `GET crash-reports` (the files in `crash-reports/`) and
+  `GET crash-reports/read?name=` (one report's text; only names the list holds); `POST start` resumes a stopped supervisor;
   `server.toml` gets `[api]` (`bind`, `token`, `allow_public`); `GET events` (server-sent events, or JSON).
+- The API compatibility suite pins the `/api/v1` status, metrics, logs, start, stop and restart replies.
 - RCON (`enable-rcon`, `rcon.port`, `rcon.password`): vanilla's remote console, served by the supervisor.
 - GS4 query (`enable-query`, `query.port`): vanilla's UDP query (handshake, basic and full stat), served by the
   supervisor.
 - Vanilla's management protocol (`management-server-*`): the WebSocket, its authentication, `rpc.discover`,
   `players`, `players/kick`, `server/{status,save,stop,system_message}`, and the four lists' getters.
+- Vanilla's management protocol's live settings (`serversettings/*`), including changes persisted to
+  `server.properties` where vanilla persists them.
 - The management protocol's TLS (on by default, as in vanilla): a PKCS12 keystore, or a self-signed one generated
   in `.horizon/` when none is set.
 - The management protocol's `allowlist/{add,remove,set,clear}` and `bans/{add,remove,set,clear}`.

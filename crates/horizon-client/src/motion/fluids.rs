@@ -9,7 +9,7 @@ use horizon_world::{
     },
     entity_fluid_tick::{self, EntityFluidTickWorld},
     fluid::{FluidHeightWorld, FluidKind, FluidState, FluidStateTable},
-    fluid_flow::{FluidFlowWorld, flow_at},
+    fluid_flow::FluidFlowWorld,
     fluid_shape::FluidShapeCache,
     water_splash::{self, SplashParticle, WaterSplashWorld},
 };
@@ -34,13 +34,21 @@ pub struct FluidResources {
 }
 impl FluidResources {
     pub fn new(assets: &Assets, facts: &crate::blocks::BlockFacts) -> Result<Self> {
+        Self::from_registry(assets.registry, facts, &assets.blocks_fluid_flow)
+    }
+    /// Build fluid queries from the same registry, block facts and flow tag as the scene.
+    pub fn from_registry(
+        registry: &horizon_world::registry::BlockRegistry,
+        facts: &crate::blocks::BlockFacts,
+        blocks_fluid_flow: &BTreeSet<String>,
+    ) -> Result<Self> {
         Ok(Self {
-            states: FluidStateTable::new(assets.registry)?,
+            states: FluidStateTable::new(registry)?,
             sturdy: facts.states.iter().map(|s| s.sturdy_full).collect(),
             blocks_flow: facts
                 .states
                 .iter()
-                .map(|s| assets.blocks_fluid_flow.contains(&*s.name))
+                .map(|s| blocks_fluid_flow.contains(&*s.name))
                 .collect(),
             ice: facts
                 .states
@@ -274,9 +282,78 @@ impl MotionWorld<'_, '_, '_> {
     pub(super) fn fluid_at(&self, p: BlockPos) -> FluidState {
         self.resources.fluids.fluid(self.block(p))
     }
+    pub(super) fn is_dry_air_fast(&self) -> bool {
+        let p = &*self.player;
+        if p.fluids.first_tick
+            || p.fluids.was_touching_water
+            || p.fluids.was_eye_in_water
+            || p.is_in_lava()
+            || p.swimming
+            || p.spectator
+            || p.fire_ticks > 0
+            || !p.fluids.interaction.trackers().is_empty()
+            || p.fluids.boat.is_some()
+        {
+            return false;
+        }
+        let b = p.bounds().deflate(Vec3::new(0.001, 0.001, 0.001));
+        let (a, c) = (b.min_position(), b.max_position());
+        if !a.is_finite()
+            || !c.is_finite()
+            || !p.position.y.is_finite()
+            || !p.dimensions.eye_height.is_finite()
+        {
+            return false;
+        }
+        let eye_y =
+            (p.position.y + f64::from(p.dimensions.eye_height) - 0.111_111_11).floor() as i32;
+        let mut low = BlockPos::new(a.x.floor() as i32, a.y.floor() as i32, a.z.floor() as i32);
+        let mut high = BlockPos::new(
+            (c.x.ceil() as i32).wrapping_sub(1),
+            (c.y.ceil() as i32).wrapping_sub(1),
+            (c.z.ceil() as i32).wrapping_sub(1),
+        );
+        low.y = low.y.min(eye_y);
+        high.y = high.y.max(eye_y);
+        if low.x > high.x
+            || low.y > high.y
+            || low.z > high.z
+            || i64::from(high.x) - i64::from(low.x) > 8
+            || i64::from(high.y) - i64::from(low.y) > 8
+            || i64::from(high.z) - i64::from(low.z) > 8
+        {
+            return false;
+        }
+        for cz in (low.z >> 4)..=(high.z >> 4) {
+            for cx in (low.x >> 4)..=(high.x >> 4) {
+                let Some(chunk) = self.scene.chunks.get(&(cx, cz)) else {
+                    return false;
+                };
+                let z_lo = low.z.max(cz << 4);
+                let z_hi = high.z.min((cz << 4) + 15);
+                let x_lo = low.x.max(cx << 4);
+                let x_hi = high.x.min((cx << 4) + 15);
+                for z in z_lo..=z_hi {
+                    for x in x_lo..=x_hi {
+                        for y in low.y..=high.y {
+                            if self.resources.fluids.fluid(chunk.block(x, y, z)).kind()
+                                != FluidKind::Empty
+                            {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
     /// `Entity.baseTick`'s fluid phase: `wasEyeInWater`, `updateFluidInteraction`,
     /// swimming and remaining fire, lava's fall halving, then the first-tick clear.
     pub fn fluid_base_tick(&mut self) -> Result<()> {
+        if self.is_dry_air_fast() {
+            return Ok(());
+        }
         self.player.fluids.was_eye_in_water = self.player.is_eye_in_fluid(WATER);
         self.update_fluids()?;
         // `Player.updateSwimming`'s flying guard over `Entity.updateSwimming`,
@@ -406,7 +483,7 @@ impl FluidInteractionWorld for MotionWorld<'_, '_, '_> {
         f.camera_height_at(self, [p.x, p.y, p.z])
     }
     fn flow(&mut self, f: FluidState, p: BlockPos) -> Result<Vec3> {
-        flow_at(self, f, p)
+        super::pushing_flow(self.loop_context, self, f, p)
     }
 }
 impl EntityFluidTickWorld for MotionWorld<'_, '_, '_> {

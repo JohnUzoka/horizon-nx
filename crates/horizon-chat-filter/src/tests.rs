@@ -108,6 +108,17 @@ fn a_custom_list_has_the_same_syntax() {
     assert!(!f.matches("me h"));
 }
 
+#[test]
+fn a_large_custom_list_keeps_rules_past_the_u16_boundary() {
+    let list = "alpha\n".repeat(65_536) + "~omega\n";
+    let filter = Filter::new(&list);
+    assert_eq!(filter.len(), 65_537);
+    assert!(filter.matches("alpha"));
+    assert!(filter.matches("omega"));
+    assert!(filter.matches("o me ga"));
+    assert!(!filter.matches("hello"));
+}
+
 fn guard(config: Config) -> Guard {
     Guard::new(config, filter(), None)
 }
@@ -326,4 +337,42 @@ fn an_allow_line_without_letters_allows_nothing() {
         let f = Filter::new(&format!("nigger\n{line}\n"));
         assert!(f.matches("nigger"), "{line}");
     }
+}
+
+#[test]
+fn duration_parts_preserve_rounding_without_overflow() {
+    for (millis, expected) in [
+        (1, (1, DurationUnit::Minute)),
+        (60_000, (1, DurationUnit::Minute)),
+        (61_000, (2, DurationUnit::Minute)),
+        (3_600_000, (60, DurationUnit::Minute)),
+        (3_600_001, (2, DurationUnit::Hour)),
+        (172_800_000, (48, DurationUnit::Hour)),
+        (172_800_001, (3, DurationUnit::Day)),
+        (i64::MAX, (106_751_991_168, DurationUnit::Day)),
+    ] {
+        assert_eq!(duration_parts(millis), expected);
+    }
+}
+
+#[test]
+fn a_punishment_that_lasts_no_time_is_refused() {
+    let mut config = Config {
+        mute_minutes: 0,
+        ..Config::default()
+    };
+    assert!(
+        config.check().is_err(),
+        "mute_minutes = 0 with mute_after = 2"
+    );
+    config.mute_minutes = 10;
+    config.tempban_hours = 0;
+    assert!(
+        config.check().is_err(),
+        "tempban_hours = 0 with tempban_after = 3"
+    );
+    // Turned off, the length no longer matters.
+    config.mute_after = 0;
+    config.tempban_after = 0;
+    assert!(config.check().is_ok());
 }

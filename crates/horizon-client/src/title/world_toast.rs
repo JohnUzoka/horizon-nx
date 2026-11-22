@@ -1,0 +1,60 @@
+//! System toast messages for the title and world list.
+use super::*;
+
+pub(super) enum WorldToast {
+    Created {
+        folder: String,
+        bytes: u64,
+    },
+    Failed(String),
+    /// `SystemToast.onWorldAccessFailure`: the folder of a world that couldn't be locked.
+    AccessFailure(String),
+    Update(crate::switch_update::Event),
+}
+impl WorldToast {
+    pub(super) fn text(&self) -> (Text, Text) {
+        match self {
+            Self::Created { folder, bytes } => (
+                Text::tr("selectWorld.edit.backupCreated", &[folder]),
+                Text::tr(
+                    "selectWorld.edit.backupSize",
+                    &[&((*bytes as f64 / 1_048_576.0).ceil() as u64)],
+                ),
+            ),
+            Self::Failed(error) => (
+                Text::translate("selectWorld.edit.backupFailed", &[]),
+                Text::literal(error),
+            ),
+            Self::AccessFailure(folder) => (
+                Text::translate("selectWorld.access_failure", &[]),
+                Text::literal(folder),
+            ),
+            Self::Update(event) => {
+                use crate::switch_update::Event;
+                let (title, message) = match event {
+                    Event::Available { build } => (
+                        lang::get_or("horizon.update.available", "Update available"),
+                        translate(
+                            "horizon.update.available.message",
+                            "Horizon build %s: Update on the title screen",
+                            &[build],
+                        ),
+                    ),
+                    Event::Installed { build } => (
+                        translate("horizon.update.installed", "Build %s installed", &[build]),
+                        lang::get_or("horizon.update.installed.message", "Quit Horizon to start it"),
+                    ),
+                    Event::Failed { reason } => (
+                        lang::get_or("horizon.update.failed", "Update failed"),
+                        (*reason).to_owned(),
+                    ),
+                    Event::Updated { build } => (
+                        lang::get_or("horizon.update.updated", "Horizon updated"),
+                        translate("horizon.update.updated.message", "Now on build %s", &[build]),
+                    ),
+                };
+                (Text::literal(title), Text::literal(message))
+            }
+        }
+    }
+}

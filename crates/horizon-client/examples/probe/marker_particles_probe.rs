@@ -15,8 +15,11 @@ use horizon_client::{
     particles::{ParticleEngine, ParticleOptions, ParticleType},
     world::World,
 };
-use horizon_core::random::RandomSource;
-use horizon_world::chunk::BlockState;
+use horizon_core::{
+    position::BlockPos,
+    random::{RandomSource, position_seed},
+};
+use horizon_world::{chunk::BlockState, registry::BlockStateId};
 use serde_json::Value;
 use std::{
     collections::HashMap,
@@ -46,14 +49,47 @@ fn d(v: f64) -> String {
     format!("{:016x}", v.to_bits())
 }
 
+/// The per-column offset the client jitters a model with: an `XZ` offset type's
+/// two nibbles of `Mth.getSeed(x, 0, z)`, 0.25 either way.
+fn column_offset(x: i32, z: i32) -> [f64; 3] {
+    let seed = position_seed(BlockPos::new(x, 0, z));
+    // The division is single precision, as the offset itself is: only the
+    // centring and the 0.25 scale are double.
+    let nibble = |shift: u32| ((seed >> shift) & 15) as f32 / 15.0;
+    [
+        ((f64::from(nibble(0)) - 0.5) * 0.5).clamp(-0.25, 0.25),
+        0.0,
+        ((f64::from(nibble(8)) - 0.5) * 0.5).clamp(-0.25, 0.25),
+    ]
+}
+
 pub fn main() -> Result<()> {
     let args: Vec<String> = crate::args().collect();
     let root = Path::new(".local/horizon-client/26.3");
     let assets = Assets::load(root)?;
     let facts = BlockFacts::load(root, assets.registry)?;
-    let biomes = Biomes::load(root)?;
+    let biomes = Biomes::load(&horizon_assets::resource_source::ResourceRoot::directory(
+        root.to_path_buf(),
+    ))?;
     let collision = collisions::load(root, assets.registry)?;
-    let tables = AnimateTables::load(root, assets.registry, &biomes)?;
+    let defaults = horizon_world::item_defaults::read(root)?;
+    let items = horizon_client::items::Items::tags_only(
+        root,
+        &horizon_world::loot::PackOverlay::NONE,
+        &defaults,
+    )?;
+    let tables = AnimateTables::load(root, assets.registry)?;
+    let enchant_power = horizon_client::animate_tick::EnchantPower::default();
+    enchant_power.rebuild(
+        assets.registry.len(),
+        |state| items.default_enchant_power(&facts.get(state).name),
+        |state| {
+            items.block_in_tag(
+                "minecraft:enchantment_power_transmitter",
+                &facts.get(state).name,
+            )
+        },
+    );
     let mut world = World::new(facts.air, 0);
     let barrier = assets
         .registry
@@ -73,7 +109,11 @@ pub fn main() -> Result<()> {
             }
         }
     }
-    let mut engine = ParticleEngine::new(root, &HashMap::new(), &Default::default());
+    let mut engine = ParticleEngine::new(
+        &horizon_assets::resource_source::ResourceSource::directory(root.to_path_buf()),
+        &HashMap::new(),
+        &Default::default(),
+    );
     // One all-of-that-block world per state the tick cases name: the whole
     // animateTick loop samples inside the box the barriers already fill.
     let mut tick_worlds: HashMap<String, World> = HashMap::new();
@@ -82,31 +122,49 @@ pub fn main() -> Result<()> {
         let case: Value = serde_json::from_str(&line?)?;
         let kind = case["kind"].as_str().unwrap_or("marker");
         // A block's own tick through the whole ClientLevel.animateTick loop,
-        // over a world that is all of it: every particle and sound it asks the
-        // engine for, from the level random seeded by the case.
+        // over a world that is all of it above y = 64 and all of the case's
+        // floor below: every particle and sound it asks the engine for, from the
+        // level random seeded by the case.
         if kind == "tick" {
             let spec = case["state"].as_str().ok_or("state")?.to_owned();
-            if !tick_worlds.contains_key(&spec) {
+            let floor_spec = case["floor"].as_str().unwrap_or(&spec).to_owned();
+            let key = format!("{spec}|{floor_spec}");
+            if !tick_worlds.contains_key(&key) {
                 let state = assets.registry.resolve(&parse_state(&spec))?;
+                let floor = assets.registry.resolve(&parse_state(&floor_spec))?;
                 let mut world = World::new(facts.air, 0);
-                for cz in -2..2 {
-                    for cx in -2..2 {
+                // The loop samples y 32 to 96, reads neighbours one block out
+                // and a stalactite climbs ten blocks to its root, so the
+                // stand-in world has to hold all of that: a case that ends
+                // inside the sample box compares air against the oracle's
+                // unending world.
+                for cz in -3..3 {
+                    for cx in -3..3 {
                         world
                             .chunks
                             .insert((cx, cz), Arc::new(Chunk::empty(cx, cz)));
-                        for y in 33..96 {
+                        for y in 31..=107 {
                             for z in 0..16 {
                                 for x in 0..16 {
-                                    world.set(cx * 16 + x, y, cz * 16 + z, state)?;
+                                    let at = if y < 64 { floor } else { state };
+                                    world.set(cx * 16 + x, y, cz * 16 + z, at)?;
                                 }
                             }
                         }
                     }
                 }
-                tick_worlds.insert(spec.clone(), world);
+                tick_worlds.insert(key.clone(), world);
             }
-            let world = &tick_worlds[&spec];
+            let world = &tick_worlds[&key];
+            // A block whose model is jittered per column: the offset the client
+            // gives its model, so the oracle's shape moves exactly as the game
+            // moves it.
+            let jitter = case["offset"].as_str() == Some("xz");
+            let model_offset = move |_: BlockStateId, x: i32, z: i32| -> Option<[f64; 3]> {
+                jitter.then(|| column_offset(x, z))
+            };
             let ctx = AnimateContext {
+                enchant_power: &enchant_power,
                 world,
                 facts: &facts,
                 collision: &collision,
@@ -118,7 +176,7 @@ pub fn main() -> Result<()> {
                 creaking_active: false,
                 sky_darken: 0,
                 marker: None,
-                model_offset: &|_, _, _| None,
+                model_offset: &model_offset,
                 gateway_particles: &|_, _| 0,
                 thundering: false,
                 ultrawarm: false,
@@ -156,6 +214,7 @@ pub fn main() -> Result<()> {
         if kind == "campfire" || kind == "make" {
             let seed = case["seed"].as_i64().ok_or("seed")?;
             let ctx = AnimateContext {
+                enchant_power: &enchant_power,
                 world: &world,
                 facts: &facts,
                 collision: &collision,
@@ -227,6 +286,7 @@ pub fn main() -> Result<()> {
             ParticleOptions::block(ParticleType::BlockMarker, "item/barrier".into(), 0xFFFFFF);
         let options = |_| Some(options.clone());
         let ctx = AnimateContext {
+            enchant_power: &enchant_power,
             world: &world,
             facts: &facts,
             collision: &collision,

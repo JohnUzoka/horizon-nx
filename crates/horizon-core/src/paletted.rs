@@ -8,7 +8,12 @@
 //! in index order, and the value that did not fit is added last. Palettes
 //! never shrink while resident; `pack` writes the canonical saved form.
 
+use crate::nbt::Tag;
 use crate::storage::{locate, mask};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicUsize, Ordering},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -124,6 +129,25 @@ fn write(words: &mut [u64], bits: u8, i: usize, value: u32) {
     let (word, shift) = locate(bits, i);
     words[word] = (words[word] & !(mask(bits) << shift)) | (u64::from(value) << shift);
 }
+/// `word + add`, bit by bit: which bits carried out of their position. The
+/// carry out of bit `i` is `a & b | (a | b) & !sum` for `sum = a + b`.
+#[inline]
+fn carry_out(word: u64, add: u64, sum: u64) -> u64 {
+    (word & add) | ((word | add) & !sum)
+}
+/// The first of `count` `bits`-wide fields of `word` that is `len` or more.
+fn first_bad(word: u64, count: usize, bits: usize, len: usize) -> PaletteError {
+    for slot in 0..count {
+        let index = ((word >> (slot * bits)) & ((1 << bits) - 1)) as u32;
+        if index as usize >= len {
+            return PaletteError::BadIndex {
+                index,
+                palette: len,
+            };
+        }
+    }
+    unreachable!("check_indices found no field past the palette")
+}
 /// Values below this are looked up in a table indexed by value once a
 /// palette outgrows the scan: every block state and biome id of 26.3.
 const DENSE_VALUES: u32 = 1 << 16;
@@ -224,12 +248,70 @@ pub struct Packed {
     pub data: Option<Vec<u64>>,
 }
 
+/// Per-save-folder byte budget for cached canonical section palettes held by
+/// resident [`PalettedContainer`]s.
+#[derive(Debug)]
+pub struct SavedPaletteBudget {
+    limit: usize,
+    used: AtomicUsize,
+}
+
+impl SavedPaletteBudget {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            used: AtomicUsize::new(0),
+        }
+    }
+
+    /// Bytes currently reserved by live cached section palettes.
+    pub fn used(&self) -> usize {
+        self.used.load(Ordering::Relaxed)
+    }
+
+    /// Maximum bytes this budget admits.
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    fn reserve(&self, charge: usize) -> bool {
+        let mut used = self.used.load(Ordering::Relaxed);
+        loop {
+            let Some(next) = used.checked_add(charge).filter(|&next| next <= self.limit) else {
+                return false;
+            };
+            match self
+                .used
+                .compare_exchange_weak(used, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => return true,
+                Err(actual) => used = actual,
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SavedNbt {
+    budget: Arc<SavedPaletteBudget>,
+    charge: usize,
+    ids: Box<[u32]>,
+    words: Box<[i64]>,
+}
+
+impl Drop for SavedNbt {
+    fn drop(&mut self) {
+        self.budget.used.fetch_sub(self.charge, Ordering::Relaxed);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PalettedContainer {
     strategy: Strategy,
     bits: u8,
     palette: Palette,
     words: Vec<u64>,
+    saved_nbt: OnceLock<Arc<SavedNbt>>,
 }
 impl PalettedContainer {
     /// `new PalettedContainer(initialValue, strategy)`.
@@ -239,6 +321,7 @@ impl PalettedContainer {
             bits: 0,
             palette: Palette::Single(value),
             words: Vec::new(),
+            saved_nbt: OnceLock::new(),
         }
     }
     pub fn strategy(&self) -> Strategy {
@@ -248,7 +331,17 @@ impl PalettedContainer {
     pub fn bits(&self) -> u8 {
         self.bits
     }
+    /// What the stored ids stand for — the values of the list palette, `None`
+    /// for a single value (`uniform()`) and for the global palette, whose
+    /// stored ids are the values.
+    pub fn palette(&self) -> Option<&[u32]> {
+        match &self.palette {
+            Palette::List(list) => Some(list),
+            _ => None,
+        }
+    }
     /// Entries in the palette (the global palette reports its bit capacity).
+    #[inline]
     pub fn palette_len(&self) -> usize {
         match &self.palette {
             Palette::Single(_) => 1,
@@ -256,6 +349,7 @@ impl PalettedContainer {
             Palette::Global => 1 << self.bits.min(31),
         }
     }
+    #[inline]
     pub fn is_global(&self) -> bool {
         matches!(self.palette, Palette::Global)
     }
@@ -275,6 +369,43 @@ impl PalettedContainer {
     /// `get` of the entries `start..start + out.len()`, the palette matched once.
     #[inline]
     pub fn get_run(&self, start: usize, out: &mut [u32]) {
+        match &self.palette {
+            Palette::Single(value) => {
+                out.fill(*value);
+                return;
+            }
+            Palette::List(list) if self.bits == 4 && out.len() == 16 && (start & 15) == 0 => {
+                let word = self.words[start >> 4];
+                for (k, cell) in out.iter_mut().enumerate() {
+                    *cell = list[((word >> (k * 4)) & 15) as usize];
+                }
+                return;
+            }
+            _ => {}
+        }
+        if out.len() == 2 && !matches!(self.palette, Palette::Single(_)) {
+            let bits = usize::from(self.bits);
+            let per = 64 / bits;
+            let slot = start % per;
+            if slot + 1 < per {
+                let word = self.words[start / per] >> (slot * bits);
+                let mask = mask(self.bits);
+                let a = (word & mask) as usize;
+                let b = ((word >> bits) & mask) as usize;
+                match &self.palette {
+                    Palette::List(list) => {
+                        out[0] = list[a];
+                        out[1] = list[b];
+                    }
+                    Palette::Global => {
+                        out[0] = a as u32;
+                        out[1] = b as u32;
+                    }
+                    Palette::Single(_) => unreachable!(),
+                }
+                return;
+            }
+        }
         match &self.palette {
             Palette::Single(value) => out.fill(*value),
             Palette::List(list) => {
@@ -345,6 +476,9 @@ impl PalettedContainer {
     }
     /// `getAndSet`: stores `value` and returns the previous one.
     pub fn set(&mut self, i: usize, value: u32) -> u32 {
+        if self.saved_nbt.get().is_some() && self.get(i) != value {
+            self.saved_nbt.take();
+        }
         let id = self.id_for(value);
         match &self.palette {
             Palette::Single(old) => *old,
@@ -439,6 +573,13 @@ impl PalettedContainer {
         assert_eq!(out.len(), self.strategy.entries());
         match &self.palette {
             Palette::Single(value) => out.fill(*value),
+            Palette::List(list) if self.bits == 4 => {
+                for (row, &word) in out.as_chunks_mut::<16>().0.iter_mut().zip(&self.words) {
+                    for (x, cell) in row.iter_mut().enumerate() {
+                        *cell = list[((word >> (x * 4)) & 15) as usize];
+                    }
+                }
+            }
             Palette::List(list) => {
                 let bits = usize::from(self.bits);
                 let per = 64 / bits;
@@ -459,6 +600,36 @@ impl PalettedContainer {
                         *cell = ((word >> (slot * bits)) & m) as u32;
                     }
                 }
+            }
+        }
+    }
+    /// The stored ids through `map`: `out[i] = map[id of entry i]`, in index
+    /// order, the id being a palette id for a list palette and the value
+    /// itself for the global one (see `palette`). A single-value palette
+    /// stores no ids: `out` is left as it is.
+    pub fn unpack_ids_mapped<T: Copy>(&self, out: &mut [T], map: &[T]) {
+        assert_eq!(out.len(), self.strategy.entries());
+        // Four bits a linear palette's usual width: a whole word of them is a
+        // row of 16, and immediate shifts for the compiler to unroll.
+        if self.bits == 4 {
+            for (row, &word) in out.as_chunks_mut::<16>().0.iter_mut().zip(&self.words) {
+                for (x, cell) in row.iter_mut().enumerate() {
+                    *cell = map[((word >> (x * 4)) & 0xF) as usize];
+                }
+            }
+            return;
+        }
+        if self.bits == 0 {
+            return;
+        }
+        let bits = usize::from(self.bits);
+        let per = 64 / bits;
+        let m = mask(self.bits);
+        for (chunk, &word) in out.chunks_mut(per).zip(&self.words) {
+            let mut shift = 0;
+            for cell in chunk {
+                *cell = map[((word >> shift) & m) as usize];
+                shift += bits;
             }
         }
     }
@@ -499,6 +670,7 @@ impl PalettedContainer {
                 bits,
                 words: pack_words(bits, ids.len(), ids.iter().copied()),
                 palette: Palette::List(palette),
+                saved_nbt: OnceLock::new(),
             },
             Config::Global => {
                 let bits = strategy.global_bits;
@@ -507,6 +679,7 @@ impl PalettedContainer {
                     bits,
                     words: pack_words(bits, ids.len(), ids.iter().map(|&id| palette[id as usize])),
                     palette: Palette::Global,
+                    saved_nbt: OnceLock::new(),
                 }
             }
         }
@@ -545,6 +718,7 @@ impl PalettedContainer {
                     bits,
                     palette: Palette::List(palette),
                     words,
+                    saved_nbt: OnceLock::new(),
                 };
                 container.check_indices()?;
                 Ok(container)
@@ -554,31 +728,59 @@ impl PalettedContainer {
                 bits: storage_bits,
                 palette: Palette::Global,
                 words,
+                saved_nbt: OnceLock::new(),
             }),
         }
     }
+    /// Rejects a stored index at or past the palette: the same inputs are
+    /// accepted as an entry-by-entry scan accepts, and the same first offending
+    /// entry is named. One whole word is checked at once: adding `2^bits - len`
+    /// to a word lifts every field by that much, so a field carries out of its
+    /// own bits exactly when its index is past the palette. A carry out of a
+    /// field that a previous field's carry reached adds one more, so such a
+    /// field can only look bad where a genuinely bad field precedes it in the
+    /// same word; the word is then rescanned entry by entry for the error.
     fn check_indices(&self) -> Result<(), PaletteError> {
         let Palette::List(list) = &self.palette else {
             return Ok(());
         };
-        if list.len() == 1 << self.bits {
+        let len = list.len();
+        debug_assert!(len >= 1);
+        debug_assert_eq!(
+            self.words.len(),
+            storage_len(self.bits, self.strategy.entries())
+        );
+        let bits = usize::from(self.bits);
+        if len == 1 << bits {
+            // Every field is a palette entry.
             return Ok(());
         }
-        let per = 64 / usize::from(self.bits);
-        let mut remaining = self.strategy.entries();
-        let mask = mask(self.bits);
-        for &word in &self.words {
-            let count = remaining.min(per);
-            for slot in 0..count {
-                let index = ((word >> (slot * usize::from(self.bits))) & mask) as u32;
-                if index as usize >= list.len() {
-                    return Err(PaletteError::BadIndex {
-                        index,
-                        palette: list.len(),
-                    });
-                }
+        let per = 64 / bits;
+        let entries = self.strategy.entries();
+        // One in the low bit of each field of a word, the field's top bit, and
+        // the bias that overflows a field whose index is `len` or more.
+        let ones = (0..per).fold(0u64, |a, field| a | 1 << (field * bits));
+        let bias = ones * ((1u64 << bits) - len as u64);
+        let top = ones << (bits - 1);
+        let full = entries / per;
+        let (whole, tail) = self.words.split_at(full);
+        for &word in whole {
+            let sum = word.wrapping_add(bias);
+            if carry_out(word, bias, sum) & top != 0 {
+                return Err(first_bad(word, per, bits, len));
             }
-            remaining -= count;
+        }
+        // The last word's fields past `entries` are padding: whatever they
+        // hold, the scan never reads them.
+        let rest = entries - full * per;
+        if rest > 0
+            && let Some(&word) = tail.first()
+        {
+            let used = (1u64 << (rest * bits)) - 1;
+            let sum = word.wrapping_add(bias & used);
+            if carry_out(word, bias & used, sum) & top & used != 0 {
+                return Err(first_bad(word, rest, bits, len));
+            }
         }
         Ok(())
     }
@@ -596,6 +798,18 @@ impl PalettedContainer {
     /// re-encoded for the saved bit width.
     pub fn pack(&self) -> Packed {
         let entries = self.strategy.entries();
+        // One value in every cell (air, stone, a filled section): the packed
+        // form is that value and no indices, which `uniform` reads off the
+        // stored words. Unpacking the 4,096 cells first to discover the same
+        // thing is most of a section's save cost, and most sections of a
+        // column hold one value.
+        if let Some(value) = self.uniform() {
+            return Packed {
+                palette: vec![value],
+                bits: 0,
+                data: None,
+            };
+        }
         let mut values = vec![0u32; entries];
         self.unpack(&mut values);
         let (palette, ids) = palette_ids(&values);
@@ -611,6 +825,64 @@ impl PalettedContainer {
             data,
         }
     }
+
+    fn pack_nbt_fields(
+        palette: &[u32],
+        data: Option<Vec<i64>>,
+        name: impl FnMut(u32) -> Tag,
+    ) -> Tag {
+        let mut fields = vec![(
+            "palette",
+            Tag::List(palette.iter().copied().map(name).collect()),
+        )];
+        if let Some(words) = data {
+            fields.push(("data", Tag::LongArray(words)));
+        }
+        Tag::compound(fields)
+    }
+
+    /// Canonical `palette` and `data` NBT compound for a saved section.
+    ///
+    /// When `budget` is `Some`, a non-uniform container caches its canonical
+    /// palette ids and packed `data` words lazily on the first save within the
+    /// budget's byte cap. Repeated saves of an unchanged container (or clones
+    /// sharing the entry) reuse those words and re-resolve `name` against the
+    /// caller's current registry. Mutating a cell via [`Self::set`] drops the
+    /// entry and releases its budget reservation when the last owner drops.
+    pub fn pack_nbt(
+        &self,
+        budget: Option<&Arc<SavedPaletteBudget>>,
+        name: impl FnMut(u32) -> Tag,
+    ) -> Tag {
+        if let Some(saved) = self.saved_nbt.get()
+            && budget.is_some_and(|budget| Arc::ptr_eq(budget, &saved.budget))
+        {
+            return Self::pack_nbt_fields(&saved.ids, Some(saved.words.to_vec()), name);
+        }
+        let Packed { palette, data, .. } = self.pack();
+        let data = data.map(|words| {
+            words
+                .into_iter()
+                .map(|word| word as i64)
+                .collect::<Vec<_>>()
+        });
+        if let (Some(budget), Some(words), None) = (budget, data.as_deref(), self.saved_nbt.get()) {
+            let charge = std::mem::size_of::<SavedNbt>()
+                + 2 * std::mem::size_of::<usize>()
+                + std::mem::size_of_val(palette.as_slice())
+                + std::mem::size_of_val(words);
+            if budget.reserve(charge) {
+                let _ = self.saved_nbt.set(Arc::new(SavedNbt {
+                    budget: Arc::clone(budget),
+                    charge,
+                    ids: palette.as_slice().into(),
+                    words: words.into(),
+                }));
+            }
+        }
+        Self::pack_nbt_fields(&palette, data, name)
+    }
+
     /// `PalettedContainer.unpack`: a container from the saved form.
     pub fn from_packed(
         strategy: Strategy,
@@ -646,6 +918,7 @@ impl PalettedContainer {
                 bits,
                 words: data.to_vec(),
                 palette: Palette::List(palette),
+                saved_nbt: OnceLock::new(),
             };
             container.check_indices()?;
             return Ok(container);
@@ -713,13 +986,15 @@ impl PalettedContainer {
         }
         (0..entries).any(|i| matching[self.raw(i)])
     }
-    /// Heap bytes held by the palette and the storage.
+    /// Heap bytes held by the palette, the storage, and any cached canonical
+    /// saved palette.
     pub fn heap_bytes(&self) -> usize {
         self.words.capacity() * 8
             + match &self.palette {
                 Palette::List(list) => list.capacity() * 4,
                 _ => 0,
             }
+            + self.saved_nbt.get().map_or(0, |saved| saved.charge)
     }
 }
 impl PartialEq for PalettedContainer {
@@ -747,6 +1022,125 @@ impl PartialEq for PalettedContainer {
 mod tests {
     use super::*;
     const BLOCKS: Strategy = Strategy::blocks(16);
+
+    #[test]
+    fn pack_nbt_caches_lazily_and_follows_unchanged_clones() {
+        let mut palette = PalettedContainer::new(BLOCKS, 0);
+        palette.set(1, 1);
+        let budget = Arc::new(SavedPaletteBudget::new(1 << 20));
+        let name = |id| Tag::Int(id as i32);
+
+        // Lazy: nothing cached until the first save.
+        assert_eq!(budget.used(), 0);
+        assert!(palette.saved_nbt.get().is_none());
+        let base_heap = palette.heap_bytes();
+
+        let first = palette.pack_nbt(Some(&budget), name);
+        let cached_charge = budget.used();
+        assert!(cached_charge > 0);
+        assert_eq!(palette.heap_bytes(), base_heap + cached_charge);
+        let old = Arc::downgrade(palette.saved_nbt.get().unwrap());
+
+        // An unchanged clone shares the entry without charging the budget again.
+        let unchanged = palette.clone();
+        assert_eq!(unchanged.pack_nbt(Some(&budget), name), first);
+        assert!(old.ptr_eq(&Arc::downgrade(unchanged.saved_nbt.get().unwrap())));
+        assert_eq!(budget.used(), cached_charge);
+
+        // A no-op write keeps the cache; a real mutation invalidates it.
+        palette.set(1, 1);
+        assert!(palette.saved_nbt.get().is_some());
+        palette.set(1, 2);
+        assert!(palette.saved_nbt.get().is_none());
+        assert_eq!(palette.heap_bytes(), base_heap);
+
+        let changed = palette.pack_nbt(Some(&budget), name);
+        assert_ne!(first, changed);
+        assert_eq!(changed, palette.pack_nbt(None, name));
+        // Both old (held by `unchanged`) and new entries are charged until `unchanged` drops.
+        assert!(budget.used() > cached_charge);
+        drop(unchanged);
+        assert!(old.upgrade().is_none());
+        let after_drop_unchanged = budget.used();
+        assert!(after_drop_unchanged > 0);
+
+        // Cache hit re-resolves registry names at save time.
+        assert_eq!(
+            palette.pack_nbt(Some(&budget), |id| Tag::Long(i64::from(id) + 100)),
+            palette.pack_nbt(None, |id| Tag::Long(i64::from(id) + 100))
+        );
+
+        drop(palette);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn pack_nbt_uniform_and_collapsed_sections_bypass_cache() {
+        let budget = Arc::new(SavedPaletteBudget::new(1 << 20));
+        let name = |id| Tag::Int(id as i32);
+
+        let single = PalettedContainer::new(BLOCKS, 5);
+        let mut collapsed = PalettedContainer::new(BLOCKS, 5);
+        collapsed.set(100, 9);
+        collapsed.set(100, 5);
+        let global = global_uniform(3000);
+
+        for container in [&single, &collapsed, &global] {
+            assert_eq!(
+                container.pack_nbt(Some(&budget), name),
+                container.pack_nbt(None, name)
+            );
+            assert!(container.saved_nbt.get().is_none());
+            assert_eq!(budget.used(), 0);
+        }
+    }
+
+    #[test]
+    fn pack_nbt_budget_cap_and_retry_after_drop() {
+        let name = |id| Tag::Int(id as i32);
+        let mut words = vec![0; storage_len(4, BLOCKS.entries())];
+        words[0] = 0x10;
+        let load = || PalettedContainer::from_packed(BLOCKS, vec![3, 4], Some(&words)).unwrap();
+        let first = load();
+        let second = load();
+        let budget = Arc::new(SavedPaletteBudget::new(3000));
+        assert_eq!(budget.used(), 0);
+        assert!(first.saved_nbt.get().is_none());
+
+        let expected = first.pack_nbt(Some(&budget), name);
+        assert!(first.saved_nbt.get().is_some());
+        assert!(budget.used() <= budget.limit());
+
+        // Over cap: packs identically without admitting into the cache.
+        assert_eq!(second.pack_nbt(Some(&budget), name), expected);
+        assert!(second.saved_nbt.get().is_none());
+
+        // Dropping the first owner frees its budget so the second can be admitted.
+        drop(first);
+        assert_eq!(budget.used(), 0);
+        assert_eq!(second.pack_nbt(Some(&budget), name), expected);
+        assert!(second.saved_nbt.get().is_some());
+        drop(second);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn pack_nbt_matches_pack_across_cases_and_isolates_budgets() {
+        let budget_a = Arc::new(SavedPaletteBudget::new(1 << 20));
+        let budget_b = Arc::new(SavedPaletteBudget::new(1 << 20));
+        let name = |id| Tag::Int(id as i32);
+        for (label, container) in pack_cases() {
+            let uncached = container.pack_nbt(None, name);
+            let first_a = container.pack_nbt(Some(&budget_a), name);
+            let hit_a = container.pack_nbt(Some(&budget_a), name);
+            let other_b = container.pack_nbt(Some(&budget_b), name);
+            assert_eq!(first_a, uncached, "{label}: first cached save");
+            assert_eq!(hit_a, uncached, "{label}: repeated cached save");
+            assert_eq!(other_b, uncached, "{label}: isolated budget save");
+            assert_eq!(budget_b.used(), 0, "{label}: second budget unaffected");
+        }
+        assert_eq!(budget_a.used(), 0);
+    }
     const BIOMES: Strategy = Strategy::biomes(7);
 
     #[test]
@@ -774,6 +1168,11 @@ mod tests {
                 .map(|_| (rng(&mut state) % distinct) as u32)
                 .collect();
             let container = PalettedContainer::from_values(BLOCKS, &values);
+            for start in 0..4095 {
+                let mut pair = [u32::MAX; 2];
+                container.get_run(start, &mut pair);
+                assert_eq!(pair, values[start..start + 2]);
+            }
             for _ in 0..200 {
                 let start = (rng(&mut state) % 4096) as usize;
                 let len = (rng(&mut state) % 20) as usize;
@@ -784,6 +1183,66 @@ mod tests {
                     run,
                     values[start..start + len],
                     "{distinct} values, {start}+{len}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn four_bit_fast_paths_match_get() {
+        let mut state = 0x517C_C1B7_2722_0A95;
+        // Both minimal (2 values) and full (16 values) 4-bit palettes, plus 5-bit and single.
+        for (distinct, expected_bits) in [(1usize, 0u8), (2, 4), (16, 4), (20, 5)] {
+            let values: Vec<u32> = (0..4096)
+                .map(|i| {
+                    let slot = if i < distinct {
+                        i
+                    } else {
+                        (rng(&mut state) as usize) % distinct
+                    };
+                    100 + slot as u32 * 7
+                })
+                .collect();
+            let container = PalettedContainer::from_values(BLOCKS, &values);
+            assert_eq!(
+                container.bits(),
+                expected_bits,
+                "{distinct} distinct values"
+            );
+
+            let mut unpacked = vec![u32::MAX; 4096];
+            container.unpack(&mut unpacked);
+            assert_eq!(unpacked, values, "unpack ({distinct} values)");
+
+            // Every 16-aligned 16-entry row hits the 4-bit `get_run` fast path.
+            for row in 0..256 {
+                let start = row * 16;
+                let mut buf = [u32::MAX; 16];
+                container.get_run(start, &mut buf);
+                assert_eq!(
+                    buf,
+                    values[start..start + 16],
+                    "aligned 16-run at {start} ({distinct} values)"
+                );
+            }
+
+            // Unaligned 16-entry runs and non-16 lengths at aligned starts stay exact.
+            for (start, len) in [
+                (1, 16),
+                (15, 16),
+                (17, 16),
+                (4079, 16),
+                (0, 0),
+                (0, 1),
+                (0, 15),
+                (16, 17),
+                (32, 32),
+            ] {
+                let mut buf = vec![u32::MAX; len];
+                container.get_run(start, &mut buf);
+                assert_eq!(
+                    buf,
+                    values[start..start + len],
+                    "run {start}+{len} ({distinct} values)"
                 );
             }
         }
@@ -971,6 +1430,99 @@ mod tests {
         assert!(PalettedContainer::from_wire(BIOMES, 2, vec![1, 2, 3, 4, 5], vec![0; 4]).is_err());
         assert!(PalettedContainer::from_wire(BLOCKS, 0, vec![9], vec![]).is_ok());
     }
+    /// Every word of every width against the entry-at-a-time scan, over
+    /// valid data, a bad entry anywhere in a word, garbage only in a word's
+    /// padding fields, and the last word's padding set to all ones: the same
+    /// verdict, and the first offending entry named as before.
+    #[test]
+    #[ignore = "daily"]
+    fn index_check_matches_an_entry_by_entry_scan() {
+        fn scan(strategy: Strategy, bits: u8, len: usize, words: &[u64]) -> Result<(), u32> {
+            let per = 64 / usize::from(bits);
+            for i in 0..strategy.entries() {
+                if i / per >= words.len() {
+                    break;
+                }
+                let index = read(words, bits, i);
+                if index as usize >= len {
+                    return Err(index);
+                }
+            }
+            Ok(())
+        }
+        fn compare(strategy: Strategy, bits: u8, len: usize, words: &[u64], what: &str) {
+            let container = PalettedContainer {
+                strategy,
+                bits,
+                palette: Palette::List((0..len as u32).collect()),
+                words: words.to_vec(),
+                saved_nbt: OnceLock::new(),
+            };
+            match (container.check_indices(), scan(strategy, bits, len, words)) {
+                (Ok(()), Ok(())) => {}
+                (Err(PaletteError::BadIndex { index, palette }), Err(first)) => {
+                    assert_eq!((index, palette), (first, len), "{what}");
+                }
+                (a, b) => panic!("{what}: {a:?} vs {b:?}"),
+            }
+        }
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        for strategy in [BLOCKS, BIOMES] {
+            let entries = strategy.entries();
+            let max_len = match strategy.kind {
+                Kind::Blocks => 256,
+                Kind::Biomes => 8,
+            };
+            for len in 2..=max_len {
+                let bits = match strategy.config(ceil_log2(len)) {
+                    Config::List(bits) => bits,
+                    _ => unreachable!("{len} entries in a single-value palette"),
+                };
+                let per = 64 / usize::from(bits);
+                let words_len = storage_len(bits, entries);
+                let valid = pack_words(bits, entries, (0..entries).map(|i| (i % len) as u32));
+                let name = format!("{len} entries, {bits} bits");
+                compare(strategy, bits, len, &valid, &name);
+                if len == 1 << bits {
+                    // No field can hold an index past the palette.
+                    continue;
+                }
+                let top = mask(bits) as usize;
+                // A bad entry in the first, a middle and the last field of a
+                // word, and in the container's last entry.
+                for at in [0, per / 2, per - 1, entries / 2, entries - 1] {
+                    let mut bad = valid.clone();
+                    let index = (len + (rng(&mut state) % 7) as usize).min(top);
+                    write(&mut bad, bits, at, index as u32);
+                    compare(strategy, bits, len, &bad, &format!("{name}, bad at {at}"));
+                }
+                // Garbage in the last word's padding fields only.
+                let rest = entries - (words_len - 1) * per;
+                if rest < per {
+                    let mut padded = valid.clone();
+                    padded[words_len - 1] |= u64::MAX << (rest * usize::from(bits));
+                    compare(strategy, bits, len, &padded, &format!("{name}, padding"));
+                }
+                // A whole random word, every field drawn from `0..=len`.
+                for _ in 0..64 {
+                    let mut words = valid.clone();
+                    let word = (rng(&mut state) % words_len as u64) as usize;
+                    words[word] = 0;
+                    for field in 0..per {
+                        let index = (rng(&mut state) % (len as u64 + 1)).min(top as u64);
+                        words[word] |= index << (field * usize::from(bits));
+                    }
+                    compare(
+                        strategy,
+                        bits,
+                        len,
+                        &words,
+                        &format!("{name}, random word {word}"),
+                    );
+                }
+            }
+        }
+    }
     #[test]
     fn saved_validation_matches_entrywise_reference() {
         // Keep the previous loader as an independent entry-at-a-time reference:
@@ -1018,6 +1570,7 @@ mod tests {
                     bits,
                     palette: Palette::List(palette),
                     words: data.to_vec(),
+                    saved_nbt: OnceLock::new(),
                 },
                 _ => PalettedContainer::build(strategy, palette, &ids),
             })
@@ -1204,8 +1757,8 @@ mod tests {
             let y = i >> 8;
             let r = rng(&mut state);
             terrain.push(match y {
-                0..=8 if r % 40 == 0 => 2000 + (r >> 8) as u32 % 6,
-                0..=8 if r % 13 == 0 => 0,
+                0..=8 if r.is_multiple_of(40) => 2000 + (r >> 8) as u32 % 6,
+                0..=8 if r.is_multiple_of(13) => 0,
                 0..=8 => 1,
                 9..=10 => 10,
                 11 => 9,
@@ -1290,6 +1843,131 @@ mod tests {
             let (base, new) = (times[0][times[0].len() / 2], times[1][times[1].len() / 2]);
             println!(
                 "palette_ids {name}: baseline {base:.2} us, new {new:.2} us, {:.2}x",
+                base / new
+            );
+        }
+    }
+    /// `pack` as it was before a section of one value was answered from its
+    /// words: every cell unpacked, then the distinct values found again.
+    fn baseline_pack(c: &PalettedContainer) -> Packed {
+        let entries = c.strategy.entries();
+        let mut values = vec![0u32; entries];
+        c.unpack(&mut values);
+        let (palette, ids) = palette_ids(&values);
+        let bits = match c.strategy.config(ceil_log2(palette.len())) {
+            Config::Single => 0,
+            Config::List(bits) => bits,
+            Config::Global => ceil_log2(palette.len()),
+        };
+        let data = (bits != 0).then(|| pack_words(bits, entries, ids.iter().copied()));
+        Packed {
+            palette,
+            bits,
+            data,
+        }
+    }
+    /// A container holding `value` in every cell while stored in the global
+    /// palette's width, which `set` keeps once a section has used it.
+    fn global_uniform(value: u32) -> PalettedContainer {
+        let bits = BLOCKS.global_bits;
+        let width = usize::from(bits);
+        let per = 64 / width;
+        let pattern = (0..per).fold(0u64, |word, slot| word | u64::from(value) << (slot * width));
+        PalettedContainer {
+            strategy: BLOCKS,
+            bits,
+            palette: Palette::Global,
+            words: vec![pattern; BLOCKS.entries().div_ceil(per)],
+            saved_nbt: OnceLock::new(),
+        }
+    }
+    /// Sections saved from a column: one value (a single palette, and a list
+    /// palette whose other entry died), mixed terrain, the global palette
+    /// holding one value, and biomes.
+    fn pack_cases() -> Vec<(&'static str, PalettedContainer)> {
+        let mixed: Vec<u32> = (0..4096).map(|i| (i % 12) as u32).collect();
+        let mut dead = PalettedContainer::new(BLOCKS, 5);
+        dead.set(100, 9);
+        dead.set(100, 5);
+        let biomes: Vec<u32> = (0..64).map(|i| (i % 6) as u32 * 2).collect();
+        vec![
+            ("single", PalettedContainer::new(BLOCKS, 5)),
+            ("dead slot", dead),
+            ("mixed", PalettedContainer::from_values(BLOCKS, &mixed)),
+            (
+                "terrain",
+                PalettedContainer::from_values(BLOCKS, &palette_cases()[0].1),
+            ),
+            ("global uniform", global_uniform(3000)),
+            ("biomes", PalettedContainer::from_values(BIOMES, &biomes)),
+        ]
+    }
+    #[test]
+    fn pack_matches_unpacking_every_section() {
+        for (name, container) in pack_cases() {
+            assert_eq!(container.pack(), baseline_pack(&container), "{name}");
+        }
+    }
+    /// A section of one value saves as that value and no indices, whatever its
+    /// stored palette looks like: a single palette, a list whose other entry was
+    /// overwritten, or the global palette.
+    #[test]
+    fn uniform_sections_pack_as_one_entry() {
+        let mut dead = PalettedContainer::new(BLOCKS, 5);
+        dead.set(100, 9);
+        dead.set(100, 5);
+        for (name, container, value) in [
+            ("single", PalettedContainer::new(BLOCKS, 5), 5),
+            ("dead slot", dead, 5),
+            ("global", global_uniform(3000), 3000),
+        ] {
+            assert_eq!(
+                container.pack(),
+                Packed {
+                    palette: vec![value],
+                    bits: 0,
+                    data: None,
+                },
+                "{name}"
+            );
+        }
+    }
+    /// `pack` against the unpacking implementation, over the cases above. 25
+    /// measured rounds alternate order and report the median microseconds per
+    /// call.
+    #[test]
+    #[ignore = "microbenchmark; run with --ignored --nocapture"]
+    fn benchmark_pack() {
+        use std::{hint::black_box, time::Instant};
+        for (name, container) in pack_cases() {
+            let reps = if container.uniform().is_some() {
+                2000
+            } else {
+                200
+            };
+            let mut times = [Vec::new(), Vec::new()];
+            for round in 0..25 {
+                for optimized in [round % 2 == 0, round % 2 != 0] {
+                    let started = Instant::now();
+                    for _ in 0..reps {
+                        if optimized {
+                            black_box(container.pack());
+                        } else {
+                            black_box(baseline_pack(black_box(&container)));
+                        }
+                    }
+                    if round > 0 {
+                        times[usize::from(optimized)]
+                            .push(started.elapsed().as_secs_f64() * 1e6 / f64::from(reps));
+                    }
+                }
+            }
+            for t in &mut times {
+                t.sort_by(f64::total_cmp);
+            }
+            let (base, new) = (times[0][times[0].len() / 2], times[1][times[1].len() / 2]);
+            println!(
+                "pack {name}: baseline {base:.2} us, new {new:.2} us, {:.2}x",
                 base / new
             );
         }

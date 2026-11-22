@@ -3,14 +3,19 @@
 //! ([`after_exit`], started by the launcher once it sees the game end). All empty by default.
 //! The game and the commands also get the instance's own variables ([`instance_vars`]).
 //!
-//! [`wrap`] turns the game's command into one process that does all three, so the launcher still
-//! follows one program (its output, its exit, Stop):
+//! [`wrap`] turns the game's command into one process the launcher follows (its output, its
+//! exit, Stop). The game's words never pass through a shell: they can hold a server address or
+//! a world's name, and a shell would read its special characters as commands.
 //!
 //! - Unix: `/bin/sh -c '(<pre-launch>) || exit; exec "$@"' horizon <wrapper…> <game> <args…>`.
 //!   The pre-launch command is the player's own shell line, run in the instance's folder; the
 //!   game's words go through `"$@"`, so they are never parsed by the shell. `exec` makes the
 //!   shell become the wrapper (or the game).
-//! - Windows: `cmd /D /S /C "<pre-launch> && <wrapper…> <game> <args…>"`, each word quoted.
+//! - Windows: cmd has no `"$@"`, so `cmd /D /S /C "<pre-launch>"` runs on its own first, to its
+//!   end, and the wrapper (or the game) then starts directly with its words. Stop and the
+//!   launcher's exit end that command with what it started ([`wrap_stoppable`]). A wrapper
+//!   that is a shell would read the words again, so it is refused when they carry a server or
+//!   a world ([`refused`]).
 //!
 //! Without a pre-launch command the wrapper is the program itself, and no shell runs.
 use crate::backend::split_args;
@@ -18,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Launch {
@@ -34,11 +40,6 @@ pub struct Launch {
     /// Environment variables for the game (and the two commands above).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
-    /// The most RAM Horizon may hold that the player chose, in MiB; none (the default): no
-    /// limit, so big worlds and modpacks keep their render distance. Read it with
-    /// [`Launch::memory_limit`]. A Java instance has `-Xmx` instead (`instances::Java::memory_mb`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_limit_mb: Option<u32>,
     /// Linux: run the game through Feral's GameMode (`gamemoderun`), when it is installed.
     #[serde(default, skip_serializing_if = "is_false")]
     pub gamemode: bool,
@@ -54,35 +55,26 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// Tells the game its limit (`HORIZON_MEMORY_LIMIT_MB`). Horizon's only: a Java instance has `-Xmx`.
-/// Before [`wrap`], so the player's own variable wins.
-pub fn limit_memory(cmd: &mut Command, launch: &Launch) {
-    if let Some(mb) = launch.memory_limit() {
-        cmd.env("HORIZON_MEMORY_LIMIT_MB", mb.to_string());
-    }
-}
-
 /// The memory slider's stops, in MiB.
 const SLIDER_STEP: u32 = 64;
 /// The slider's top when the computer's memory is not known.
 const UNKNOWN_TOTAL_MB: u32 = 64 * 1024;
 
-/// The value at `fraction` of a slider over `total_mb`: none at its very end (no limit), and at
-/// the start the smallest value there is, as nothing keeps a player from going that low.
-pub fn memory_at(fraction: f32, total_mb: u32) -> Option<u32> {
+/// Java heap size at `fraction` of a slider over `total_mb`, in MiB.
+pub fn memory_at(fraction: f32, total_mb: u32) -> u32 {
     if fraction >= 1. {
-        return None;
+        return total_mb.max(1);
     }
     let mb = fraction.max(0.) * total_mb as f32;
-    Some(((mb / SLIDER_STEP as f32).round() as u32 * SLIDER_STEP).max(1))
+    ((mb / SLIDER_STEP as f32).round() as u32 * SLIDER_STEP).max(1)
 }
 
 /// What [`parse_memory`] says of text that isn't a memory limit.
 #[derive(Debug, PartialEq, Eq)]
 pub struct NotMemory;
 
-/// A memory limit as a player types it: a number of MB, or of GB with `gb`, and nothing or `off`
-/// for no limit. Nothing keeps a player from going low. Err when it is none of those.
+/// A Java heap size as a player types it: MB, or GB with `gb`, and nothing or `off`
+/// to restore the default. Nothing keeps a player from going low. Err when it is none of those.
 pub fn parse_memory(typed: &str) -> Result<Option<u32>, NotMemory> {
     let typed = typed.trim().to_ascii_lowercase();
     if typed.is_empty() || typed == "off" {
@@ -99,8 +91,8 @@ pub fn parse_memory(typed: &str) -> Result<Option<u32>, NotMemory> {
 }
 
 /// Where `mb` sits on a slider over `total_mb`; [`memory_at`]'s inverse.
-pub fn memory_fraction(mb: Option<u32>, total_mb: u32) -> f32 {
-    mb.map_or(1., |mb| (mb as f32 / total_mb.max(1) as f32).min(1.))
+pub fn memory_fraction(mb: u32, total_mb: u32) -> f32 {
+    (mb as f32 / total_mb.max(1) as f32).min(1.)
 }
 
 /// This computer's memory in MiB, the top of the slider.
@@ -155,7 +147,7 @@ pub struct Found {
 /// installed, on any system (for tests and screenshots).
 pub const TOOLS_ENV: &str = "HORIZON_LAUNCHER_LINUX_TOOLS";
 
-fn on_path(program: &str) -> bool {
+pub(crate) fn on_path(program: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|path| {
         std::env::split_paths(&path).any(|dir| {
             let file = dir.join(program);
@@ -240,16 +232,6 @@ pub fn switch_env(launch: &Launch, found: &Found) -> Vec<(&'static str, &'static
 }
 
 impl Launch {
-    /// The most RAM Horizon may hold, in MiB; none: no limit.
-    pub fn memory_limit(&self) -> Option<u32> {
-        self.memory_limit_mb
-    }
-
-    /// Keeps the player's choice; none: no limit.
-    pub fn set_memory_limit(&mut self, limit: Option<u32>) {
-        self.memory_limit_mb = limit;
-    }
-
     pub fn is_empty(&self) -> bool {
         self == &Launch::default()
     }
@@ -273,12 +255,6 @@ impl Launch {
             parts.push(crate::i18n::trf(
                 "runs {command} after",
                 &[("command", self.post_exit.trim())],
-            ));
-        }
-        if let Some(mb) = self.memory_limit_mb {
-            parts.push(crate::i18n::trf(
-                "limited to {mb} MB",
-                &[("mb", &mb.to_string())],
             ));
         }
         if self.gamemode {
@@ -371,20 +347,13 @@ pub fn after_exit(
     if line.is_empty() {
         return None;
     }
-    let mut cmd = if cfg!(windows) {
-        let mut c = Command::new("cmd.exe");
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            c.raw_arg(format!("/D /S /C \"{line}\""));
+    let mut cmd = match cfg!(windows) {
+        true => cmd_line(line),
+        false => {
+            let mut c = Command::new("/bin/sh");
+            c.arg("-c").arg(line);
+            c
         }
-        #[cfg(not(windows))]
-        c.args(["/D", "/S", "/C", line]);
-        c
-    } else {
-        let mut c = Command::new("/bin/sh");
-        c.arg("-c").arg(line);
-        c
     };
     cmd.current_dir(dir)
         .envs(vars.iter().map(|(k, v)| (k, v)))
@@ -418,32 +387,71 @@ fn script(pre_launch: &str) -> String {
     )
 }
 
-/// A word quoted for a Windows command line, as programs built with the C runtime read it back.
-fn windows_quote(word: &OsStr) -> String {
-    let word = word.to_string_lossy();
-    if !word.is_empty() && !word.contains([' ', '\t', '"']) {
-        return word.into_owned();
+/// `cmd /D /S /C "<line>"`: the player's own line, as cmd reads it.
+fn cmd_line(line: &str) -> Command {
+    let mut c = Command::new("cmd.exe");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.raw_arg(format!("/D /S /C \"{line}\""));
     }
-    let mut out = String::from("\"");
-    let mut slashes = 0;
-    for c in word.chars() {
-        match c {
-            '\\' => slashes += 1,
-            '"' => {
-                out.extend(std::iter::repeat_n('\\', slashes * 2 + 1));
-                out.push('"');
-                slashes = 0;
-            }
-            c => {
-                out.extend(std::iter::repeat_n('\\', slashes));
-                out.push(c);
-                slashes = 0;
-            }
-        }
+    #[cfg(not(windows))]
+    c.args(["/D", "/S", "/C", line]);
+    c
+}
+
+#[path = "launch/hook.rs"]
+mod hook;
+
+/// The hand-off of a start whose pre-launch command could be stopped: once Stop was pressed
+/// (`stop`), the game does not start, even when the command had already succeeded.
+pub fn unless_stopped<T>(
+    prepared: Result<T, String>,
+    stop: Option<&AtomicBool>,
+) -> Result<T, String> {
+    match stop {
+        Some(stop) if stop.load(Ordering::Relaxed) => prepared.and(Err(hook::stopped())),
+        _ => prepared,
     }
-    out.extend(std::iter::repeat_n('\\', slashes * 2));
-    out.push('"');
-    out
+}
+
+/// Why Windows refuses a wrapper that is a shell when the game gets words from outside.
+pub const SHELL_WRAPPER: &str = "This wrapper runs a shell, which would re-read the game's \
+                                 arguments. Use a program or a .bat file instead.";
+
+/// Whether the words after `wrapper` reach a shell that reads them again as its own command
+/// line: cmd, and PowerShell in any mode (after `-Command`, a `-File` is only more of the
+/// command). A `.bat` file is safe: Rust quotes its arguments for cmd, or refuses to start it.
+fn rereads(wrapper: &[String]) -> bool {
+    wrapper.first().is_some_and(|program| {
+        matches!(
+            program_name(program).as_str(),
+            "cmd" | "powershell" | "pwsh"
+        )
+    })
+}
+
+/// A program's name as Windows finds its file: the last part of its path, in lower case,
+/// without trailing dots and spaces (Windows drops them) and without `.exe`.
+fn program_name(program: &str) -> String {
+    let trim = |name: &str| name.trim_end_matches(['.', ' ']).to_ascii_lowercase();
+    let name = trim(program.rsplit(['\\', '/']).next().unwrap_or_default());
+    trim(name.strip_suffix(".exe").unwrap_or(&name))
+}
+
+/// Whether the game's words carry something from outside the player's own settings: a server
+/// to join, a world to open, a quick-play target.
+fn outside(words: &[OsString]) -> bool {
+    words.iter().any(|word| {
+        let word = word.to_string_lossy();
+        word == "--server" || word == "--world" || word.starts_with("--quickPlay")
+    })
+}
+
+/// On Windows, why `launch` can't run the game's `words`: a wrapper that is a shell would read
+/// a server address or a world's name as commands. A plain Play through it stays allowed.
+pub fn refused(launch: &Launch, words: &[OsString], windows: bool) -> Option<&'static str> {
+    (windows && rereads(&split_args(&launch.wrapper)) && outside(words)).then_some(SHELL_WRAPPER)
 }
 
 /// How [`wrap`] runs a command on each system, apart from the variables and the folder: the
@@ -457,8 +465,9 @@ pub enum Plan {
         script: String,
         words: Vec<OsString>,
     },
-    /// `cmd /D /S /C "<line>"`: the line as cmd reads it.
-    Cmd { line: String },
+    /// `cmd /D /S /C "<line>"` with the pre-launch line alone, run to its end first; then
+    /// `words` run as given (`words[0]` is the program), never through cmd.
+    Cmd { line: String, words: Vec<OsString> },
 }
 
 /// The plan for `words` (the game's program and arguments) with `launch`, on Windows or not,
@@ -475,66 +484,87 @@ pub fn plan(launch: &Launch, words: Vec<OsString>, windows: bool, found: &Found)
             words: all,
         },
         (false, true) => Plan::Cmd {
-            line: format!(
-                "{pre} && {}",
-                all.iter()
-                    .map(|w| windows_quote(w))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ),
+            line: pre.to_string(),
+            words: all,
         },
     }
 }
 
 /// The game's command run with `launch`: a new command with the same folder and variables,
-/// plus the instance's variables. Call it last, after every argument is added.
-pub fn wrap(cmd: Command, launch: &Launch) -> Command {
+/// plus the instance's variables. Call it last, after every argument is added, and off the
+/// window's thread: on Windows it runs the pre-launch command, and Err says why the game can't
+/// start.
+pub fn wrap(cmd: Command, launch: &Launch) -> Result<Command, String> {
+    wrap_stoppable(cmd, launch, &AtomicBool::new(false))
+}
+
+/// [`wrap`] for a start the window can stop: setting `stop` ends a pre-launch command still
+/// running, with what it started.
+pub fn wrap_stoppable(
+    mut cmd: Command,
+    launch: &Launch,
+    stop: &AtomicBool,
+) -> Result<Command, String> {
+    crate::run_leases::snapshot(&mut cmd);
+    #[cfg(windows)]
+    let cmd = crate::windows_runtime::redirect(cmd);
     if launch.is_empty() {
-        return cmd;
+        return Ok(cmd);
     }
     let words: Vec<OsString> = std::iter::once(cmd.get_program().to_owned())
         .chain(cmd.get_args().map(OsStr::to_owned))
         .collect();
+    if let Some(why) = refused(launch, &words, cfg!(windows)) {
+        return Err(why.into());
+    }
     // The override only shows the switches: they act on Linux.
     let found = match cfg!(target_os = "linux") {
         true => Found::here(),
         false => Found::default(),
     };
-    let mut out = match plan(launch, words, cfg!(windows), &found) {
-        Plan::Direct(words) => {
-            let mut c = Command::new(&words[0]);
-            c.args(&words[1..]);
-            c
+    let direct = |words: &[OsString]| {
+        let mut c = Command::new(&words[0]);
+        c.args(&words[1..]);
+        c
+    };
+    // The game's folder and variables, which its pre-launch command gets too.
+    let around = |out: &mut Command| {
+        if let Some(dir) = cmd.get_current_dir() {
+            out.current_dir(dir);
         }
+        for (key, value) in cmd.get_envs() {
+            match value {
+                Some(value) => out.env(key, value),
+                None => out.env_remove(key),
+            };
+        }
+        out.envs(switch_env(launch, &found));
+        apply_environment(out, launch);
+    };
+    let mut out = match plan(launch, words, cfg!(windows), &found) {
+        Plan::Direct(words) => direct(&words),
         Plan::Shell { script, words } => {
             let mut c = Command::new("/bin/sh");
             c.arg("-c").arg(script).arg("horizon").args(words);
             c
         }
-        Plan::Cmd { line } => {
-            let mut c = Command::new("cmd.exe");
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                c.raw_arg(format!("/D /S /C \"{line}\""));
-            }
-            #[cfg(not(windows))]
-            c.args(["/D", "/S", "/C", &line]);
-            c
+        Plan::Cmd { line, words } => {
+            let mut pre = cmd_line(&line);
+            around(&mut pre);
+            // The launcher's copy of the game's words is removed before any program starts
+            // (`run_leases::spawn`); the pre-launch command doesn't get it either.
+            pre.env_remove(crate::run_leases::GAME);
+            hook::run(pre, stop)?;
+            direct(&words)
         }
     };
-    if let Some(dir) = cmd.get_current_dir() {
-        out.current_dir(dir);
-    }
-    for (key, value) in cmd.get_envs() {
-        match value {
-            Some(value) => out.env(key, value),
-            None => out.env_remove(key),
-        };
-    }
-    out.envs(switch_env(launch, &found));
-    out.envs(&launch.env);
-    out
+    around(&mut out);
+    Ok(out)
+}
+
+/// Apply the final instance environment before either selection or process wrapping.
+pub fn apply_environment(command: &mut Command, launch: &Launch) {
+    command.envs(&launch.env);
 }
 
 #[cfg(test)]

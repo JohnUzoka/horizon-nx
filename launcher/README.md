@@ -19,6 +19,19 @@ The opening, then Play ([clip](docs/opening.webm)):
   built on your fork's Actions, or the zip holding it) and installs it as `imported-<date>-<sha>`:
   a copy of the selected release or Nightly's folder, game files included, with that program as the
   game. Imported builds are listed apart as unsigned, and no update replaces them.
+- **Move data to another drive**: Settings → Data folder → Move… copies the launcher's
+  installations, downloads and account files, the game's worlds and instances, and managed native
+  build data to an empty folder. Close games and servers and wait for active jobs first. The launcher
+  exits while the copy is verified, switches its location only after success, then reopens. Old folders
+  remain as recovery copies and still use disk space; verify your worlds and instances before removing
+  them yourself. External Minecraft/server folders and paths embedded in custom launch commands stay
+  unchanged. Links/junctions and overlapping roots are refused; Windows build destinations need ASCII
+  characters without spaces. Copy or commit failure leaves the original location selected.
+  The location pointer is independent of the moved folders, at the platform config directory's
+  `horizon-launcher-location/location.json`. `HORIZON_LAUNCHER_LOCATION_FILE` selects an alternative
+  absolute pointer file for portable installations. Nonempty `HORIZON_LAUNCHER_HOME` and `HORIZON_HOME`
+  still override their respective roots; remove these overrides before using Move. A missing destination
+  fails explicitly instead of silently creating empty data in the default location.
 - **Play**: prepares resources as `PLAY.txt` describes (your launcher's 26.3 install, the
   26.3 server jar from that version's own json, and Java 25) and copies its sounds from your
   launcher's asset store (`horizon-prepare sounds`; a launcher install without them only
@@ -42,13 +55,18 @@ The opening, then Play ([clip](docs/opening.webm)):
   starts the game. With no install on the computer the Play page offers the download alone and the
   Minecraft folder row says none is needed. Without an owner,
   the Play page asks to sign in first. `horizon-launcher prepare --download`.
-- **Mods**: **Mods** and **Shader packs** search Horizon's own registry (a Java instance's mods
-  come from Modrinth), **Resource packs** searches Modrinth, each marked Works, Partly or Doesn't
-  run in Horizon; Modrinth's data packs aren't usable yet and have no tab. Install puts a file in the game folder only after its checksum matches, and a
-  modpack (the sidebar's +) goes to the Modpacks page; installed packs show their source and checksum, with Update,
+- **Mods**: tabs for Mods, Modpacks, Resource packs, Shader packs and Data packs. Mods, Modpacks,
+  Resource packs and Data packs (into the world picked there) search Horizon's own registry, with
+  its categories as filters, or Modrinth (CurseForge support is coming soon); Shader packs search
+  the registry. A Java
+  instance's files come from Modrinth for its version and loader; on a Horizon instance, Modrinth's
+  Java mods are listed too, each marked Works, Partly or Doesn't run in Horizon. Install puts a file in
+  the game folder only after its SHA-512 matches, and a
+  modpack goes to the Modpacks page; installed packs show their source and checksum, with Update,
   **Update all** and Remove ([docs/mod-browser.md](../docs/mod-browser.md)).
 - **Modpacks**: import a Java modpack (a Modrinth `.mrpack`, a CurseForge zip, or a Prism,
-  MultiMC or CurseForge instance folder) and see its coverage report: per mod, ported, partial,
+  MultiMC or CurseForge instance folder; the page lists the ones other launchers keep on this
+  computer, each a click away) and see its coverage report: per mod, ported, partial,
   not yet or not needed, with the reason ([docs/modpacks.md](../docs/modpacks.md)). **Port**
   gets the jars of what this computer can port today (content mods with data and assets only)
   the player's own way: copied from a folder they have, or downloaded from the pack's own links
@@ -117,15 +135,19 @@ The opening, then Play ([clip](docs/opening.webm)):
   pack into the selected instance. A data pack is pointed at the world rows, and the Packs section
   and the world rows keep taking their own drops. A note in the corner says what happened.
   `horizon-launcher instance import <file>`.
-- **Maximum memory**: a row on Home, per instance: a slider and a box that takes `4096`, `4gb`, or nothing
-  for no limit (the default), saved at once. For Horizon it goes to the game as
-  `HORIZON_MEMORY_LIMIT_MB` ([what it does](../docs/native-client.md#ram-limit)); a Java instance's sets `-Xmx`.
+- **Maximum memory** (Java instances): set the Java heap limit (`-Xmx`) with the slider or
+  a value such as `4096` or `4gb`. Leave the box empty to restore the default (4096 MB).
+  Find it on Home in the classic layout, or in the instance’s Edit dialog in the glass layout.
 - **Launch options**: Home's Instance row has **Launch…**: per instance, a shell command run in its
   folder before the game (the game starts only if it succeeds), a wrapper the game runs through
   (`nice -n 5`), and environment variables (`NAME=value OTHER="two words"`), kept in
   `instances.json` (`horizon_launcher::launch`). The game stays one process the launcher follows:
   on Unix `/bin/sh` runs the command and then `exec`s the wrapper and the game, whose words pass
-  through `"$@"` untouched; on Windows `cmd /C` runs `<command> && <game>`. Both the window's Play
+  through `"$@"` untouched; on Windows `cmd /C` runs the command to its end, then the wrapper and
+  the game start with their words as they are, never through cmd. While that command runs, Play's
+  Stop (Cancel in the classic layout) ends it with what it started, and so does closing the
+  launcher. On Windows a wrapper that is a shell (`cmd` or PowerShell) can't join
+  a server or open a world: it would read their names as commands. Both the window's Play
   and `play` use them. `horizon-launcher instance launch <instance> [--pre-launch …]
   [--wrapper …] [--env …]` (an MCP agent needs `confirm: true`: it sets commands Play runs).
   On Linux the panel also has switches for what the computer has: **GameMode** (`gamemoderun`
@@ -142,15 +164,11 @@ The opening, then Play ([clip](docs/opening.webm)):
   (`horizon_launcher::shortcut`). **Remove shortcut** moves it to the trash; it is found by the
   instance id inside it, so a rename doesn't lose it. `horizon-launcher instance shortcut
   [instance] [--remove]`; `HORIZON_LAUNCHER_DESKTOP` points it at another folder.
-- **Accounts and quick switch**: the top bar's account chip opens a menu of everyone who can play:
-  each signed-in Microsoft account, the offline names the player keeps, and the name the game
-  made up (`horizon-player.txt`). Picking one plays as it from the next Play. Offline names play
-  only while an account that owns the game is signed in ([Microsoft accounts](#microsoft-accounts));
-  signing the last one out keeps them, unplayable until one is back. Settings > Account
-  adds offline names (3 to 16 letters, digits or `_`; the game gets `--name`) and forgets them,
-  skin and cape files included, and rolls the game's made-up name for a new one; the Console's
-  Share log takes the names out of the log too. `horizon-launcher account offline
-  [NAME]`, `account select <name>` (an account or an offline name), `account forget-offline
+- **Accounts and quick switch**: the top bar's account chip opens a menu of the signed-in
+  Microsoft accounts. Picking one plays as it from the next Play; that account must own the game
+  ([Microsoft accounts](#microsoft-accounts)). There are no offline names: the project decided
+  that Horizon plays only with a Microsoft account that owns Minecraft: Java Edition. The
+  Console's Share log takes the account names out of the log. `horizon-launcher account select
   <name>`.
 - **Accent and Home background**: on top of Dark, Light or System, Settings > Launcher picks an
   accent (Horizon's violet, blue, teal, green, amber, red or pink, any hue, or any colour typed as
@@ -167,13 +185,6 @@ The opening, then Play ([clip](docs/opening.webm)):
   `launcher/lang/<code>.json`, English text to its translation, Horizon's own; a test fails when
   the code asks `tr("…")` for a string a table lacks, or a table keeps one the code dropped.
   `horizon-launcher settings language system|en|fr|ru|de|zh|es|uk|pl`.
-- **Skin and cape**: each offline name's **Skin…** in Settings > Account shows the front of its
-  skin and cape, takes a skin PNG (64×64, or the older 64×32) and a cape PNG (64×32), and picks
-  classic or slim arms. The launcher keeps copies in its `skins/` folder and gives the game
-  `HORIZON_OFFLINE_SKIN`, `HORIZON_OFFLINE_SKIN_MODEL` and `HORIZON_OFFLINE_CAPE` when that name
-  plays; the game draws the default skins until it reads them. A Microsoft account's skin and
-  cape: coming soon, with sign-in. `horizon-launcher account skin <name> [FILE] [--model
-  classic|slim] [--cape FILE] [--no-skin] [--no-cape]`.
 - **Console**: Home's Console shows the game's output of this run as it comes: a search (every
   word, any case), Follow to keep the newest line in view, Copy, and Open logs folder. Warnings
   and errors stand out. **Share log…** uploads the log to [mclo.gs](https://mclo.gs), a paste
@@ -190,9 +201,9 @@ The opening, then Play ([clip](docs/opening.webm)):
   `datapacks/` under its row: what is there (and which the game has turned off), **Add data pack…**,
   and **Remove** (to the trash); a data pack `.zip` dropped on a world goes into it. The game turns
   a new one on when the world opens. From the command line: `horizon-launcher worlds
-  datapack-list|datapack-add|datapack-remove <world> …`. `horizon-launcher mods search --kind datapack`
-  finds them on Modrinth and `mods install <pack> --world <world>` installs one, saying what of it
-  runs in Horizon.
+  datapack-list|datapack-add|datapack-remove <world> …`. The Mods page's **Data packs**
+  tab finds them on Modrinth and installs one into the world picked there (`mods search --kind
+  datapack`, `mods install <pack> --world <world>`), saying what of it runs in Horizon.
 - **Packs**: Home lists the selected instance's resource packs and shader packs, each with a switch.
   The choice is the game's own: `resourcePacks` in options.txt (a pack turned on goes on top, as
   the game's Resource Packs screen does) and `pickedShaderPack` in `horizon-graphics.txt` (one shader
@@ -230,7 +241,12 @@ page `servers.json` (the list), `servers/<name>/` (the servers created there) an
   what the window does while you play (stays by default; Minimise, or Hide on macOS, puts it away
   when the game starts and brings it back to the front when the game closes; `settings
   while-playing stay|minimize|hide`), the game's extra command-line arguments, an HTTP proxy for
-  downloads, and the launcher's own version and update state.
+  downloads, and the launcher's own version and update state. On Windows ARM, **Game
+  architecture** chooses Automatic, x64 or ARM64 independently from the launcher; automatic
+  preserves the launcher's architecture, and a release without ARM64 uses the signed x64 build.
+  A changed choice reinstalls the selected version when automatic updates are on, and the game
+  won't launch an installed build that conflicts with a manual choice. `horizon-launcher settings
+  game-architecture auto|x64|arm64`.
 - **Updates**: Horizon ships only the Nightly (since 2026-10-28, docs/release-flow.md). The
   launcher installs the current one (the `nightly` pre-release, checksums signed for the Nightly
   channel) as `nightly-<date>-<commit>` and selects it when the player was on a Nightly, on the
@@ -247,8 +263,20 @@ page `servers.json` (the list), `servers/<name>/` (the servers created there) an
   launcher's own arguments, kept as `game_args` in `settings.json`, and apply the next time the
   game starts. `horizon-launcher game-args "<line>"` sets them too, and `play --arg <ARG>` passes
   one for a single run.
+- **Wasm compile budget** (game runtime, not a launcher preference):
+  `wasm.compile_timeout_secs:120` in the client's `options.txt` (the resolved
+  `--player-dir` when supplied, otherwise the selected instance) allows 120 seconds
+  per uncached module on the Unix child-compiler path. Remove the line for the
+  `5 + 300 / available_threads` seconds default. Invalid values publish a refusal
+  and exclude the wasm package's code and content rather than silently defaulting.
+  An unavailable/untrusted Unix cache or failed compiler refuses compilation instead
+  of dropping the deadline. Dedicated servers use
+  `"wasm.compile_timeout_secs" = "120"` under `server.toml`'s `[properties]`.
+  Restart the game/server after editing. Windows currently compiles in process
+  without this child deadline; see the [runtime reference](../docs/modding/src/how-to/wasm-mods.md#compilation-time-setting).
 - **Proxy**: when the internet here needs one (a school's, an office's, a country where a host is
-  unreachable), Settings' Proxy takes the `http://host:port` address your proxy app listens on, and
+  unreachable), Settings' Proxy takes the `http://host:port` or `socks5://host:port` address your
+  proxy app listens on, and
   every download goes through it: Horizon's releases and the launcher's own update, Minecraft's
   files and Java from Mojang, Modrinth, CurseForge, Horizon's mod registry, pictures, Microsoft
   sign-in, and the jars a modpack import fetches. It is kept as `proxy` in `settings.json`, and
@@ -258,14 +286,25 @@ page `servers.json` (the list), `servers/<name>/` (the servers created there) an
   computer never goes through it.
 - **Links**: the Discord invite, the Sponsors page and the website come from `launcher/links.json` on main
   (`{"discord": "...", "sponsor": "...", "website": "..."}`), so they change without a launcher release. Offline,
-  the launcher uses the same values built in; an empty address hides its button.
+  the launcher uses the same values built in; an empty address hides its button. An optional `"min_launcher":
+  "0.2.80"` names the oldest launcher that may stay in use, for a release known to be broken: an older one that
+  updates itself installs the update it downloads and restarts at once, or when its window closes while a game
+  it started runs. A failed update says why and the launcher goes on. Unset, nothing changes.
 
 Long pages, dialogs, the server console and data previews have a visible scrollbar when
 their content overflows. Drag the thumb or click the track to navigate without a mouse wheel.
+When the top bar's page tabs overflow, an arrow on a fading edge shows each side with more tabs
+(`src/nav_strip.rs`); the arrows go at the ends and when all tabs fit. They fade in and out over
+150 ms, and a click scrolls three quarters of the strip over 240 ms; another click goes on from where
+that one is headed, and the wheel stops it. Performance mode and reduced motion make both instant.
 
-Pages and Home's landscape fill the window as it resizes. Windows uses a matching title
-bar with native dragging, resizing, Snap,
-minimize, maximize/restore and close; macOS and Linux keep their system title bars.
+A mouse wheel's notch glides over 240 ms instead of jumping (`src/glide.rs`); trackpads scroll as
+they are. Performance mode and reduced motion (`HORIZON_LAUNCHER_MOTION=off`) turn the glide off.
+
+Pages and Home's landscape fill the window as it resizes. The title bar is transparent over the
+launcher on every platform: Windows keeps native dragging, resizing, Snap, minimize,
+maximize/restore and close; Linux keeps the same controls in its client-side title bar, while
+macOS keeps its native traffic-light controls.
 
 ## Updates
 
@@ -283,8 +322,20 @@ themselves come from their download links, which that limit doesn't cover.
 
 It also updates itself from GitHub releases tagged `launcher@X.Y.Z` (the game's are `nightly`, and
 `vX.Y.Z` before 2026-10-28; neither is ever taken for the other). Before 0.2 they were `launcher-vX.Y.Z` and `vYYYY.MM.DD`:
-every 0.2 tag counts as newer than all of those (docs/versioning.md). It downloads the new build, replaces its
-own binary, and offers "Restart" in the footer. Development builds and
+every 0.2 tag counts as newer than all of those (docs/versioning.md). It downloads the new build, checks it
+against the release's signed `SHA256SUMS`, and says "A new version is available" in the sidebar with
+**Update**: the window closes, the launcher's own file runs again as the installer (`apply-update`,
+`src/update_handoff.rs`), which waits for the window's process to exit, puts the new launcher in place (the
+binary, the `.app` bundle or the AppImage) and starts it. Until then the sidebar says it installs when the
+launcher closes: closing the window installs it the same way without the restart, so the next start is the new
+launcher, and a game started from the window keeps running. Quitting for a data move drops it, and the next start
+checks again. When the installer can't put it in place, the old launcher stays (after **Update** it starts again)
+and says why at its next start. Each process stages in its own folder, and the installer checks the signed
+SHA-256 again before anything goes in; when the launcher in place is already that version or newer, it changes
+nothing. Servers keep running through **Update**. A copy that can't replace itself says so at once and offers
+**Download again** (the website's install page): one in a read-only folder (the disk image, or the read-only copy
+macOS runs a downloaded app from until it is moved to Applications), or on Windows one running from the temporary
+folder, as a program opened inside a `.zip` does. `horizon-launcher update` replaces it at once. Development builds and
 `HORIZON_LAUNCHER_NO_SELF_UPDATE=1` never replace themselves.
 
 On Linux the release also comes as an AppImage, `horizon-launcher-linux-x86_64.AppImage`: one file
@@ -307,14 +358,16 @@ Menu entries the launcher writes then start that wrapper, which can
 set `HORIZON_LAUNCHER_NO_SELF_UPDATE=1` to keep launcher updates with the package manager.
 
 Launcher releases are automatic (docs/release-flow.md in the repository): when main changes the
-launcher, `horizon-prepare` or `horizon-theme`, the `launcher` workflow builds Linux, macOS and
-Windows and publishes `launcher-vX.Y.Z` (the next patch, or the next minor after a pull request
+launcher, `horizon-prepare` or `horizon-theme`, the `launcher` workflow builds Linux, macOS, Windows x64 and
+Windows ARM64 and publishes `launcher-vX.Y.Z` (the next patch, or the next minor after a pull request
 labelled `feature`) with `horizon-launcher-linux-x86_64.tar.gz`,
 `horizon-launcher-linux-x86_64.AppImage`, `horizon-launcher-macos-arm64.zip`,
-`horizon-launcher-macos-x64.zip` (Intel Macs) and `horizon-launcher-windows-x64.zip`, never marked latest. The version is built in from the tag
+`horizon-launcher-macos-x64.zip` (Intel Macs), `horizon-launcher-windows-x64.zip` and
+`horizon-launcher-windows-arm64.zip`, never marked latest. The version is built in from the tag
 (`HORIZON_LAUNCHER_VERSION`); `Cargo.toml`'s version is only what local builds report.
 
-Windows also publishes `horizon-launcher-setup.exe`: the launcher's own binary under another name, which opens
+Windows also publishes `horizon-launcher-setup.exe` (x64) and `horizon-launcher-setup-arm64.exe`: the launcher's own
+binary under another name, which opens
 a per-user setup instead of the window (no administrator). It copies itself to
 `%LOCALAPPDATA%\Programs\Horizon Launcher\horizon-launcher.exe`, makes the Start menu shortcut (and the
 desktop one if asked) and an entry in *Apps & features*, then starts the copy. `horizon-launcher-setup.exe
@@ -362,7 +415,6 @@ and don't set `%ERRORLEVEL%` / `$LASTEXITCODE`. Scripts that need the exit code 
     horizon-launcher account sign-in                sign in in your browser with a code
     horizon-launcher account sign-out <name>
     horizon-launcher account select <name>          play as this account
-    horizon-launcher account offline                play without an account
     horizon-launcher instance [list]                the instances and their game folders (* = Play starts it)
     horizon-launcher instance create <name> [--copy <instance>]   empty, or a copy of one's worlds, options and packs
     horizon-launcher instance create <name> --minecraft <1.21.4|latest|latest-snapshot>   a Minecraft: Java Edition instance
@@ -413,6 +465,14 @@ scripts and tests). Test runs also set `HORIZON_LAUNCHER_TRASH=<folder>` and
 system's trash goes into that folder, and what Copy would put on the clipboard is written to that
 file, so a test never touches the real trash or clipboard.
 
+Game-cache inventory, cleanup and direct game entry resolve aliases above configured roots
+(including macOS's `/var` and `/tmp`) before entering the lease protocol. Direct entry checks
+the discovered data root before resolving its ancestors and only opens an existing registry.
+The data folder itself and managed descendants may not be symbolic links. A deleted selected
+home remains a managed lease requirement, so a late game cannot start after cleanup. Unknown
+game builds still block shared-cache deletion, and a running game's leases prevent deletion
+until its final owner exits.
+
 ## AI agents (MCP)
 
 `horizon-launcher mcp` is a Model Context Protocol server over stdio. `horizon-launcher
@@ -455,8 +515,8 @@ MCP's `play`) says "Sign in with a Microsoft account that owns Minecraft: Java E
 and starts nothing. Settings → Accounts signs in: the launcher shows a code, you enter it at
 microsoft.com/link, and the launcher checks that the account owns the game. It asks again at every
 Play, with the token renewal; with no network the last answer stands, and a "doesn't own" blocks
-at once. The account also plays online-mode servers under your own name and skin; offline names
-play LAN and offline-mode servers beside it. The game binary started directly (`horizon-client`,
+at once. The account that plays must own the game itself, and it plays online-mode servers under
+your own name and skin, LAN and offline-mode servers too. The game binary started directly (`horizon-client`,
 `horizon-ctl launch`), the harnesses and the servers don't go through this check. Tokens live in the system keychain (Keychain,
 Credential Manager, or the Secret Service on Linux), never in a log or the command line;
 `accounts.json` in the data folder keeps only names and UUIDs. On Linux without a keychain they go
@@ -515,6 +575,22 @@ On Windows, `cargo test --bin horizon-launcher desktop_list_renders_the_viewport
 
     cargo build --release
 
+A debug build (`cargo build`) also supports Windows' default 1 MiB process-entry stack.
+On Windows, the entry thread starts and joins a launcher thread with a 16 MiB stack before
+any CLI dispatch or GUI initialization. That thread owns OLE initialization, GPUI's windows
+and its message loop together; Linux and macOS still run on the original main thread.
+CLI arguments, terminal pipes and command exit codes are unchanged.
+
+The Windows daily subprocess tests use the debug binary. To exercise real CLI startup with
+a deterministic 1 MiB entry stack, including persisted settings and failure exit codes:
+
+    cargo test --locked --test startup cli_settings_work_with_one_mib_process_stack -- --ignored --exact
+
+That test uses fresh homes and a private copy of the executable with only its PE stack reserve
+changed; it needs no desktop. The ignored
+`hardware_probes_run_hidden_after_the_first_frame` test additionally checks real GUI startup
+on an interactive Windows desktop with a graphics adapter.
+
 On NixOS, `nix-shell` in this folder provides the libraries GPUI links to (Wayland, X11,
 xkbcommon, Vulkan, fontconfig) and the ALSA and libudev files a native mod build looks up, so
 start the launcher from that shell to build native mods as well (#5248). macOS needs Xcode's
@@ -525,6 +601,14 @@ client starts (`--help`) and that the binaries import only system libraries (Win
 
     cargo test --lib    # tag separation, version order, update selection, notes as text,
                         # the auto-install default, the links fallback
+
+Run the complete launcher checks through `python3 tools/pr_ready.py` from the repository root.
+It and the launcher workflow give every Cargo test target fresh launcher/game homes, a private
+location pointer, XDG data/config folders, trash, clipboard and desktop paths, and remove the
+scratch home on exit. On Windows the scratch path must also be ASCII and contain no spaces,
+or build tools can fall back outside it. Direct Cargo runs of binary or integration tests need
+the same overrides: they link the library without `cfg(test)`, so its library-test fallback
+alone does not keep them out of the player's profile.
 
 Geist and Geist Mono (SIL Open Font License, `crates/horizon-theme/fonts/OFL-*.txt`, shared with the game's on-screen keyboard) are
 bundled so the type is the same on every platform.

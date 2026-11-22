@@ -47,6 +47,8 @@ pub struct Visbuffer {
     blocks_per_page: u64,
     /// The IDs, the size of the world's depth.
     ids: Option<(wgpu::TextureView, [u32; 2])>,
+    /// The size the IDs or block tables had no room at (#13624).
+    no_room: Option<[u32; 2]>,
 }
 
 impl Visbuffer {
@@ -57,7 +59,7 @@ impl Visbuffer {
         device: &wgpu::Device,
         terrain_layout: &wgpu::BindGroupLayout,
         flat: &Flat,
-        color: wgpu::TextureFormat,
+        (color, linear): (wgpu::TextureFormat, bool),
         constants: &[(&str, f64)],
     ) -> Self {
         let flat_layout = &flat.draw_layout;
@@ -66,12 +68,12 @@ impl Visbuffer {
             .iter()
             .copied()
             .chain([("VIS_BLOCKS_PER_PAGE", blocks_per_page as f64)])
+            .chain(super::linear_blend::frame_constants(color, linear))
             .collect();
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Horizon visibility buffer"),
             source: wgpu::ShaderSource::Wgsl(
-                (include_str!("../terrain.wgsl").to_owned() + include_str!("../visbuffer.wgsl"))
-                    .into(),
+                (super::terrain_shader() + include_str!("../visbuffer.wgsl")).into(),
             ),
         });
         let fragment = wgpu::ShaderStages::FRAGMENT;
@@ -191,12 +193,19 @@ impl Visbuffer {
             blocks: None,
             blocks_per_page,
             ids: None,
+            no_room: None,
         }
     }
 
     /// Makes the IDs the world depth's `size`, and the block tables hold the pages `flat`
-    /// draws this frame.
-    pub fn fit(&mut self, device: &wgpu::Device, size: [u32; 2], flat: &Flat) {
+    /// draws this frame: `false` where there was no room for them (#13624), and the frame
+    /// draws solid terrain without the visibility buffer. Nothing that failed is kept, the old
+    /// one goes first, and that size is not tried again until it changes.
+    pub fn fit(&mut self, device: &wgpu::Device, size: [u32; 2], flat: &Flat) -> bool {
+        use super::frame_targets::{Kind, made};
+        if self.no_room == Some(size) {
+            return false;
+        }
         let pages = flat.calls[..flat.solid_calls]
             .iter()
             .map(|c| c.page + 1)
@@ -204,17 +213,31 @@ impl Visbuffer {
             .unwrap_or(1);
         if self.blocks.as_ref().is_none_or(|(_, n)| *n < pages) {
             let pages = pages.next_power_of_two();
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Visibility buffer block tables"),
-                size: u64::from(pages) * self.blocks_per_page * 4,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
+            self.blocks = None;
+            self.blocks = made(device, Kind::Visibility, || {
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Visibility buffer block tables"),
+                    size: u64::from(pages) * self.blocks_per_page * 4,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                (buffer, pages)
             });
-            self.blocks = Some((buffer, pages));
+            if self.blocks.is_none() {
+                self.no_room = Some(size);
+                return false;
+            }
         }
         if self.ids.as_ref().is_some_and(|(_, s)| *s == size) {
-            return;
+            return true;
         }
+        self.ids = None;
+        self.ids = made(device, Kind::Visibility, || Self::ids(device, size));
+        self.no_room = self.ids.is_none().then_some(size);
+        self.ids.is_some()
+    }
+
+    fn ids(device: &wgpu::Device, size: [u32; 2]) -> (wgpu::TextureView, [u32; 2]) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Visibility buffer IDs"),
             size: wgpu::Extent3d {
@@ -229,7 +252,7 @@ impl Visbuffer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        self.ids = Some((texture.create_view(&Default::default()), size));
+        (texture.create_view(&Default::default()), size)
     }
 
     /// Pass 1's render pass over the world's `depth`: the IDs cleared (`clear`, phase 1) or
@@ -239,17 +262,17 @@ impl Visbuffer {
         encoder: &'e mut wgpu::CommandEncoder,
         depth: &wgpu::TextureView,
         clear: bool,
-        timing: Option<&mut PassTiming>,
-    ) -> wgpu::RenderPass<'e> {
+        mut timing: Option<&mut PassTiming>,
+    ) -> super::pack_timing::CountedPass<'e> {
         let (ids, _) = self.ids.as_ref().expect("fitted before the world pass");
         let name = if clear {
             "Visibility IDs"
         } else {
             "Visibility IDs after culling"
         };
-        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Horizon visibility buffer"),
-            timestamp_writes: timing.and_then(|t| t.writes(name)),
+            timestamp_writes: timing.as_deref_mut().and_then(|t| t.writes(name)),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: ids,
                 resolve_target: None,
@@ -272,7 +295,8 @@ impl Visbuffer {
                 stencil_ops: None,
             }),
             ..Default::default()
-        })
+        });
+        super::pack_timing::counted(timing, pass, super::pixel_count(depth), name)
     }
 
     /// Phase 1's solid calls into the IDs, as the normal passes draw them: the opaque

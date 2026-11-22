@@ -5,11 +5,12 @@
 //! icon, name, line, summary, what it may do, downloads, and Install in or Remove from the
 //! instance).
 //!
-//! The mockup's tabs are its sources (Horizon, Modrinth, CurseForge soon); the launcher's page
-//! is by kind (mods and shader packs from Horizon's registry, resource packs and modpacks from
-//! Modrinth), each kind with its sources, so the tabs are the kinds, CurseForge after them as
-//! coming soon. Not in the mockup, kept in its patterns: Show everything, the source switch, the
-//! filters and the sort, which instance or world installs go to (under the search); the
+//! The page is by kind (mods, modpacks, resource packs, shader packs, data packs); each kind
+//! searches its own source (`source_for`), with no source switch. A Java
+//! instance's files are always Modrinth's. Modrinth's Java mods are offered to a Horizon instance
+//! too, each marked Works, Partly or Doesn't run in Horizon. Not in the mockup, kept in its
+//! patterns: Show everything, the filters, which instance or world installs go to (under the
+//! search); the
 //! project's page, its rating and why it runs or not (in the project's card); adding a native mod
 //! from GitHub, the instance's installed list and its native build, imported modpacks and the
 //! install's progress (cards under the two).
@@ -26,7 +27,12 @@ impl Launcher {
     pub(super) fn mods_placeholder(&self) -> SharedString {
         let m = &self.mods;
         let registry = m.source == SourceId::Horizon && m.java.is_none();
-        if registry && m.kind == PackKind::Mod && m.searched && m.text.text().is_empty() {
+        if registry
+            && m.kind == PackKind::Mod
+            && m.searched
+            && m.error.is_none()
+            && m.text.text().is_empty()
+        {
             // Results come in pages: only a last page gives the real count.
             if m.more {
                 return tr("Search Horizon mods").into();
@@ -36,7 +42,9 @@ impl Launcher {
                 &[("count", &m.results.len().to_string())],
             )
             .into()
-        } else if m.source == SourceId::Modrinth {
+        } else if m.source == SourceId::Modrinth
+            && matches!(m.kind, PackKind::ResourcePack | PackKind::Modpack)
+        {
             tr("Search resource packs and modpacks").into()
         } else {
             tr("Search, then Enter").into()
@@ -58,46 +66,55 @@ impl Launcher {
         .pt_0()
         .mb_0();
         let open = self.mods.kind;
-        let mut tabs = div().flex().flex_none().items_center().gap(px(4.));
-        for (kind, label, _) in KINDS
+        let active = KINDS.iter().position(|(k, _, _)| *k == open).unwrap_or(0);
+        let items: Vec<_> = KINDS
             .into_iter()
-            .filter(|&(kind, ..)| SHOWN.contains(&kind) || kind == open)
-        {
-            tabs = tabs.child(
-                small_tab(
-                    SharedString::from(format!("mods-tab-{label}")),
-                    kind == open,
-                    &t,
-                )
-                .child(tr(label).to_string())
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.mods_set_kind(kind);
-                    cx.notify();
-                })),
-            );
-        }
-        // CurseForge: shown, inert, never searched, as in the mockup.
-        tabs = tabs.child(
+            .map(|(kind, label, _)| {
+                small_tab(format!("mods-tab-{label}").into(), kind == open, &t)
+                    .child(tr(label).to_string())
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.mods_set_kind(kind);
+                        cx.notify();
+                    }))
+            })
+            .collect();
+        let tabs = ui::pill_strip(
+            "mods-kinds",
+            active,
+            32.,
+            0.,
+            div().flex().flex_none().items_center().gap(px(4.)),
+            items,
+        )
+        .flex_none();
+        let wide = self.window_width >= crate::glass_home::SIDE_BY_SIDE;
+        let header = if wide {
             div()
                 .flex()
-                .items_center()
-                .gap(px(6.))
-                .h(px(32.))
-                .px(px(12.))
-                .text_size(px(13.))
-                .text_color(white(0.35))
-                .child("CurseForge")
-                .child(tr("soon").to_string()),
-        );
-        let header = div()
-            .flex()
-            .items_end()
-            .justify_between()
-            .gap(px(20.))
-            .pt(px(40.))
-            .mb(px(28.))
-            .child(head.min_w_0())
-            .child(tabs);
+                .flex_row()
+                .items_end()
+                .justify_between()
+                .gap(px(20.))
+                .pt(px(40. - crate::glass::CONTENT_INSET))
+                .mb(px(28.))
+                .child(head.min_w_0())
+                .child(tabs)
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap(px(16.))
+                .pt(px(40. - crate::glass::CONTENT_INSET))
+                .mb(px(28.))
+                .child(head.w_full().min_w_0())
+                .child(
+                    tabs.id("mods-kind-tabs")
+                        .w_full()
+                        .overflow_x_scroll()
+                        .on_scroll(|_, _, cx| cx.stop_propagation()),
+                )
+        };
 
         // A project's own page replaces the two cards, as before.
         if let Some(project) = self.mods_project_page(cx) {
@@ -135,40 +152,53 @@ impl Launcher {
                         ))
                         .child(ui::text(13., FontWeight::NORMAL, 0.7).child(tr("Show everything")))
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.mods.everything = !this.mods.everything;
+                            this.mods.toggle_everything();
                             this.mods_search(0);
                             cx.notify();
                         })),
                 )
             })
-            .when(
-                source_for(self.mods.kind) == SourceId::Modrinth && !java,
-                |d| d.child(div().flex().child(self.mods_source_switch(cx))),
-            )
-            .children((!registry).then(|| self.mods_filters(cx)))
-            .children(registry.then(|| self.mods_sort_bar(cx)))
-            .children(self.mods_target_line(cx));
+            .child(self.mods_filters(cx))
+            .children(self.mods_target_line(cx))
+            .children(self.mods_left_out_note());
+        // The search, and the sort on its right.
+        let search = div()
+            .m(px(4.))
+            .mb(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(div().flex_1().min_w_0().child(self.mods_field(cx)))
+            .child(self.glass_mods_sort(cx));
         let list = crate::glass::plate(radius::PANEL)
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
             .p(px(8.))
-            .child(div().m(px(4.)).mb(px(8.)).child(self.mods_field(cx)))
+            .child(search)
             .child(extras)
             .child(self.glass_mods_list(cx));
-        let detail = self.glass_mod_detail(&instance, cx);
+        // The card stays in view as the list scrolls (`lg:sticky lg:top-0`, `sticky.rs`).
+        let detail = self.glass_mod_detail(&instance, cx).map(|d| {
+            let down = self.mods_sticky.offset(&self.content_scroll.handle);
+            d.flex_none()
+                .when(wide, |d| d.w(px(DETAIL)).top(px(down)))
+                .when(!wide, |d| d.w_full())
+                .child(self.mods_sticky.panel())
+        });
         let cards = div()
+            .relative()
             .flex()
-            .items_start()
-            .gap(px(10.))
+            .when(wide, |d| d.flex_row().items_start().gap(px(10.)))
+            .when(!wide, |d| d.flex_col().gap(px(10.)))
+            .child(self.mods_sticky.row(&self.content_scroll.handle))
             .child(list)
-            .children(detail.map(|d| d.flex_none().w(px(DETAIL))));
+            .children(detail);
 
         // What the mockup doesn't have, as cards under the two.
         let card = |inner: Div| crate::glass::plate(radius::PANEL).p(px(20.)).child(inner);
         let mut more: Vec<Div> = Vec::new();
-        more.extend(self.native_notice(cx).map(card));
         more.extend(self.mods_busy_plate().into_iter().map(card));
         if self.mods.kind == PackKind::Modpack {
             more.push(card(self.imported_packs(cx)));
@@ -187,18 +217,181 @@ impl Launcher {
         )
     }
 
+    /// The "Sort by" dropdown beside the search: as tall and as round as the search, white at
+    /// 7 % like it; the choices on a glass popover under it, the chosen one ticked.
+    fn glass_mods_sort(&mut self, cx: &mut Context<Self>) -> Div {
+        let t = self.theme;
+        let sorts = self.mods_sorts();
+        let current = self.mods.browse.filters.sort;
+        // A sort the source can't do (Follows, picked on Modrinth) reads as the default.
+        let shown = sorts
+            .iter()
+            .find(|(value, _)| *value == current)
+            .or(sorts.first())
+            .map(|(value, _)| *value);
+        let name = sorts
+            .iter()
+            .find(|(value, _)| Some(*value) == shown)
+            .map_or("", |(_, label)| *label);
+        let open = self.mods.browse.sort_menu;
+        let button = keyboard(
+            div()
+                .id("mods-sort")
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(8.))
+                .h(px(44.))
+                .px(px(14.))
+                .rounded(px(12.))
+                .bg(white(if open { 0.11 } else { 0.07 }))
+                .hover(|s| s.bg(white(0.11)))
+                .cursor_pointer()
+                .font_family(horizon_theme::glass::FONT)
+                .text_size(px(14.))
+                .text_color(white(ink::FULL))
+                .child(trf("Sort by: {order}", &[("order", tr(name))]))
+                .child(
+                    ui::icon("arrow-down-01", 16., white(ink::NOTE)).with_transformation(
+                        gpui::Transformation::rotate(gpui::radians(if open {
+                            std::f32::consts::PI
+                        } else {
+                            0.
+                        })),
+                    ),
+                )
+                .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                    if this.closed_by_this_press(event) {
+                        return;
+                    }
+                    this.mods.browse.sort_menu = !this.mods.browse.sort_menu;
+                    cx.notify();
+                })),
+            &t,
+        );
+        let mut wrap = div().relative().flex_none().child(button);
+        if open {
+            let mut menu = ui::popover(220.)
+                .id("mods-sort-menu")
+                .occlude()
+                .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.mods.browse.sort_menu = false;
+                    this.menu_closed_at = Some(event.position);
+                    cx.notify();
+                }));
+            for &(value, label) in &sorts {
+                menu = menu.child(
+                    ui::pick_row(
+                        SharedString::from(format!("mods-sort-pick-{label}")),
+                        tr(label).to_string(),
+                        Some(value) == shown,
+                        &t,
+                    )
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.mods.browse.sort_menu = false;
+                            this.mods_filter(|f| f.sort = value);
+                            cx.notify();
+                        },
+                    )),
+                );
+            }
+            wrap = wrap.child(
+                gpui::deferred(div().absolute().top(px(52.)).right_0().child(menu))
+                    .with_priority(1),
+            );
+        }
+        wrap
+    }
+
+    /// A quiet line under Horizon's mod list when the registry holds mods this Horizon can't
+    /// use yet (made for the earlier mod system), with how many.
+    fn mods_left_out_note(&self) -> Option<Div> {
+        let m = &self.mods;
+        if m.source != SourceId::Horizon || m.kind != PackKind::Mod || m.java_for(m.kind).is_some()
+        {
+            return None;
+        }
+        let count = browser::horizon::projects_left_out().filter(|n| *n > 0)?;
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(4.))
+                .child(ui::icon("information-circle", 14., white(ink::QUIET)))
+                .child(ui::text(13., FontWeight::NORMAL, ink::QUIET).child(trf(
+                    "{count} more mods made for Horizon's earlier mod system are hidden until their authors update them.",
+                    &[("count", &count.to_string())],
+                ))),
+        )
+    }
+
     /// The search's results as the mockup's rows (`ROW`): a click picks one for the card beside.
     fn glass_mods_list(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let m = &self.mods;
         if let Some(e) = &m.error {
-            return ui::text(14., FontWeight::NORMAL, 0.6)
-                .px(px(16.))
-                .py(px(24.))
-                .child(e.clone());
+            // A failed search stays as an amber card: what happened in plain words, Try again,
+            // and the error's own words on request.
+            let details = m.error_details;
+            let horizon = m.source == SourceId::Horizon && m.java_for(m.kind).is_none();
+            let what = if horizon {
+                tr("Couldn't load Horizon's mod list.")
+            } else {
+                tr("The search didn't go through.")
+            };
+            let mut actions = div().flex().flex_wrap().gap(px(8.)).child(
+                button("mods-retry", "Try again", Kind::Secondary, &t).on_click(cx.listener(
+                    |this, _: &ClickEvent, _, cx| {
+                        this.mods_search(0);
+                        cx.notify();
+                    },
+                )),
+            );
+            actions = actions.child(
+                button(
+                    "mods-error-details",
+                    if details { "Hide details" } else { "Details" },
+                    Kind::Ghost,
+                    &t,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.mods.error_details = !this.mods.error_details;
+                    cx.notify();
+                })),
+            );
+            return div()
+                .flex()
+                .items_start()
+                .gap(px(10.))
+                .m(px(8.))
+                .px(px(14.))
+                .py(px(12.))
+                .rounded(px(radius::ROW))
+                .border_1()
+                .border_color(ui::warn())
+                .child(ui::dot(ui::Tone::Warn).mt(px(6.)))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(8.))
+                        .child(ui::text(14., FontWeight::MEDIUM, ink::FULL).child(what))
+                        .children(details.then(|| {
+                            ui::text(12.5, FontWeight::NORMAL, ink::QUIET).child(e.clone())
+                        }))
+                        .child(actions),
+                );
         }
-        if m.results.is_empty() {
-            let line = if m.searching || !m.searched {
+        let shown = m.shown();
+        if shown.is_empty() {
+            let line = if !m.results.is_empty() {
+                tr("Nothing found that runs in Horizon. Show everything lists the rest.")
+                    .to_string()
+            } else if m.searching || !m.searched {
                 tr("Searching…").to_string()
             } else if let Some(target) = m.java_for(m.kind) {
                 trf(
@@ -218,22 +411,82 @@ impl Launcher {
                 tr("Nothing found that runs in Horizon. Show everything lists the rest.")
                     .to_string()
             };
-            return ui::text(14., FontWeight::NORMAL, 0.6)
+            let line = ui::text(14., FontWeight::NORMAL, 0.6)
                 .px(px(16.))
                 .py(px(24.))
                 .child(line);
+            return self.glass_mods_more(div().flex().flex_col().child(line), cx);
         }
         let picked = self.mods_picked().map(|p| p.id.clone());
-        let mut list = div().flex().flex_col();
-        for i in 0..self.mods.results.len() {
-            let p = self.mods.results[i].clone();
+        // Registry pages add up behind More: only the rows near the view are built (`cull`).
+        let (rows, scroll) = (
+            self.mods.results_list.clone(),
+            self.content_scroll.handle.clone(),
+        );
+        let total = shown.len();
+        let row = |i: usize| {
+            let p = self.mods.results[shown[i]].clone();
             let icon = self.mods_icon(&p, 40.);
             let m = &self.mods;
             let installed = m.entry(&p).is_some();
             let busy = m.busy.as_ref().is_some_and(|b| b.0 == p.id);
+            let checking = m.checking(&p);
+            let can_install =
+                !installed && !checking && m.busy.is_none() && m.support(&p).installable();
+            let action: AnyElement = if installed {
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(8.))
+                    .child(ui::dot(ui::Tone::Live))
+                    .child(
+                        ui::text(13., FontWeight::MEDIUM, ink::FULL)
+                            .text_color(ui::live())
+                            .child(tr("Installed")),
+                    )
+                    .into_any_element()
+            } else if busy || checking || m.support(&p).installable() {
+                let label = if installed {
+                    tr("Installed")
+                } else if checking {
+                    tr("Checking…")
+                } else if busy {
+                    tr("Installing…")
+                } else if p.kind == PackKind::Modpack {
+                    tr("Import as an instance")
+                } else {
+                    tr("Install")
+                };
+                let known = p.clone();
+                ui::quiet(
+                    SharedString::from(format!("mods-row-install-{}", p.id)),
+                    label,
+                    32.,
+                    &t,
+                )
+                .flex_none()
+                .when(!can_install, |d| d.opacity(0.5).cursor_default())
+                .when(can_install, |d| {
+                    d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.mods_install(known.source, known.id.clone(), Some(known.clone()));
+                        cx.notify();
+                    }))
+                })
+                .into_any_element()
+            } else {
+                div().flex_none().w(px(20.)).into_any_element()
+            };
             // The registry's rows end with downloads, the others' with how they run (`compat`).
             let right = if p.source == SourceId::Horizon {
-                ui::text(13., FontWeight::NORMAL, 0.5).child(count(p.downloads).to_uppercase())
+                ui::text(13., FontWeight::NORMAL, 0.5)
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .children(super::mods_page::github_stars(&p.id, &t))
+                    .child(count(p.downloads).to_uppercase())
             } else {
                 let support = m.support(&p);
                 let tone = match support {
@@ -246,70 +499,70 @@ impl Launcher {
                     .child(tr(support.label()))
             };
             let id = p.id.clone();
-            list = list.child(
-                ui::row(
-                    SharedString::from(format!("mods-row-{}", p.id)),
-                    picked.as_deref() == Some(p.id.as_str()),
-                    12.,
-                    &t,
-                )
-                .px(px(12.))
-                .py(px(10.))
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(40.))
-                        .rounded(px(8.))
-                        .overflow_hidden()
-                        .child(icon),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .flex()
-                                .items_baseline()
-                                .gap(px(8.))
-                                .min_w_0()
-                                .child(
-                                    ui::text(14., FontWeight::MEDIUM, ink::FULL)
-                                        .truncate()
-                                        .child(p.title.clone()),
-                                )
-                                .child(ui::text(13., FontWeight::NORMAL, 0.5).truncate().child(
-                                    match p.kind {
-                                        PackKind::Mod | PackKind::Shader => p.author.clone(),
-                                        _ => tr(kind_name(p.kind)).to_string(),
-                                    },
-                                )),
-                        )
-                        .child(
-                            ui::text(13., FontWeight::NORMAL, 0.6)
-                                .truncate()
-                                .child(p.summary.clone()),
-                        ),
-                )
-                .child(right.flex_none())
-                .child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .justify_center()
-                        .w(px(20.))
-                        .when(installed, |d| d.child(ui::icon("tick-02", 17., ui::live())))
-                        .when(busy && !installed, |d| d.child(ui::dot(ui::Tone::Busy))),
-                )
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.mods.picked = Some(id.clone());
-                    this.mods.confirm_remove = None;
-                    cx.notify();
-                })),
-            );
-        }
+            ui::row(
+                SharedString::from(format!("mods-row-{}", p.id)),
+                picked.as_deref() == Some(p.id.as_str()),
+                12.,
+                &t,
+            )
+            .px(px(12.))
+            .py(px(10.))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(40.))
+                    .rounded(px(8.))
+                    .overflow_hidden()
+                    .child(icon),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap(px(8.))
+                            .min_w_0()
+                            .child(
+                                ui::text(14., FontWeight::MEDIUM, ink::FULL)
+                                    .truncate()
+                                    .child(p.title.clone()),
+                            )
+                            .child(ui::text(13., FontWeight::NORMAL, 0.5).truncate().child(
+                                match p.kind {
+                                    PackKind::Mod | PackKind::Shader => p.author.clone(),
+                                    _ => tr(kind_name(p.kind)).to_string(),
+                                },
+                            )),
+                    )
+                    .child(
+                        ui::text(13., FontWeight::NORMAL, 0.6)
+                            .truncate()
+                            .child(p.summary.clone()),
+                    ),
+            )
+            .child(right.flex_none())
+            .child(action)
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.mods.picked = Some(id.clone());
+                this.mods.confirm_remove = None;
+                cx.notify();
+            }))
+        };
+        let list = div()
+            .flex()
+            .flex_col()
+            .child(rows.column(&scroll, total, 0., |_| false, row));
+        self.glass_mods_more(list, cx)
+    }
+
+    /// The list's More, under `list` while the source has more pages.
+    fn glass_mods_more(&self, mut list: Div, cx: &mut Context<Self>) -> Div {
+        let t = self.theme;
         if self.mods.more {
             let searching = self.mods.searching;
             let offset = self.mods.results.len();
@@ -332,12 +585,14 @@ impl Launcher {
     /// The picked result, else the first; when a search finds nothing, the card shown last stays
     /// (the mockup's detail keeps its mod).
     fn mods_picked(&mut self) -> Option<Project> {
+        let shown = self.mods.shown();
         let m = &mut self.mods;
+        let mut listed = shown.iter().map(|&i| &m.results[i]);
         let found = m
             .picked
             .as_ref()
-            .and_then(|id| m.results.iter().find(|p| &p.id == id))
-            .or(m.results.first())
+            .and_then(|id| listed.clone().find(|p| &p.id == id))
+            .or(listed.next())
             .cloned();
         match found {
             Some(p) => {
@@ -366,7 +621,9 @@ impl Launcher {
         if !p.author.is_empty() {
             by.push(trf("by {author}", &[("author", &p.author)]));
         }
-        by.push(trf("from {source}", &[("source", p.source.label())]));
+        if let Some(source) = p.source.shown_for(&p.id) {
+            by.push(trf("from {source}", &[("source", source)]));
+        }
         if !p.license.is_empty() {
             by.push(p.license.clone());
         }
@@ -380,6 +637,7 @@ impl Launcher {
             .get(&p.id)
             .filter(|_| p.source == SourceId::Horizon)
             .map(|lines| lines.join(" · "));
+        let registry = about.is_some();
 
         // The action: Remove (then Remove for good), Install or Import, or why not.
         let button: AnyElement = if let Some(e) = &entry {
@@ -520,7 +778,7 @@ impl Launcher {
                     div().flex().justify_center().mt(px(12.)).child(
                         ui::link(
                             SharedString::from(format!("mods-detail-page-{}", p.id)),
-                            tr("Its page"),
+                            tr("Open mod page"),
                         )
                         .on_click(cx.listener(
                             move |this, _: &ClickEvent, _, cx| {
@@ -529,37 +787,27 @@ impl Launcher {
                             },
                         )),
                     ),
-                ),
+                )
+                // A registry mod: the rules it was listed under.
+                .when(registry, |d| {
+                    d.child(
+                        div().flex().justify_center().mt(px(4.)).child(
+                            ui::link("mods-detail-policy", tr("Horizon's mod policy"))
+                                .on_click(|_, _, cx| cx.open_url(browser::horizon::POLICY)),
+                        ),
+                    )
+                }),
         )
     }
 }
 
 /// The mockup's `Tabs` at size `sm`: 32 px, 13 px, white at 12 % on the open one.
+/// A tab of the Mods page's small strips: a [`ui::pill_tab`] 32 tall at 13 px.
 fn small_tab(id: SharedString, open: bool, t: &theme::Theme) -> Stateful<Div> {
-    keyboard(
-        div()
-            .id(id)
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(6.))
-            .h(px(32.))
-            .px(px(12.))
-            .rounded(px(10.))
-            .cursor_pointer()
-            .font_family(horizon_theme::glass::FONT)
-            .text_size(px(13.))
-            .when(open, |d| {
-                d.bg(white(0.12))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(white(ink::FULL))
-            })
-            .when(!open, |d| {
-                d.text_color(white(0.7))
-                    .hover(|s| s.text_color(white(ink::FULL)))
-            }),
-        t,
-    )
+    ui::pill_tab(id, open, 32., t)
+        .flex_none()
+        .gap(px(6.))
+        .text_size(px(13.))
 }
 
 /// One project's kind, for a Modrinth result's second word (`Resource pack`).

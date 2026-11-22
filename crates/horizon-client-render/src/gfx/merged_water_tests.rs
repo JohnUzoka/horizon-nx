@@ -62,7 +62,7 @@ fn merged_water_draws_as_the_quads_it_merged() {
     eprintln!("merged water GPU: {}", adapter.get_info().name);
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None,
-        source: wgpu::ShaderSource::Wgsl(include_str!("../terrain.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(super::terrain_shader().into()),
     });
     // gfx.rs's terrain bindings.
     let vf = wgpu::ShaderStages::VERTEX_FRAGMENT;
