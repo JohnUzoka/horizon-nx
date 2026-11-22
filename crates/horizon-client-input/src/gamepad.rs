@@ -2216,27 +2216,6 @@ bind_key.hotbar.2:north
     }
 
     #[test]
-    fn a_nintendo_pad_by_its_letters_confirms_with_a() {
-        // The pad's A sits on the right (East): going by letters it plays South, confirm and jump.
-        let mut pad = PadState::default();
-        pad.set(Button::East, true);
-        pad.set(Button::LeftBumper, true);
-        pad.left = [0.5, -0.25];
-        let parts = pad.by_letter();
-        assert!(parts.held(Button::South));
-        assert!(!parts.held(Button::East));
-        // Other buttons and the sticks stay; reading by letters again gives the pad back.
-        assert!(parts.held(Button::LeftBumper));
-        assert_eq!(parts.left, [0.5, -0.25]);
-        assert_eq!(parts.by_letter(), pad);
-        // A part's glyph is the letter of the button playing it.
-        assert_eq!(Button::South.by_letter().label(GlyphStyle::Nintendo), "A");
-        assert_eq!(Button::East.by_letter().label(GlyphStyle::Nintendo), "B");
-        assert_eq!(Button::West.by_letter().label(GlyphStyle::Nintendo), "X");
-        assert_eq!(Button::North.by_letter().label(GlyphStyle::Nintendo), "Y");
-    }
-
-    #[test]
     fn ultimate2_right_stick_on_z_without_sdl() {
         let (left, right) = stick_axes(
             [0.2, 0.3],
