@@ -35,6 +35,12 @@ pub(super) enum Hint {
     SocialInteractions,
 }
 
+impl Hint {
+    fn names_keys_or_mouse(self) -> bool {
+        matches!(self, Self::Move | Self::Look | Self::PunchTree | Self::OpenInventory)
+    }
+}
+
 /// The observations needed on the first tick of each step.
 #[derive(Default)]
 pub(super) struct Previous {
@@ -486,7 +492,11 @@ impl super::Game<'_> {
         batch: &mut horizon_client::hud::HudBatch,
         hidden: bool,
     ) {
-        let wanted = self.tutorial.hint();
+        let pad = cfg!(target_os = "horizon") || self.pad.in_use;
+        let wanted = self
+            .tutorial
+            .hint()
+            .filter(|(hint, _)| !(pad && hint.names_keys_or_mouse()));
         if wanted.map(|(hint, _)| hint) != self.tutorial.cancelled_hint {
             self.tutorial.cancelled_hint = None;
         }

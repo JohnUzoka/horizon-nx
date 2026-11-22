@@ -18,6 +18,24 @@ data folder in `run/<home key>/game/`; installed versions remain intact. Opening
 world to other machines can still require an initial Windows Firewall permission.
 The launcher does not create firewall rules or change network-profile settings.
 
+## Switch: loading and hardware tests
+
+Launch the NRO in application mode, not from Album. Horizon draws the first wordmark with its
+renderer, not an early libnx framebuffer. Its Switch loading overlay keeps the wordmark and shows
+the stage and progress. Menu input does not cancel FastLoad: the CPU stays boosted until world
+entry, but the GPU runs at its lowest clock during loading, so navigating menus can be slower.
+`HORIZON_NX_CPU_BOOST=0` in `env.txt` beside the NRO disables the boost.
+
+For local testing, hbmenu's [netloader](https://switchbrew.org/wiki/Homebrew_Menu#Netloader)
+accepts `nxlink` uploads after you press Y. Use a test location containing `client.txt` and
+the matching prepared `resources/`. Netloader deploys an NRO; it does not provide remote
+controller input. Use the same save copy, camera, settings, shader selection, clocks and
+handheld/docked mode when comparing builds.
+
+The in-game Microsoft sign-in needs a Minecraft-services-approved Azure public client ID,
+`HORIZON_MSA_CLIENT_ID`, supplied at build time or in `env.txt` before launch. Do not put a
+client secret, account token, or device code in that file.
+
 ## musl Linux: manual installation
 
 On x86-64 musl distributions, download `horizon-linux-musl-x86_64.tar.gz` from the

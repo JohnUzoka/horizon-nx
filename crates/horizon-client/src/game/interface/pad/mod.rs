@@ -865,6 +865,7 @@ impl Game<'_> {
         if yaw == 0.0 && pitch == 0.0 {
             return;
         }
+        self.tutorial.mouse(yaw / 0.15, pitch / 0.15);
         self.look_turn(yaw / 0.15, pitch / 0.15);
     }
 

@@ -365,7 +365,7 @@ pub fn draw(
 ) {
     let (x_center, y_center) = ((batch.width as i32) / 2, (batch.height as i32) / 2);
     let text_top = match status {
-        Some(status) => {
+        Some(status) if !cfg!(target_os = "horizon") => {
             // extractChunksForRendering(size 2, margin 0).
             let diameter = STATUS_RADIUS * 2 + 1;
             let start = (x_center - diameter, y_center - diameter);
@@ -378,7 +378,7 @@ pub fn draw(
             }
             y_center - STATUS_RADIUS * 2 - 9 * 3
         }
-        None => y_center - 50,
+        _ => y_center - 50,
     };
     let text = Text::translate("multiplayer.downloadingTerrain", &[]);
     let tw = atlas.font.width_text(&text) as i32;

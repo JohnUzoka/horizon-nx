@@ -272,7 +272,12 @@ static TABLE: LazyLock<Vec<Def>> = LazyLock::new(|| {
         u("panoramaScrollSpeed", 1.0),
         b("telemetryOptInExtra", false),
         pb("onboardAccessibility", true),
-        i("menuBackgroundBlurriness", 0, 10, 5),
+        i(
+            "menuBackgroundBlurriness",
+            0,
+            10,
+            if cfg!(target_os = "horizon") { 0 } else { 5 },
+        ),
         pb("startedCleanly", true),
         n("musicToast", MUSIC_TOAST, 0),
         n("musicFrequency", MUSIC_FREQUENCY, 0),
