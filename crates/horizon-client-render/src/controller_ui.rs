@@ -110,6 +110,13 @@ pub struct Setting {
 /// What the chosen value does, for a setting whose values each do something different.
 fn choice_description(opt: Opt, pad: &PadSettings) -> Option<&'static str> {
     Some(match opt {
+        Opt::PadGyro => match pad.gyro {
+            gamepad::GyroMode::Off => "horizon.options.gyro.off.about",
+            gamepad::GyroMode::Always => "horizon.options.gyro.always.about",
+            gamepad::GyroMode::Attack => "horizon.options.gyro.attack.about",
+            gamepad::GyroMode::Use => "horizon.options.gyro.use.about",
+            gamepad::GyroMode::AttackOrUse => "horizon.options.gyro.attack_or_use.about",
+        },
         Opt::PadGameplayGuide => match pad.guide_detail {
             gamepad::GuideDetail::Full => {
                 "Shows what your buttons do right now, in play and in inventories."
@@ -198,6 +205,30 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
             text: BIND_TEXT,
         })
         .collect();
+    let mut look = vec![
+        option(
+            Opt::PadLookSensitivity,
+            "How fast the right stick turns the view.",
+        ),
+        option(
+            Opt::PadInvertX,
+            "Turn the view the other way, left and right.",
+        ),
+        option(Opt::PadInvertY, "Turn the view the other way, up and down."),
+        option(
+            Opt::PadLookDeadzone,
+            "How far the right stick moves before the view turns. Raise it if the view drifts.",
+        ),
+    ];
+    if cfg!(target_os = "horizon") {
+        look.extend([
+            option(Opt::PadGyro, "horizon.options.gyro.about"),
+            option(
+                Opt::PadGyroSensitivity,
+                "horizon.options.gyro_sensitivity.about",
+            ),
+        ]);
+    }
     vec![
         (
             Page::General,
@@ -215,24 +246,7 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                         ),
                     ],
                 ),
-                (
-                    "Look",
-                    vec![
-                        option(
-                            Opt::PadLookSensitivity,
-                            "How fast the right stick turns the view.",
-                        ),
-                        option(
-                            Opt::PadInvertX,
-                            "Turn the view the other way, left and right.",
-                        ),
-                        option(Opt::PadInvertY, "Turn the view the other way, up and down."),
-                        option(
-                            Opt::PadLookDeadzone,
-                            "How far the right stick moves before the view turns. Raise it if the view drifts.",
-                        ),
-                    ],
-                ),
+                ("Look", look),
                 (
                     "Movement",
                     vec![
@@ -787,6 +801,13 @@ mod tests {
         ] {
             assert!(items.contains(&Item::Option(opt)), "{opt:?}");
         }
+        for opt in [Opt::PadGyro, Opt::PadGyroSensitivity] {
+            assert_eq!(
+                items.contains(&Item::Option(opt)),
+                cfg!(target_os = "horizon"),
+                "{opt:?}",
+            );
+        }
         for setting in [
             Switch::BlockVibration,
             Switch::SplitVibration,
@@ -1170,6 +1191,7 @@ mod tests {
             (Opt::PadLightbar, 3),
             (Opt::PadRadialMode, 2),
             (Opt::PadRadialStick, 3),
+            (Opt::PadGyro, 5),
         ] {
             let setting = option(opt, "the fixed sentence");
             let mut seen = Vec::new();
@@ -1210,6 +1232,12 @@ mod tests {
                     lang::get(choice_description(opt, &settings.controller).unwrap());
                     opt.cycle(&mut settings, false, FB);
                 }
+            }
+            lang::get("horizon.options.gyro.about");
+            lang::get("horizon.options.gyro_sensitivity.about");
+            for gyro in gamepad::GyroMode::ALL {
+                settings.controller.gyro = gyro;
+                lang::get(choice_description(Opt::PadGyro, &settings.controller).unwrap());
             }
             let context = Context::default();
             for which in [

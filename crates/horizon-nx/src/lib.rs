@@ -33,6 +33,8 @@ mod clocks;
 mod keyboard;
 #[cfg(target_os = "horizon")]
 mod main_stack;
+#[cfg(target_os = "horizon")]
+mod motion;
 
 pub use compat::{
     ThreadCorePolicy, set_thread_core_policy, set_thread_logging, thread_core_policy,
@@ -50,6 +52,8 @@ pub use lifecycle::{
     flush_logs, init_horizon_services, process_applet_messages, register_release_hook,
     suspend_until_out_of_background,
 };
+#[cfg(target_os = "horizon")]
+pub use motion::{Motion, MotionSensor};
 #[cfg(target_os = "horizon")]
 pub use logging::nro_path;
 pub use logging::{flush_switch_logs, init_switch_logging, nro_dir};

@@ -88,6 +88,8 @@ pub(super) struct Pads {
     connections: Vec<Connection>,
     /// The right stick's turn still easing out under the cinematic camera.
     look: gamepad::SmoothLook,
+    #[cfg(target_os = "horizon")]
+    motion: horizon_nx::MotionSensor,
     /// The cursor the pad drives in menus.
     pub(super) menu: super::pad_menu::MenuCursor,
     /// The radial menu while its opener is held, and the page it stays on.
@@ -338,6 +340,8 @@ impl Pads {
     /// The radial menu closes with it, in `Game::pad_player_replaced`.
     pub(super) fn player_replaced(&mut self) {
         self.health.forget();
+        #[cfg(target_os = "horizon")]
+        self.motion.stop();
     }
 
     /// Read the startup title's hardware pad before `Game` exists, without gameplay
@@ -517,6 +521,8 @@ impl Game<'_> {
             }
         }
         self.pad_menu_frame(event_loop);
+        #[cfg(target_os = "horizon")]
+        self.pad_stop_ineligible_gyro();
     }
 
     fn pad_edge(&mut self, event_loop: &dyn EventLoopCtl, button: Button, down: bool) {
@@ -537,6 +543,8 @@ impl Game<'_> {
 
     /// End held actions and captures before another context receives input.
     fn pad_cancel_inputs(&mut self, event_loop: &dyn EventLoopCtl) {
+        #[cfg(target_os = "horizon")]
+        self.pad_stop_gyro();
         // Before the releases below: a cancelled press must not click, a cancelled trigger
         // change the recipe book's category as it comes up, nor a cancelled radial menu
         // commit when its opener comes up.
@@ -828,7 +836,7 @@ impl Game<'_> {
         gamepad::move_vector(self.pad.state.left, settings.move_deadzone)
     }
 
-    /// The right stick turns the view, once per frame (`Entity.turn`).
+    /// The right stick and the Switch's gyro turn the view, once per frame (`Entity.turn`).
     pub(super) fn pad_look(&mut self, seconds: f32) {
         let settings = &self.settings.controller;
         if !settings.enabled
@@ -837,22 +845,83 @@ impl Game<'_> {
             || !self.pad_focused()
             || (self.pad_radial_captures() && self.pad_radial_selects(1))
         {
+            #[cfg(target_os = "horizon")]
+            self.pad_stop_gyro();
             return;
         }
         // A long frame (a hitch) must not spin the view.
         let seconds = seconds.min(0.1);
-        let turn = gamepad::look_delta(
-            self.pad.state.right,
-            settings,
-            seconds,
-            self.camera_type.is_first_person() && self.scoping(),
-        );
+        let scoping = self.camera_type.is_first_person() && self.scoping();
+        let turn = gamepad::look_delta(self.pad.state.right, settings, seconds, scoping);
         // The cinematic camera eases the stick's turn in and out, as it does the mouse's.
         let (yaw, pitch) = self.pad.look.turn(turn, seconds, self.smooth_camera);
+        #[cfg(target_os = "horizon")]
+        let (yaw, pitch) = {
+            // Keep motion separate from the stick's cinematic easing: it must not continue
+            // turning the view after a trigger is released or gyro loses eligibility.
+            let (gyro_yaw, gyro_pitch) = self.pad_gyro(seconds, scoping);
+            (yaw + f64::from(gyro_yaw), pitch + f64::from(gyro_pitch))
+        };
         if yaw == 0.0 && pitch == 0.0 {
             return;
         }
         self.look_turn(yaw / 0.15, pitch / 0.15);
+    }
+
+    #[cfg(target_os = "horizon")]
+    fn pad_gyro_eligible(&self) -> bool {
+        let settings = &self.settings.controller;
+        settings.enabled
+            && settings.gyro != gamepad::GyroMode::Off
+            && self.focused
+            && self.pad.in_use
+            && self.pad.device.is_some()
+            && !self.options.split_guest
+            && !self.scripted_run()
+            && !self.pad_in_menu()
+            && self.player.is_some()
+            && !self.pause
+            && self.pending_save.is_none()
+            && self.pad_capture().is_none()
+            && settings.gyro.aims(|action| {
+                settings.binding(action).is_some_and(|button| {
+                    // Respect the routed press, but not a release gameplay delayed for a tick.
+                    self.pad.edges.is_held(button)
+                        && self.pad.actions[button as usize].contains(&action)
+                })
+            })
+    }
+
+    /// Stop the sensor and forget the old gravity estimate, including on world or focus loss.
+    #[cfg(target_os = "horizon")]
+    pub(in crate::game) fn pad_stop_gyro(&mut self) {
+        self.pad.motion.stop();
+    }
+
+    /// Reconcile eligibility even when a transition doesn't render another gameplay frame.
+    #[cfg(target_os = "horizon")]
+    pub(in crate::game) fn pad_stop_ineligible_gyro(&mut self) {
+        if self.pad.motion.is_running() && !self.pad_gyro_eligible() {
+            self.pad_stop_gyro();
+        }
+    }
+
+    #[cfg(target_os = "horizon")]
+    fn pad_gyro(&mut self, seconds: f32, scoping: bool) -> (f32, f32) {
+        if !self.pad_gyro_eligible() {
+            self.pad_stop_gyro();
+            return (0.0, 0.0);
+        }
+        let Some(motion) = self.pad.motion.sample(seconds) else {
+            return (0.0, 0.0);
+        };
+        gamepad::gyro_delta(
+            motion.rotation,
+            motion.up,
+            &self.settings.controller,
+            seconds,
+            scoping,
+        )
     }
 
     /// Vibrate the active pad, when vibration is on and the pad is the one

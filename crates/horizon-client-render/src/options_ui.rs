@@ -331,6 +331,8 @@ impl Opt {
             Opt::PadAdaptiveTriggers => "horizon.options.adaptive_triggers",
             Opt::PadLightbar => "horizon.options.lightbar",
             Opt::PadLookSensitivity => "horizon.options.look_sensitivity",
+            Opt::PadGyro => "horizon.options.gyro",
+            Opt::PadGyroSensitivity => "horizon.options.gyro_sensitivity",
             Opt::PadPointerSpeed => "horizon.options.pointer_speed",
             Opt::PadScrollSpeed => "horizon.options.scroll_speed",
             Opt::PadRepeatDelay => "horizon.options.repeat_delay",
@@ -429,6 +431,7 @@ impl Opt {
             Opt::ChatHeightUnfocused => Kind::Slider(s.chat_height_unfocused),
             Opt::ChatLineSpacing => Kind::Slider(s.chat_line_spacing),
             Opt::PadLookSensitivity => Kind::Slider(s.controller.look_sensitivity),
+            Opt::PadGyroSensitivity => Kind::Slider(s.controller.gyro_sensitivity),
             Opt::PadPointerSpeed => unit(s.controller.pointer_speed, 0.25, 3.0),
             Opt::PadScrollSpeed => unit(s.controller.scroll_speed, 1.0, 36.0),
             Opt::PadRepeatDelay => unit(s.controller.repeat_delay, 0.1, 1.0),
@@ -715,6 +718,7 @@ impl Opt {
                 ),
             ),
             Opt::PadLookSensitivity => percent(c, 2.0 * s.controller.look_sensitivity),
+            Opt::PadGyroSensitivity => percent(c, 2.0 * s.controller.gyro_sensitivity),
             Opt::PadPointerSpeed => percent(c, s.controller.pointer_speed),
             Opt::PadScrollSpeed => percent(c, s.controller.scroll_speed / 12.0),
             Opt::PadRepeatDelay | Opt::PadRepeatInterval => generic(
@@ -908,6 +912,13 @@ impl Opt {
             }),
             Opt::PadInvertX => on_off(s.controller.invert_x),
             Opt::PadInvertY => on_off(s.controller.invert_y),
+            Opt::PadGyro => tr(match s.controller.gyro {
+                gamepad::GyroMode::Off => "options.off",
+                gamepad::GyroMode::Always => "horizon.options.gyro.always",
+                gamepad::GyroMode::Attack => "horizon.options.gyro.attack",
+                gamepad::GyroMode::Use => "horizon.options.gyro.use",
+                gamepad::GyroMode::AttackOrUse => "horizon.options.gyro.attack_or_use",
+            }),
             Opt::PadCraftOnServers => on_off(s.controller.craft_on_servers),
             Opt::PadToggleSneak => tr(if s.controller.toggle_sneak {
                 "options.key.toggle"
@@ -1019,6 +1030,7 @@ impl Opt {
             Opt::ChatHeightUnfocused => s.chat_height_unfocused = v,
             Opt::ChatLineSpacing => s.chat_line_spacing = v,
             Opt::PadLookSensitivity => s.controller.look_sensitivity = v,
+            Opt::PadGyroSensitivity => s.controller.gyro_sensitivity = v,
             Opt::PadPointerSpeed => s.controller.pointer_speed = step(25.0, 300.0) / 100.0,
             Opt::PadScrollSpeed => s.controller.scroll_speed = step(1.0, 36.0),
             Opt::PadRepeatDelay => s.controller.repeat_delay = step(100.0, 1000.0) / 1000.0,
@@ -1237,6 +1249,14 @@ impl Opt {
             }
             Opt::PadInvertX => s.controller.invert_x = !s.controller.invert_x,
             Opt::PadInvertY => s.controller.invert_y = !s.controller.invert_y,
+            Opt::PadGyro => {
+                let all = gamepad::GyroMode::ALL;
+                let i = all
+                    .iter()
+                    .position(|m| *m == s.controller.gyro)
+                    .unwrap_or(0) as u8;
+                s.controller.gyro = all[usize::from(next(i, all.len() as u8))];
+            }
             Opt::PadCraftOnServers => {
                 s.controller.craft_on_servers = !s.controller.craft_on_servers
             }

@@ -161,6 +161,10 @@ impl Game<'_> {
         if !ours {
             return;
         }
+        #[cfg(target_os = "horizon")]
+        if matches!(&event, WindowEvent::Focused(false)) {
+            self.pad_stop_gyro();
+        }
         if let Some(modifiers) = held_modifiers(origin, self.unclaimed_window, &event) {
             self.unclaimed_modifiers = Some(modifiers);
         }
@@ -248,6 +252,8 @@ impl Game<'_> {
         }
         // A title screen the event asked for opens before the next event.
         self.settle_title_mode();
+        #[cfg(target_os = "horizon")]
+        self.pad_stop_ineligible_gyro();
         if let Some((button, pressed, modifiers)) = mouse {
             self.native_mouse_button_post(button, pressed, modifiers);
         }
@@ -265,6 +271,8 @@ impl Game<'_> {
             horizon_client::gfx::safe_start::clear(&Self::options_path());
         }
         self.end_screenshot_sequence(Err("cancelled: the game is closing".into()));
+        #[cfg(target_os = "horizon")]
+        self.pad_stop_gyro();
         self.pad_close_output();
         if let Err(e) = self.save_for_exit() {
             log::warn!("Horizon: failed to save the world on exit: {e}");
@@ -300,6 +308,8 @@ impl Game<'_> {
                 || horizon_threads::stop_requests() > 0)
         {
             // A mod hook or a signal requested the normal closing save.
+            #[cfg(target_os = "horizon")]
+            self.pad_stop_gyro();
             if let Err(error) = self.begin_closing_save(true) {
                 self.error = Some(error);
                 event_loop.exit();
@@ -307,6 +317,8 @@ impl Game<'_> {
             }
         }
         if self.pending_save.is_some() {
+            #[cfg(target_os = "horizon")]
+            self.pad_stop_gyro();
             match self.poll_closing_save() {
                 Ok(true) => event_loop.exit(),
                 Ok(false) => {
@@ -350,6 +362,8 @@ impl Game<'_> {
         horizon_client::spans::time("server_packs", || self.tick_server_packs());
         horizon_client::spans::time("control", || self.poll_control(event_loop));
         if self.pending_save.is_some() {
+            #[cfg(target_os = "horizon")]
+            self.pad_stop_gyro();
             return;
         }
         horizon_client::spans::time("pads", || self.poll_pads(event_loop));
@@ -458,6 +472,11 @@ impl ApplicationHandler for Game<'_> {
         self.apply_settings();
         self.previous = Instant::now();
     }
+    #[cfg(target_os = "horizon")]
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.pad_stop_gyro();
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let key = if self.window.as_ref().is_some_and(|w| w.id() == id)
             && !self.scripted_run()

@@ -1145,6 +1145,13 @@ real pad, which is how to check a change without the game.
   Select/Start. The controller is identified as Nintendo, and the Switch
   build maps face buttons by letter by default: A jumps and confirms, ZR
   attacks and ZL uses.
+- **Options → Controls → Controller → General → Look** has **Gyro Aiming** and
+  **Gyro Sensitivity**. Gyro is off by default. It can aim whenever you play,
+  while you hold your attack button, while you hold your use button, or while
+  you hold either. Tilt the console, a Pro Controller or the right Joy-Con of
+  a pair to aim alongside the right stick. Invert Look X/Y applies to gyro too.
+  The sensor stops when gyro aiming is inactive, including in menus and when
+  the game loses focus.
 - Rumble drives both vibration devices of the controller in use: the strong
   motor's level on the low band (160 Hz) and the weak one's on the high band
   (320 Hz).

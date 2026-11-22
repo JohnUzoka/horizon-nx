@@ -626,6 +626,51 @@ impl TextKeyboard {
     }
 }
 
+/// When turning the Switch controller turns the view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GyroMode {
+    #[default]
+    Off,
+    Always,
+    Attack,
+    Use,
+    AttackOrUse,
+}
+impl GyroMode {
+    pub const ALL: [Self; 5] = [Self::Off, Self::Always, Self::Attack, Self::Use, Self::AttackOrUse];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Always => "always",
+            Self::Attack => "attack",
+            Self::Use => "use",
+            Self::AttackOrUse => "attack_or_use",
+        }
+    }
+
+    fn parse(value: &str) -> Self {
+        match value {
+            "always" | "true" => Self::Always,
+            "attack" => Self::Attack,
+            "use" => Self::Use,
+            "attack_or_use" => Self::AttackOrUse,
+            _ => Self::Off,
+        }
+    }
+
+    /// Check the required holds only in modes that use them.
+    pub fn aims(self, held: impl Fn(&'static str) -> bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Always => true,
+            Self::Attack => held("key.attack"),
+            Self::Use => held("key.use"),
+            Self::AttackOrUse => held("key.attack") || held("key.use"),
+        }
+    }
+}
+
 /// Whether A on a text field asks Steam for its keyboard
 /// (`steam://open/keyboard`) instead of opening Horizon's: chosen, or `Auto`
 /// on a Steam Deck (Steam sets `SteamDeck=1` for the games it starts).
@@ -661,6 +706,9 @@ pub struct PadSettings {
     pub lightbar: Lightbar,
     /// 0..1; 0.5 is the default speed, 1 twice that.
     pub look_sensitivity: f32,
+    pub gyro: GyroMode,
+    /// 0..1; the view turns `4 *` this times the controller's own turn.
+    pub gyro_sensitivity: f32,
     pub invert_x: bool,
     pub invert_y: bool,
     pub move_deadzone: f32,
@@ -716,6 +764,8 @@ impl Default for PadSettings {
             split_vibration: true,
             lightbar: Lightbar::Health,
             look_sensitivity: 0.5,
+            gyro: GyroMode::Off,
+            gyro_sensitivity: 0.5,
             invert_x: false,
             invert_y: false,
             move_deadzone: 0.15,
@@ -786,6 +836,8 @@ impl PadSettings {
                 "splitVibration" => s.split_vibration = flag(s.split_vibration),
                 "lightbar" => s.lightbar = Lightbar::parse(value),
                 "lookSensitivity" => s.look_sensitivity = unit(s.look_sensitivity),
+                "gyro" => s.gyro = GyroMode::parse(value),
+                "gyroSensitivity" => s.gyro_sensitivity = unit(s.gyro_sensitivity),
                 "invertX" => s.invert_x = flag(s.invert_x),
                 "invertY" => s.invert_y = flag(s.invert_y),
                 "moveDeadzone" => s.move_deadzone = unit(s.move_deadzone).min(0.9),
@@ -919,7 +971,9 @@ impl PadSettings {
             self.keyboard.name(),
         );
         text.push_str(&format!(
-            "craftOnServers:{}\ngameplayGuide:{}\npointerSpeed:{}\nscrollSpeed:{}\nrepeatDelay:{}\nrepeatInterval:{}\n",
+            "gyro:{}\ngyroSensitivity:{}\ncraftOnServers:{}\ngameplayGuide:{}\npointerSpeed:{}\nscrollSpeed:{}\nrepeatDelay:{}\nrepeatInterval:{}\n",
+            self.gyro.name(),
+            self.gyro_sensitivity,
             bool_text(self.craft_on_servers),
             self.guide_detail.name(),
             self.pointer_speed, self.scroll_speed, self.repeat_delay, self.repeat_interval,
@@ -1112,6 +1166,36 @@ pub fn look_delta(
         x * YAW_SPEED * speed * seconds,
         -y * PITCH_SPEED * speed * seconds,
     )
+}
+
+/// Below this turn speed (about 1.4 degrees per second), sensor noise must not drift the view.
+const GYRO_STILL: f32 = 0.004;
+
+/// The controller's turn over `seconds`, in `(yaw, pitch)` degrees as in [`look_delta`].
+/// `rotation` is in turns per second around the controller's right, top and out-of-face axes.
+/// Yaw is the turn around gravity's up direction, so it works upright or lying flat; pitch is
+/// the tilt around the controller's right axis.
+pub fn gyro_delta(
+    rotation: [f32; 3],
+    up: [f32; 3],
+    settings: &PadSettings,
+    seconds: f32,
+    scoping: bool,
+) -> (f32, f32) {
+    let len = (up[0] * up[0] + up[1] * up[1] + up[2] * up[2]).sqrt();
+    let turn = if len > 0.3 {
+        (rotation[0] * up[0] + rotation[1] * up[1] + rotation[2] * up[2]) / len
+    } else {
+        // No usable gravity reading: assume an upright controller.
+        rotation[1]
+    };
+    let still = |v: f32| v.signum() * (v.abs() - GYRO_STILL).max(0.0);
+    let speed =
+        360.0 * 4.0 * settings.gyro_sensitivity * if scoping { 0.25 } else { 1.0 } * seconds;
+    // The Switch's rotation around `up` is positive when turning right.
+    let yaw = still(turn) * if settings.invert_x { -1.0 } else { 1.0 };
+    let pitch = still(rotation[0]) * if settings.invert_y { 1.0 } else { -1.0 };
+    (yaw * speed, pitch * speed)
 }
 
 /// The right stick under the cinematic camera (`Options.smoothCamera`): the
@@ -2869,5 +2953,51 @@ bind_key.hotbar.2:north
             GlyphStyle::PlayStation
         );
         assert_eq!(GlyphStyle::of_device(Some(0x0f0d), None), GlyphStyle::Xbox);
+    }
+
+    #[test]
+    fn gyro_turns_with_the_controller_and_ignores_its_noise() {
+        let s = PadSettings::default();
+        // Held upright, turned right a quarter turn a second for a second: 4 * 0.5 * 90 degrees.
+        let (yaw, pitch) = gyro_delta([0.0, 0.25, 0.0], [0.0, 1.0, 0.0], &s, 1.0, false);
+        assert!((yaw - 2.0 * (0.25 - GYRO_STILL) * 360.0).abs() < 1e-3, "{yaw}");
+        assert_eq!(pitch, 0.0);
+        // Lying flat, the same turn is around the face's axis.
+        let (flat, _) = gyro_delta([0.0, 0.0, 0.25], [0.0, 0.0, 0.98], &s, 1.0, false);
+        assert!((flat - yaw).abs() < 1e-3);
+        // Tilting the back up looks up (pitch negative).
+        assert!(gyro_delta([0.1, 0.0, 0.0], [0.0, 1.0, 0.0], &s, 1.0, false).1 < 0.0);
+        assert_eq!(
+            gyro_delta([0.003, -0.002, 0.001], [0.0, 1.0, 0.0], &s, 1.0, false),
+            (0.0, 0.0)
+        );
+        let inverted = PadSettings {
+            invert_x: true,
+            invert_y: true,
+            ..s
+        };
+        let (scoped_yaw, scoped_pitch) =
+            gyro_delta([0.1, 0.25, 0.0], [0.0, 1.0, 0.0], &inverted, 1.0, true);
+        assert!((scoped_yaw + yaw * 0.25).abs() < 1e-3);
+        assert!((scoped_pitch - 0.5 * (0.1 - GYRO_STILL) * 360.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn gyro_defaults_off_and_persists_when_enabled() {
+        let mut settings = PadSettings::default();
+        assert_eq!(settings.gyro, GyroMode::Off);
+        assert!(!settings.gyro.aims(|_| panic!("off checks no buttons")));
+        assert!(GyroMode::Always.aims(|_| panic!("always checks no buttons")));
+        assert!(GyroMode::Attack.aims(|action| action == "key.attack"));
+        assert!(!GyroMode::Attack.aims(|action| action == "key.use"));
+        assert!(GyroMode::Use.aims(|action| action == "key.use"));
+        assert!(!GyroMode::Use.aims(|action| action == "key.attack"));
+        assert!(GyroMode::AttackOrUse.aims(|action| action == "key.attack"));
+        assert!(GyroMode::AttackOrUse.aims(|action| action == "key.use"));
+        assert!(!GyroMode::AttackOrUse.aims(|_| false));
+        settings.gyro = GyroMode::AttackOrUse;
+        settings.gyro_sensitivity = 0.75;
+        assert_eq!(PadSettings::parse(&settings.serialize()), settings);
+        assert_eq!(PadSettings::parse("gyro:true").gyro, GyroMode::Always);
     }
 }
