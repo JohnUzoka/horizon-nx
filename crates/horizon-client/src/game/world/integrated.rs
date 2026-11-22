@@ -1051,7 +1051,7 @@ impl Game<'_> {
         };
         startup::time("server.lan_host", || self.lan_host(settings, net, config))?;
         let commands = self.allow_commands();
-        let pipe = {
+        {
             let host = self
                 .lan
                 .as_mut()
@@ -1064,8 +1064,7 @@ impl Game<'_> {
                 uuid: owner,
                 saved: Some(saved),
             });
-            host.hub.lan.connect_local()?
-        };
+        }
         self.serving = Some(Serving {
             flags: flags.clone(),
             tasks,
@@ -1079,6 +1078,15 @@ impl Game<'_> {
         view.start(Stage::LoadInitialChunks, 0);
         startup::time("server.prepare_levels", || self.prepare_levels())?;
         view.finish(Stage::LoadInitialChunks);
+        // connect_local starts the handshake timer immediately. Prepare the world
+        // first so the client has a chance to send a handshake before it expires.
+        let pipe = self
+            .lan
+            .as_ref()
+            .ok_or("the integrated server did not start")?
+            .hub
+            .lan
+            .connect_local()?;
         let _ = ready.send(Ok((pipe, self.level.name.clone())));
         startup::time("server.settle_spawn", || self.settle_spawn())
     }
