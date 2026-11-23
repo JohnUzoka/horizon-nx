@@ -291,6 +291,7 @@ impl Game<'_> {
     pub(super) fn idle(&mut self, event_loop: &dyn EventLoopCtl) {
         // Refresh applet focus for winit before the next frame, and keep the log tail on
         // disk in case the process is killed. A HOME exit takes the normal closing save.
+        // Only P1 drains those process-wide messages when several views share this loop.
         #[cfg(target_os = "horizon")]
         let applet_exit = !self.options.split_guest && {
             let exit = !horizon_nx::process_applet_messages();

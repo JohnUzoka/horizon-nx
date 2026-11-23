@@ -125,6 +125,9 @@ pub(super) struct Split<'a> {
     order: Vec<usize>,
     /// Seats represented by the open Setup draft, to detect join/leave changes.
     setup_seats: Vec<usize>,
+    /// The controller applet was offered since setup opened with splitscreen enabled.
+    #[cfg(target_os = "horizon")]
+    controllers_shown: bool,
     /// Whether Window 1 is shown (hidden while nobody plays in it): set once per change, since
     /// Wayland can't say whether a window is visible.
     window1_shown: bool,
@@ -193,6 +196,8 @@ impl<'a> Split<'a> {
             p1_window: 1,
             order: Vec::new(),
             setup_seats: Vec::new(),
+            #[cfg(target_os = "horizon")]
+            controllers_shown: false,
             window1_shown: true,
             window_rects: Default::default(),
             screens: Vec::new(),
@@ -322,6 +327,9 @@ impl<'a> Split<'a> {
     /// Where `HORIZON_SPLIT_WINDOWS` puts the player in `seat`: a window by number, or a new
     /// one filling a monitor.
     fn planned_window(&mut self, i: usize, seat: usize) {
+        if cfg!(target_os = "horizon") {
+            return;
+        }
         let Some(plan) = self.window_plan.get(seat - 1).cloned() else {
             return;
         };

@@ -6,8 +6,7 @@
 // copied, modified, or distributed except according to those terms.
 
 //! Rumble through libnx's vibration API (`switch/services/hid.h`): the strong motor drives the
-//! low band and the weak one the high band, on both vibration devices of the controller in use
-//! (a Pro Controller, a Joy-Con pair, or the handheld Joy-Con).
+//! low band and the weak one the high band, on both vibration devices of the addressed npad.
 
 use std::time::Duration;
 
@@ -27,9 +26,6 @@ extern "C" {
     fn hidSendVibrationValues(handles: *const u32, values: *const VibrationValue, count: i32) -> u32;
 }
 
-/// libnx `HidNpadIdType_No1` and `HidNpadIdType_Handheld`.
-const PLAYER_1: u32 = 0;
-const HANDHELD: u32 = 0x20;
 /// libnx `HidNpadStyleTag`s with two vibration devices.
 const STYLE_FULL_KEY: u32 = 1 << 0;
 const STYLE_HANDHELD: u32 = 1 << 1;
@@ -40,14 +36,18 @@ const HIGH_HZ: f32 = 320.0;
 
 #[derive(Debug)]
 pub struct Device {
+    npad_id: u32,
+    last: (u16, u16),
     /// The npad id and style the handles were made for, and the handles.
     target: Option<(u32, u32)>,
     handles: [u32; 2],
 }
 
 impl Device {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(npad_id: u32) -> Self {
         Device {
+            npad_id,
+            last: (0, 0),
             target: None,
             handles: [0; 2],
         }
@@ -56,7 +56,14 @@ impl Device {
     /// Sets magnitude for strong and weak ff motors. The values stay until the next call, which
     /// gilrs makes as effects start, change and stop.
     pub fn set_ff_state(&mut self, strong: u16, weak: u16, _min_duration: Duration) {
-        let Some(target) = active_target() else {
+        // gilrs calls this on every tick, even when still. Don't query HID while idle: the
+        // worker can outlive service shutdown, and a query on closed HID aborts the app.
+        if self.last == (strong, weak) {
+            return;
+        }
+        self.last = (strong, weak);
+        let Some(target) = target(self.npad_id) else {
+            self.target = None;
             return;
         };
         if self.target != Some(target) {
@@ -80,20 +87,12 @@ impl Device {
     }
 }
 
-/// The npad id and style the player is holding: the handheld Joy-Con when attached, else player
-/// 1's Pro Controller or Joy-Con pair. None for a single Joy-Con or no controller.
-fn active_target() -> Option<(u32, u32)> {
-    // SAFETY: plain libnx queries.
-    let handheld = unsafe { hidGetNpadStyleSet(HANDHELD) };
-    if handheld & STYLE_HANDHELD != 0 {
-        return Some((HANDHELD, STYLE_HANDHELD));
-    }
-    let player = unsafe { hidGetNpadStyleSet(PLAYER_1) };
-    if player & STYLE_FULL_KEY != 0 {
-        Some((PLAYER_1, STYLE_FULL_KEY))
-    } else if player & STYLE_JOY_DUAL != 0 {
-        Some((PLAYER_1, STYLE_JOY_DUAL))
-    } else {
-        None
-    }
+/// A full controller's vibration style. A single Joy-Con has no two-motor output.
+fn target(id: u32) -> Option<(u32, u32)> {
+    // SAFETY: the id is a configured libnx npad id.
+    let styles = unsafe { hidGetNpadStyleSet(id) };
+    [STYLE_FULL_KEY, STYLE_HANDHELD, STYLE_JOY_DUAL]
+        .into_iter()
+        .find(|style| styles & style != 0)
+        .map(|style| (id, style))
 }

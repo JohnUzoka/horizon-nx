@@ -7,9 +7,9 @@
 
 //! The npad through libnx's pad API (`switch/runtime/pad.h`).
 //!
-//! One gamepad, id 0: libnx's default pad, which merges player 1 and the handheld Joy-Con, so a
-//! Pro Controller, a pair of Joy-Con held together or the console in handheld mode all come
-//! through it. Buttons are reported by position (the bottom face button, Nintendo's B, is South; A
+//! The handheld controls are gamepad 0; npad players 1 to 4 are gamepads 1 to 4. Keeping
+//! these separate lets a controller join even while the console's own controls are in use.
+//! Buttons are reported by position (the bottom face button, Nintendo's B, is South; A
 //! is East; Y is West; X is North), and the vendor id is Nintendo's, so a game that picks glyphs
 //! by vendor shows Nintendo's letters. The sticks run -32767..=32767 with up positive. No SDL
 //! mapping applies (the UUID is nil), so gilrs maps these native codes one to one.
@@ -64,8 +64,9 @@ extern "C" {
 
 /// libnx `HidNpadStyleSet_NpadStandard`: Pro Controller, handheld, dual Joy-Con, one Joy-Con.
 const STYLE_SET_STANDARD: u32 = 0x1F;
-/// Player 1 and the handheld controls, libnx `padInitializeDefault`'s mask.
-const PAD_MASK: u64 = (1 << 0) | (1 << 32);
+/// HID accepts four numbered controllers in addition to the handheld one (npad id 32).
+const PLAYERS: u32 = 4;
+const NPAD_IDS: [u32; PLAYERS as usize + 1] = [32, 0, 1, 2, 3];
 /// libnx `HidNpadAttribute_IsConnected`.
 const ATTRIBUTE_IS_CONNECTED: u32 = 1 << 0;
 /// libnx `HidNpadStyleTag`s that name the controller.
@@ -143,28 +144,37 @@ const STICK: AxisInfo = AxisInfo {
 };
 
 #[derive(Debug)]
-pub struct Gilrs {
+struct Slot {
     pad: PadState,
     buttons: u64,
     axes: [i32; 4],
-    events: VecDeque<Event>,
     gamepad: Gamepad,
+}
+
+#[derive(Debug)]
+pub struct Gilrs {
+    slots: [Slot; NPAD_IDS.len()],
+    events: VecDeque<Event>,
 }
 
 impl Gilrs {
     pub(crate) fn new() -> Result<Self, PlatformError> {
-        let mut pad = PadState::default();
-        // SAFETY: libnx's pad setup; `pad` is a plain struct libnx fills.
-        unsafe {
-            padConfigureInput(1, STYLE_SET_STANDARD);
-            padInitializeWithMask(&mut pad, PAD_MASK);
-        }
+        // SAFETY: libnx accepts one to eight players and the standard style set.
+        unsafe { padConfigureInput(PLAYERS, STYLE_SET_STANDARD) };
+        let slots = NPAD_IDS.map(|npad_id| {
+            let mut pad = PadState::default();
+            // SAFETY: each bit corresponds to a valid libnx npad id; libnx fills the struct.
+            unsafe { padInitializeWithMask(&mut pad, 1 << npad_id) };
+            Slot {
+                pad,
+                buttons: 0,
+                axes: [0; 4],
+                gamepad: Gamepad::new(npad_id),
+            }
+        });
         Ok(Gilrs {
-            pad,
-            buttons: 0,
-            axes: [0; 4],
+            slots,
             events: VecDeque::new(),
-            gamepad: Gamepad::new(),
         })
     }
 
@@ -189,16 +199,24 @@ impl Gilrs {
     }
 
     pub fn gamepad(&self, id: usize) -> Option<&Gamepad> {
-        (id == 0).then_some(&self.gamepad)
+        self.slots.get(id).map(|slot| &slot.gamepad)
     }
 
     /// Returns index greater than index of last connected gamepad.
     pub fn last_gamepad_hint(&self) -> usize {
-        1
+        self.slots.len()
     }
 
-    /// Reads the pad once and queues what changed since the last read.
+    /// Reads each slot and queues what changed since the last read.
     fn poll(&mut self) {
+        for (id, slot) in self.slots.iter_mut().enumerate() {
+            slot.poll(id, &mut self.events);
+        }
+    }
+}
+
+impl Slot {
+    fn poll(&mut self, id: usize, events: &mut VecDeque<Event>) {
         // SAFETY: `self.pad` was set up by padInitializeWithMask; padUpdate only writes it.
         unsafe { padUpdate(&mut self.pad) };
         let connected = self.pad.attributes & ATTRIBUTE_IS_CONNECTED != 0;
@@ -207,13 +225,11 @@ impl Gilrs {
             let event = if connected {
                 EventType::Connected
             } else {
-                EventType::Disconnected
-            };
-            self.events.push_back(Event::new(0, event));
-            if !connected {
                 self.buttons = 0;
                 self.axes = [0; 4];
-            }
+                EventType::Disconnected
+            };
+            events.push_back(Event::new(id, event));
         }
         if !connected {
             return;
@@ -228,7 +244,7 @@ impl Gilrs {
                 } else {
                     EventType::ButtonReleased(code)
                 };
-                self.events.push_back(Event::new(0, event));
+                events.push_back(Event::new(id, event));
             }
         }
         self.buttons = buttons;
@@ -237,8 +253,7 @@ impl Gilrs {
         for (i, value) in axes.into_iter().enumerate() {
             if value != self.axes[i] {
                 let code = crate::EvCode(AXIS_CODES[i]);
-                self.events
-                    .push_back(Event::new(0, EventType::AxisValueChanged(value, code)));
+                events.push_back(Event::new(id, EventType::AxisValueChanged(value, code)));
             }
         }
         self.axes = axes;
@@ -247,14 +262,16 @@ impl Gilrs {
 
 #[derive(Debug)]
 pub struct Gamepad {
+    npad_id: u32,
     name: &'static str,
     product: Option<u16>,
     connected: bool,
 }
 
 impl Gamepad {
-    fn new() -> Self {
+    fn new(npad_id: u32) -> Self {
         Gamepad {
+            npad_id,
             name: "Nintendo Switch Controller",
             product: None,
             connected: false,
@@ -300,7 +317,7 @@ impl Gamepad {
 
     /// Creates Ffdevice corresponding to this gamepad.
     pub fn ff_device(&self) -> Option<FfDevice> {
-        Some(FfDevice::new())
+        Some(FfDevice::new(self.npad_id))
     }
 
     pub fn buttons(&self) -> &[EvCode] {

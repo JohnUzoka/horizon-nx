@@ -166,6 +166,16 @@ impl Split<'_> {
         let offers_before = self.offers.len();
         let mut joins = Vec::new();
         let mut presses = Vec::new();
+        // Turning splitscreen on in a world must not offer the controller that opened Setup
+        // to player 2. Keep it as P1's when taking over the Switch's solo reader.
+        #[cfg(target_os = "horizon")]
+        if self.host.pad.feed.is_none()
+            && self.host.settings.controller.enabled
+            && self.host.pad.in_use
+            && let Some(id) = self.host.pad.switch_pad()
+        {
+            self.p1_pad.claim(id);
+        }
         self.pads.adopt(&mut self.host.pad);
         for event in self.pads.events() {
             match event {

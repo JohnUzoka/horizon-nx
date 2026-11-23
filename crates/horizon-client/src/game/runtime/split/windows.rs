@@ -188,6 +188,9 @@ impl<'a> Split<'a> {
     /// both ways. A player alone in its window is at "New window" or its monitor's choice (its
     /// window is that), so the list stays the same as it steps.
     pub(super) fn choices(&self, i: usize) -> Vec<(String, Spot)> {
+        if cfg!(target_os = "horizon") {
+            return vec![(WINDOW_1.to_owned(), Spot::Window(1))];
+        }
         let alone = self.alone(i);
         let mine = self.window_of(i);
         let mut open: Vec<u8> = (0..self.players())

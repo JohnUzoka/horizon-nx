@@ -124,6 +124,11 @@ impl<'a> Split<'a> {
     pub(super) fn sync_setup(&mut self) -> bool {
         use horizon_client::options_ui::Page;
         if self.host.ui.options.page() != Page::SplitSetup {
+            #[cfg(target_os = "horizon")]
+            {
+                self.controllers_shown = false;
+                self.host.ui.options.split_setup.show_controllers = false;
+            }
             return false;
         }
         // Window/fullscreen changes during P1's turn can invalidate Windows monitor handles.
@@ -158,6 +163,17 @@ impl<'a> Split<'a> {
         let names_shown = self.host.settings.extras.splitscreen_names;
         if give_up {
             self.give_up_pad();
+        }
+        #[cfg(target_os = "horizon")]
+        {
+            let setup = &mut self.host.ui.options.split_setup;
+            setup.console_controllers = true;
+            let requested = std::mem::take(&mut setup.show_controllers);
+            let on = self.host.settings.extras.splitscreen || self.forced;
+            let first = !std::mem::replace(&mut self.controllers_shown, on);
+            if on && !self.offscreen && (first || requested) {
+                horizon_nx::controllers::show();
+            }
         }
         // Give Up Pad shows while P1 has a controller in a world others can join.
         let p1_pad = self.p1_pad.owner.is_some() && self.in_world();

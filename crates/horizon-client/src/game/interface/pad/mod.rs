@@ -210,6 +210,10 @@ mod hardware {
             PadState::default()
         }
         pub(in crate::game) fn release_hardware(&mut self) {}
+        #[cfg(target_os = "horizon")]
+        pub(in crate::game) fn switch_pad(&self) -> Option<PadId> {
+            None
+        }
     }
 
     pub(in crate::game) type PadId = usize;
@@ -876,7 +880,7 @@ impl Game<'_> {
             && settings.gyro != gamepad::GyroMode::Off
             && self.focused
             && self.pad.in_use
-            && self.pad.device.is_some()
+            && self.pad.switch_pad().is_some()
             && !self.options.split_guest
             && !self.scripted_run()
             && !self.pad_in_menu()
@@ -913,7 +917,10 @@ impl Game<'_> {
             self.pad_stop_gyro();
             return (0.0, 0.0);
         }
-        let Some(motion) = self.pad.motion.sample(seconds) else {
+        let Some(pad) = self.pad.switch_pad() else {
+            return (0.0, 0.0);
+        };
+        let Some(motion) = self.pad.motion.sample(usize::from(pad), seconds) else {
             return (0.0, 0.0);
         };
         gamepad::gyro_delta(

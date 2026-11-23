@@ -29,29 +29,26 @@ unsafe extern "C" {
     fn hidGetSixAxisSensorStates(handle: Handle, states: *mut State, count: usize) -> usize;
 }
 
-/// libnx `HidNpadIdType` and `HidNpadStyleTag` values.
-const PLAYER_1: u32 = 0;
+/// libnx `HidNpadIdType_Handheld` and `HidNpadStyleTag` values.
 const HANDHELD: u32 = 0x20;
 const STYLE_FULL_KEY: u32 = 1 << 0;
 const STYLE_HANDHELD: u32 = 1 << 1;
 const STYLE_JOY_DUAL: u32 = 1 << 2;
 const SENSOR_CONNECTED: u32 = 1;
 
-/// As for rumble: handheld when attached, else player 1's Pro Controller or Joy-Con pair.
-fn active_target() -> Option<(u32, u32)> {
-    // SAFETY: both IDs are valid Npads. The game's controller backend has initialized HID.
-    let handheld = unsafe { hidGetNpadStyleSet(HANDHELD) };
-    if handheld & STYLE_HANDHELD != 0 {
-        return Some((HANDHELD, STYLE_HANDHELD));
-    }
-    let player = unsafe { hidGetNpadStyleSet(PLAYER_1) };
-    if player & STYLE_FULL_KEY != 0 {
-        Some((PLAYER_1, STYLE_FULL_KEY))
-    } else if player & STYLE_JOY_DUAL != 0 {
-        Some((PLAYER_1, STYLE_JOY_DUAL))
-    } else {
-        None
-    }
+/// gilrs-core's Horizon backend numbers the handheld controls 0, then npad players 1 to 4.
+fn target(pad: usize) -> Option<(u32, u32)> {
+    let id = match pad {
+        0 => HANDHELD,
+        1..=4 => (pad - 1) as u32,
+        _ => return None,
+    };
+    // SAFETY: the game's controller backend has configured these npad ids.
+    let styles = unsafe { hidGetNpadStyleSet(id) };
+    [STYLE_FULL_KEY, STYLE_HANDHELD, STYLE_JOY_DUAL]
+        .into_iter()
+        .find(|style| styles & style != 0)
+        .map(|style| (id, style))
 }
 
 struct Sensor {
@@ -98,7 +95,7 @@ pub struct Motion {
     pub up: [f32; 3],
 }
 
-/// A lazily started sensor for the Switch's default pad. Constructing an idle reader and
+/// A lazily started sensor for a player's pad. Constructing an idle reader and
 /// stopping or dropping one do not touch HID unless a sensor was successfully started.
 #[derive(Default)]
 pub struct MotionSensor(Option<Sensor>);
@@ -114,8 +111,8 @@ impl MotionSensor {
 
     /// Starts the sensor if necessary. A controller or style change forgets the old gravity
     /// estimate along with the old handle. Call only during eligible gameplay with HID ready.
-    pub fn sample(&mut self, seconds: f32) -> Option<Motion> {
-        let target = active_target();
+    pub fn sample(&mut self, pad: usize, seconds: f32) -> Option<Motion> {
+        let target = target(pad);
         if self.0.as_ref().map(|sensor| sensor.target) != target {
             self.stop();
             self.0 = target.and_then(Sensor::start);

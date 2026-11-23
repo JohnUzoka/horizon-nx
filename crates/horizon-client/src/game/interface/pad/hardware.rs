@@ -309,6 +309,16 @@ impl Pads {
         }
     }
 
+    /// The Switch's own reader and the splitscreen router use the same controller ids.
+    #[cfg(target_os = "horizon")]
+    pub(in crate::game) fn switch_pad(&self) -> Option<PadId> {
+        if self.feed.is_some() {
+            self.feed_source
+        } else {
+            self.devices.active
+        }
+    }
+
     /// Drain gilrs' events and read the active pad (opening gilrs the first time).
     pub(super) fn read(&mut self) -> PadState {
         self.start();

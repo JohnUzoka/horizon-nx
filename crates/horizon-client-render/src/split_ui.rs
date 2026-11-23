@@ -52,6 +52,9 @@ pub struct SplitUi {
     /// P1 has a controller (the game sets it), and Give Up Pad pressed: it's offered to join.
     pub p1_pad: bool,
     pub give_up_pad: bool,
+    /// Single-window console setup: offer the system controller applet instead of Identify.
+    pub console_controllers: bool,
+    pub show_controllers: bool,
     edit: Option<Draft>,
     selected: Option<usize>,
     /// A tile held by the mouse: whose, and where the pointer is (`None` until it moves).
@@ -92,6 +95,7 @@ enum Target {
     Names,
     /// P1's controller freed and offered to join (handed to a friend).
     GiveUpPad,
+    Controllers,
     Revert,
     Apply,
     Done,
@@ -278,6 +282,9 @@ impl SplitUi {
 
     /// Where the selected player can go: the other windows, a new one, a monitor no window fills.
     fn spots(&self) -> Vec<(String, Spot)> {
+        if self.console_controllers {
+            return Vec::new();
+        }
         let (Some(draft), Some(i)) = (self.draft(), self.selected) else {
             return Vec::new();
         };
@@ -322,6 +329,9 @@ impl SplitUi {
                 stops.push((label, Drop::Place(w.number, k)));
             }
         }
+        if self.console_controllers {
+            return stops;
+        }
         stops.push((tr("new_window", &[]), Drop::At(Spot::New)));
         for m in &self.monitors {
             let filled = draft
@@ -344,6 +354,9 @@ impl SplitUi {
         let inside = |[rx, ry, rw, rh]: [f32; 4]| x >= rx && x < rx + rw && y >= ry && y < ry + rh;
         if let Some((n, _)) = windows.iter().rev().find(|(_, r)| inside(*r)) {
             return Some(Spot::Window(*n));
+        }
+        if self.console_controllers {
+            return None;
         }
         let m = &self.monitors[monitors.iter().position(|r| inside(*r))?];
         if m.name == self.main {
@@ -400,12 +413,18 @@ impl SplitUi {
             Target::GiveUpPad,
             true,
         );
+        let controllers = || (64.0, tr("controllers", &[]), Target::Controllers, true);
         if !self.on || self.idle {
             let mut out = vec![switch];
             if self.on && self.p1_pad {
                 out.push(give_up);
             }
-            row(&mut out, h - 27.0, vec![done]);
+            let footer = if self.on && self.console_controllers {
+                vec![controllers(), done]
+            } else {
+                vec![done]
+            };
+            row(&mut out, h - 27.0, footer);
             return out;
         }
         let (_, windows, tiles) = self.map(w, h);
@@ -486,8 +505,12 @@ impl SplitUi {
         }
         // Narrow enough for two squares in the narrowest view (320 GUI pixels).
         let editing = self.changed();
+        footer.push(if self.console_controllers {
+            controllers()
+        } else {
+            (64.0, tr("identify", &[]), Target::Identify, true)
+        });
         footer.extend([
-            (64.0, tr("identify", &[]), Target::Identify, true),
             (64.0, tr("revert", &[]), Target::Revert, editing),
             (64.0, tr("apply", &[]), Target::Apply, editing),
             done,
@@ -510,6 +533,7 @@ impl SplitUi {
             Target::Identify => tr("help.identify", &[]),
             Target::Names => tr("help.names", &[]),
             Target::GiveUpPad => tr("help.give_up_pad", &[]),
+            Target::Controllers => tr("help.controllers", &[]),
             Target::Revert if *active => tr("help.revert", &[]),
             Target::Apply if *active => tr("help.apply", &[]),
             Target::Revert | Target::Apply => tr("help.unchanged", &[]),
@@ -862,6 +886,7 @@ impl SplitUi {
             Target::Identify => self.identify = true,
             Target::Names => self.toggle_names = true,
             Target::GiveUpPad => self.give_up_pad = true,
+            Target::Controllers => self.show_controllers = true,
             Target::Revert => self.edit = None,
             Target::Apply => {
                 // Windows emptied in the draft close now, not as players moved.
@@ -1051,6 +1076,31 @@ mod tests {
             ui.click((r[0] + 1.0, r[1] + 1.0), SIZE, false),
             Click::Switch
         ));
+    }
+
+    #[test]
+    fn console_setup_offers_controllers_but_no_other_windows() {
+        let mut ui = screen(1);
+        ui.console_controllers = true;
+        ui.idle = true;
+        press(&mut ui, "Controllers");
+        assert!(ui.show_controllers);
+
+        let mut ui = screen(2);
+        ui.console_controllers = true;
+        press(&mut ui, "Controllers");
+        assert!(ui.show_controllers);
+        assert!(!labels(&ui).iter().any(|l| l == "Identify"));
+        ui.selected = Some(1);
+        assert!(ui.spots().is_empty());
+        let stops = ui.stops(1);
+        assert_eq!(stops.len(), 2);
+        assert!(matches!(stops[0].1, Drop::Place(1, 0)));
+        assert!(matches!(stops[1].1, Drop::Place(1, 1)));
+        let (monitors, windows, _) = ui.map(SIZE.0, SIZE.1);
+        assert_eq!(windows.len(), 1);
+        let [x, y, w, h] = monitors[1];
+        assert!(ui.drop_spot((x + w / 2., y + h / 2.), SIZE.0, SIZE.1).is_none());
     }
 
     fn rect(ui: &SplitUi, label: &str) -> [f32; 4] {
