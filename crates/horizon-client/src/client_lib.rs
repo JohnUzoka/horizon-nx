@@ -74,6 +74,7 @@ pub mod debug_keys;
 pub mod debug_overlay;
 pub mod debugworld;
 pub mod desktop;
+pub mod device_path;
 pub mod dialog;
 pub mod dialog_screen;
 pub mod enchantment_levels;

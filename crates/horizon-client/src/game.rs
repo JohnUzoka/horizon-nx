@@ -11247,7 +11247,8 @@ pub(crate) fn run_with(
     let vanilla_root = options.resources.clone();
     // Saves from before 1.13 upgrade with vanilla's tables, prepared from the player's jar.
     horizon_world::datafix::set_resources(
-        &std::path::absolute(&vanilla_root).unwrap_or_else(|_| vanilla_root.clone()),
+        &horizon_client::device_path::absolute(&vanilla_root)
+            .unwrap_or_else(|_| vanilla_root.clone()),
     );
     if let Some(error) = missing_resources(&vanilla_root, horizon_hooks::engine::get_the_game()) {
         // The game build started by hand (the release's zip), not by the

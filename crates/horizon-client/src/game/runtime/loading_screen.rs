@@ -612,7 +612,7 @@ pub(super) fn missing_resources(
     root: &std::path::Path,
     get: Option<horizon_hooks::GetTheGame>,
 ) -> Option<String> {
-    let shown = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let shown = horizon_client::device_path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
     if !root.join("horizon-resources.json").is_file() {
         let launcher = get.map_or(String::new(), |get| {
             format!(
