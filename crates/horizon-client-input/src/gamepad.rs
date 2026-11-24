@@ -510,6 +510,7 @@ pub enum GlyphStyle {
     Xbox,
     PlayStation,
     Nintendo,
+    Off,
 }
 impl GlyphStyle {
     pub fn name(self) -> &'static str {
@@ -518,6 +519,7 @@ impl GlyphStyle {
             GlyphStyle::Xbox => "xbox",
             GlyphStyle::PlayStation => "playstation",
             GlyphStyle::Nintendo => "nintendo",
+            GlyphStyle::Off => "off",
         }
     }
     pub fn parse(name: &str) -> Self {
@@ -525,25 +527,32 @@ impl GlyphStyle {
             "xbox" => GlyphStyle::Xbox,
             "playstation" => GlyphStyle::PlayStation,
             "nintendo" => GlyphStyle::Nintendo,
-            _ => GlyphStyle::Auto,
+            "off" => GlyphStyle::Off,
+            "auto" => GlyphStyle::Auto,
+            _ => Self::default_for_platform(),
         }
     }
     /// The style the player chose, else the connected pad's.
     pub fn resolve(self, detected: GlyphStyle) -> GlyphStyle {
         match self {
-            GlyphStyle::Auto => match detected {
-                GlyphStyle::Auto => GlyphStyle::Xbox,
+            GlyphStyle::Auto | GlyphStyle::Off => match detected {
+                GlyphStyle::Auto | GlyphStyle::Off => GlyphStyle::Xbox,
                 d => d,
             },
             chosen => chosen,
         }
     }
-    pub const ALL: [GlyphStyle; 4] = [
+    pub const ALL: [GlyphStyle; 5] = [
+        GlyphStyle::Off,
         GlyphStyle::Auto,
         GlyphStyle::Xbox,
         GlyphStyle::PlayStation,
         GlyphStyle::Nintendo,
     ];
+
+    const fn default_for_platform() -> Self {
+        if cfg!(target_os = "horizon") { Self::Off } else { Self::Auto }
+    }
     /// The style for a pad by its USB ids: Sony's and Nintendo's own, and a few officially licensed
     /// third-party pads made for their consoles. Microsoft, Valve's Steam Deck and Steam Input's
     /// virtual pad, and everything else look like Xbox.
@@ -598,30 +607,35 @@ impl GuideDetail {
 /// The on-screen keyboard A opens on a text field in focus mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TextKeyboard {
-    /// Steam's on a Steam Deck under Steam, the Switch's on a Switch, else Horizon's.
+    /// Steam's on a Steam Deck under Steam, else Horizon's.
     #[default]
     Auto,
     Horizon,
     Steam,
+    System,
 }
 impl TextKeyboard {
-    pub const ALL: [TextKeyboard; 3] = [
-        TextKeyboard::Auto,
-        TextKeyboard::Horizon,
-        TextKeyboard::Steam,
-    ];
+    pub const SWITCH: [Self; 2] = [Self::System, Self::Horizon];
+    pub const DESKTOP: [Self; 3] = [Self::Auto, Self::Horizon, Self::Steam];
+    pub const CHOICES: &'static [Self] = if cfg!(target_os = "horizon") {
+        &Self::SWITCH
+    } else {
+        &Self::DESKTOP
+    };
     pub fn name(self) -> &'static str {
         match self {
             TextKeyboard::Auto => "auto",
             TextKeyboard::Horizon => "horizon",
             TextKeyboard::Steam => "steam",
+            TextKeyboard::System => "system",
         }
     }
     pub fn parse(name: &str) -> Self {
         match name {
-            "horizon" => TextKeyboard::Horizon,
-            "steam" => TextKeyboard::Steam,
-            _ => TextKeyboard::Auto,
+            "horizon" => Self::Horizon,
+            _ if cfg!(target_os = "horizon") => Self::System,
+            "steam" => Self::Steam,
+            _ => Self::Auto,
         }
     }
 }
@@ -677,15 +691,15 @@ impl GyroMode {
 pub fn steam_keyboard(choice: TextKeyboard) -> bool {
     match choice {
         TextKeyboard::Steam => true,
-        TextKeyboard::Horizon => false,
+        TextKeyboard::Horizon | TextKeyboard::System => false,
         TextKeyboard::Auto => std::env::var("SteamDeck").is_ok_and(|v| v == "1"),
     }
 }
 
 /// Whether A on a text field opens the Switch's own keyboard (the system applet) instead of
-/// Horizon's: `Auto` on a Switch.
+/// Horizon's, including the old `Auto` choice.
 pub fn switch_keyboard(choice: TextKeyboard) -> bool {
-    cfg!(target_os = "horizon") && choice == TextKeyboard::Auto
+    cfg!(target_os = "horizon") && matches!(choice, TextKeyboard::System | TextKeyboard::Auto)
 }
 
 /// The controller settings (`horizon-controller.txt`).
@@ -693,6 +707,8 @@ pub fn switch_keyboard(choice: TextKeyboard) -> bool {
 pub struct PadSettings {
     pub enabled: bool,
     pub vibration: bool,
+    /// Fraction of each vibration's amplitude, from 0 (silent) to 1 (full strength).
+    pub vibration_strength: f32,
     /// The pad keeps driving the game while its window has no focus.
     pub play_in_background: bool,
     /// A DualSense's triggers push back (Horizon's; docs/controllers.md).
@@ -757,6 +773,7 @@ impl Default for PadSettings {
         Self {
             enabled: true,
             vibration: true,
+            vibration_strength: 1.0,
             play_in_background: false,
             adaptive_triggers: true,
             impulse_triggers: true,
@@ -773,10 +790,10 @@ impl Default for PadSettings {
             trigger_threshold: 0.4,
             toggle_sneak: true,
             craft_on_servers: false,
-            glyphs: GlyphStyle::Auto,
+            glyphs: GlyphStyle::default_for_platform(),
             nintendo_letters: cfg!(target_os = "horizon"),
-            keyboard: TextKeyboard::Auto,
-            guide_detail: GuideDetail::Full,
+            keyboard: TextKeyboard::CHOICES[0],
+            guide_detail: GuideDetail::Off,
             pointer_speed: 1.0,
             scroll_speed: 12.0,
             repeat_delay: 0.35,
@@ -829,6 +846,7 @@ impl PadSettings {
             match key.trim() {
                 "enabled" => s.enabled = flag(s.enabled),
                 "vibration" => s.vibration = flag(s.vibration),
+                "vibrationStrength" => s.vibration_strength = unit(s.vibration_strength),
                 "playInBackground" => s.play_in_background = flag(s.play_in_background),
                 "adaptiveTriggers" => s.adaptive_triggers = flag(s.adaptive_triggers),
                 "impulseTriggers" => s.impulse_triggers = flag(s.impulse_triggers),
@@ -951,9 +969,10 @@ impl PadSettings {
     }
     pub fn serialize(&self) -> String {
         let mut text = format!(
-            "enabled:{}\nvibration:{}\nadaptiveTriggers:{}\nimpulseTriggers:{}\nblockVibration:{}\nsplitVibration:{}\nlightbar:{}\nlookSensitivity:{}\ninvertX:{}\ninvertY:{}\nmoveDeadzone:{}\nlookDeadzone:{}\ntriggerThreshold:{}\ntoggleSneak:{}\nglyphs:{}\nnintendoLetters:{}\nkeyboard:{}\n",
+            "enabled:{}\nvibration:{}\nvibrationStrength:{}\nadaptiveTriggers:{}\nimpulseTriggers:{}\nblockVibration:{}\nsplitVibration:{}\nlightbar:{}\nlookSensitivity:{}\ninvertX:{}\ninvertY:{}\nmoveDeadzone:{}\nlookDeadzone:{}\ntriggerThreshold:{}\ntoggleSneak:{}\nglyphs:{}\nnintendoLetters:{}\nkeyboard:{}\n",
             bool_text(self.enabled),
             bool_text(self.vibration),
+            self.vibration_strength,
             bool_text(self.adaptive_triggers),
             bool_text(self.impulse_triggers),
             bool_text(self.block_vibration),
@@ -1730,6 +1749,26 @@ pub struct Pulse {
     pub triggers: [f32; 2],
     pub millis: u32,
 }
+
+impl Pulse {
+    /// Scale every motor, without changing the timing.
+    pub fn scaled(self, strength: f32) -> Self {
+        Self {
+            strong: self.strong * strength,
+            weak: self.weak * strength,
+            triggers: self.triggers.map(|level| level * strength),
+            ..self
+        }
+    }
+}
+
+/// One step for a Switch linear actuator: amplitudes, frequencies (Hz), and duration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HdStep {
+    pub low: (f32, f32),
+    pub high: (f32, f32),
+    pub millis: u32,
+}
 use crate::radial::{RADIAL_NOTHING, RADIAL_PAGE_TICK, RADIAL_TICK};
 impl Rumble {
     pub fn name(self) -> &'static str {
@@ -1836,6 +1875,49 @@ impl Rumble {
                 step(0.7, 100),
                 step(1.0, 200),
                 step(0.5, 100),
+            ],
+        }
+    }
+
+    /// A Switch waveform. `pulse` and `strength` are this effect's gain-scaled grip pulse
+    /// and the profile's gain (for fixed-amplitude effects). The linear actuators need much
+    /// less amplitude than grip motors; changing frequency gives effects a distinct feel.
+    pub fn hd(self, pulse: Pulse, strength: f32) -> [Option<HdStep>; 4] {
+        let step = |low, high, millis| Some(HdStep { low, high, millis });
+        let fixed = |(lo, lo_hz): (f32, f32), (hi, hi_hz): (f32, f32), millis| {
+            step((lo * strength, lo_hz), (hi * strength, hi_hz), millis)
+        };
+        let tick = |low, high, millis| [fixed(low, high, millis), None, None, None];
+        let k = pulse.strong;
+        match self {
+            Rumble::Hurt(_) => {
+                let tail = pulse.millis.saturating_sub(60);
+                [
+                    step((0.45 * k, 90.0), (0.25 * k, 180.0), 60),
+                    step((0.28 * k, 80.0), (0.12 * k, 160.0), tail / 2),
+                    step((0.12 * k, 70.0), (0.05 * k, 150.0), tail - tail / 2),
+                    None,
+                ]
+            }
+            Rumble::BlockBroken => tick((0.08, 140.0), (0.32, 300.0), 35),
+            Rumble::ItemStackSplit => tick((0.05, 160.0), (0.22, 320.0), 25),
+            Rumble::RadialSlot => tick((0.0, 160.0), (0.18, 320.0), 20),
+            Rumble::RadialPage | Rumble::RadialWrap => tick((0.0, 160.0), (0.12, 320.0), 15),
+            Rumble::RadialNothing => tick((0.15, 100.0), (0.05, 200.0), 80),
+            Rumble::Explosion { .. } => {
+                let near = k / 0.9;
+                [
+                    step((0.5 * near, 60.0), (0.3 * near, 200.0), 80),
+                    step((0.35 * near, 55.0), (0.15 * near, 180.0), 150),
+                    step((0.2 * near, 50.0), (0.08 * near, 160.0), 150),
+                    step((0.08 * near, 45.0), (0.03 * near, 150.0), 150),
+                ]
+            }
+            Rumble::Totem => [
+                fixed((0.15, 120.0), (0.15, 240.0), 100),
+                fixed((0.25, 140.0), (0.25, 260.0), 100),
+                fixed((0.35, 160.0), (0.35, 300.0), 200),
+                fixed((0.15, 140.0), (0.10, 260.0), 100),
             ],
         }
     }
@@ -2143,6 +2225,10 @@ bind_key.hotbar.2:north
     fn settings_round_trip_and_store_only_changes() {
         let mut s = PadSettings::default();
         assert!(!s.serialize().contains("bind_"));
+        assert_eq!(
+            PadSettings::parse("enabled:true\n").guide_detail,
+            GuideDetail::Off
+        );
         s.bind("key.jump", Some(Button::East));
         s.bind("key.drop", None);
         s.bind("key.sneak", Some(Button::RightStick));
@@ -2836,6 +2922,46 @@ bind_key.hotbar.2:north
             Rumble::BlockBroken.pulse().unwrap().millis
         );
         assert!(Rumble::Hurt(0.0).shape().is_empty());
+    }
+
+    #[test]
+    fn vibration_strength_defaults_clamps_and_round_trips() {
+        assert_eq!(PadSettings::default().vibration_strength, 1.0);
+        for (saved, expected) in [("0.35", 0.35), ("-1", 0.0), ("2", 1.0), ("NaN", 1.0)] {
+            let s = PadSettings::parse(&format!("vibrationStrength:{saved}\n"));
+            assert_eq!(s.vibration_strength, expected);
+            assert_eq!(PadSettings::parse(&s.serialize()), s);
+        }
+        let pulse = Rumble::BlockBroken.pulse().unwrap();
+        let half = pulse.scaled(0.5);
+        assert_eq!((half.strong, half.weak, half.triggers), (0.3, 0.3, [0.175; 2]));
+        assert_eq!(half.millis, pulse.millis);
+    }
+
+    #[test]
+    fn switch_rumble_shapes_frequency_and_amplitude() {
+        let hurt = Rumble::Hurt(4.0);
+        let pulse = hurt.pulse().unwrap();
+        let steps: Vec<_> = hurt.hd(pulse, 1.0).into_iter().flatten().collect();
+        assert_eq!(steps.iter().map(|s| s.millis).sum::<u32>(), pulse.millis);
+        assert!(steps[0].low.0 < pulse.strong);
+        assert!(
+            steps
+                .windows(2)
+                .all(|w| w[0].low.0 > w[1].low.0 && w[0].low.1 > w[1].low.1)
+        );
+
+        let radial = Rumble::RadialSlot;
+        let pulse = radial.pulse().unwrap();
+        let tick = radial.hd(pulse, 1.0)[0].unwrap();
+        let quiet = radial.hd(pulse.scaled(0.25), 0.25)[0].unwrap();
+        assert!(tick.high.0 > tick.low.0 && tick.millis < steps[0].millis);
+        assert_eq!(quiet.high, (tick.high.0 * 0.25, tick.high.1));
+        assert_eq!(quiet.millis, tick.millis);
+
+        let blast = |distance| Rumble::Explosion { radius: 4.0, distance };
+        let low_amplitude = |r: Rumble| r.hd(r.pulse().unwrap(), 1.0)[0].unwrap().low.0;
+        assert!(low_amplitude(blast(2.0)) > low_amplitude(blast(12.0)));
     }
 
     #[test]

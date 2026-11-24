@@ -86,9 +86,9 @@ pub const PROMPT: Look = Look {
 /// reaches the plate's other edge.
 pub const PAD: f32 = 3.0;
 
-/// GUI px from a plated row's top to its text line: a glyph's art reaches 2 px above the line
-/// (`pad_glyph::rect`), one past the plate, into the gap above it.
-pub const LINE_DROP: f32 = 1.0;
+/// GUI px from a plated row's top to its text line. The visible glyph starts 2 px
+/// above the text and has a pixel of padding inside the plate.
+pub const LINE_DROP: f32 = 3.0;
 
 /// Glyphs and what pressing them does.
 #[derive(Clone, Debug, PartialEq)]
@@ -302,7 +302,7 @@ mod tests {
         let row = HintRow::new([a], "Jump");
         let w = plated_width(&atlas, &row, &GUIDE);
         let plate = Plate::Backing { alpha: 102 };
-        let area = [100.0, 40.0, w, 11.0];
+        let area = [100.0, 40.0, w, 14.0];
         // Leading: the glyph's art at the plate's left edge; trailing, the caption 3 px in.
         for (side, left) in [(Side::Leading, 100.0), (Side::Trailing, 103.0)] {
             let look = Look { side, ..GUIDE };
@@ -310,7 +310,7 @@ mod tests {
             draw_plated(&mut got, &atlas, &row, &look, plate, area);
             let mut want = batch();
             plate::draw(&mut want, &atlas, plate, area);
-            draw_hint(&mut want, &atlas, &row, &look, left, 41.0);
+            draw_hint(&mut want, &atlas, &row, &look, left, 43.0);
             assert_eq!(drawn(&got), drawn(&want), "{side:?}");
         }
     }
@@ -320,55 +320,8 @@ mod tests {
     #[test]
     fn the_migrated_overlays_draw_what_they_drew_before() {
         let atlas = atlas();
-        let (lt, a) = (glyph(MenuJob::PagePrev), glyph(MenuJob::Confirm));
-        let backing = rgba(0, 0, 0, 102);
-        let width = |text: &str| HudBatch::text_width(&atlas, text).ceil();
-        for (with, caption) in [
-            (None, "Jump"),
-            (Some(lt), "Craft All"),
-            (None, "Inventar öffnen"),
-        ] {
-            // The gameplay guide's row (game/pad/guide.rs), in either column.
-            let keys = with.map_or(0.0, |w| pad_glyph::width(&atlas, w) + 1.0)
-                + pad_glyph::width(&atlas, a);
-            let w = keys + width(caption) + 6.0;
-            for left in [true, false] {
-                let [x, y, h] = [40.0, 30.0, 11.0];
-                let mut old = batch();
-                let (key_x, text_x) = if left {
-                    (x, x + keys + 3.0)
-                } else {
-                    (x + w - keys, x + 3.0)
-                };
-                old.fill(&atlas, x, y, w, h, backing);
-                let mut glyph_x = key_x + 1.0;
-                if let Some(with) = with {
-                    pad_glyph::draw(&mut old, &atlas, with, glyph_x, y + 1.0);
-                    glyph_x += pad_glyph::width(&atlas, with) + 1.0;
-                }
-                pad_glyph::draw(&mut old, &atlas, a, glyph_x, y + 1.0);
-                old.text(&atlas, caption, text_x, y + 1.0, u32::MAX, true);
-
-                let row = HintRow::new(with.into_iter().chain([a]), caption);
-                let side = if left { Side::Leading } else { Side::Trailing };
-                let look = Look { side, ..GUIDE };
-                assert_eq!(plated_width(&atlas, &row, &look), w);
-                let mut new = batch();
-                draw_plated(
-                    &mut new,
-                    &atlas,
-                    &row,
-                    &look,
-                    Plate::Backing { alpha: 102 },
-                    [x, y, w, h],
-                );
-                assert_eq!(
-                    drawn(&new),
-                    drawn(&old),
-                    "guide row {caption:?}, left {left}"
-                );
-            }
-
+        let a = glyph(MenuJob::Confirm);
+        for caption in ["Jump", "Craft All", "Inventar öffnen"] {
             // The controller notice's first line (controller_notice.rs) and a splitscreen
             // prompt's answer (game/split/hud.rs): the glyph at `lx`, the words past it.
             for (look, grey) in [(NOTICE, 200), (PROMPT, 220)] {

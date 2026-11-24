@@ -397,7 +397,7 @@ pub fn resolve_menu(f: &MenuFacts) -> Guide {
 }
 
 /// A row's height and the view's margin, in GUI pixels.
-pub const ROW_HEIGHT: f32 = 11.0;
+pub const ROW_HEIGHT: f32 = 14.0;
 const MARGIN: f32 = 2.0;
 /// GUI px kept between the two columns where a row had to be cut to fit beside the other.
 pub const COLUMN_GAP: f32 = 4.0;
@@ -789,10 +789,10 @@ mod tests {
             f32::INFINITY,
             &mut taken,
         );
-        assert_eq!(left[0], Some([2.0, 2.0, 50.0, 11.0]));
-        assert_eq!(left[1], Some([2.0, 14.0, 30.0, 11.0]));
+        assert_eq!(left[0], Some([2.0, 2.0, 50.0, 14.0]));
+        assert_eq!(left[1], Some([2.0, 17.0, 30.0, 14.0]));
         let right = place_column([200.0, 200.0], false, &[40.0], f32::INFINITY, &mut taken);
-        assert_eq!(right[0], Some([158.0, 2.0, 40.0, 11.0]));
+        assert_eq!(right[0], Some([158.0, 2.0, 40.0, 14.0]));
     }
 
     #[test]
@@ -806,8 +806,8 @@ mod tests {
             f32::INFINITY,
             &mut taken,
         );
-        assert_eq!(right[0], Some([158.0, 26.0, 40.0, 11.0]));
-        assert_eq!(right[1], Some([158.0, 38.0, 40.0, 11.0]));
+        assert_eq!(right[0], Some([158.0, 26.0, 40.0, 14.0]));
+        assert_eq!(right[1], Some([158.0, 41.0, 40.0, 14.0]));
     }
 
     #[test]
@@ -826,8 +826,8 @@ mod tests {
                 assert!(!overlap(a, b), "{a:?} overlaps {b:?}");
             }
         }
-        // Three rows' worth of room, and the right column came first.
-        assert_eq!(right.iter().flatten().count(), 3);
+        // Two rows fit below the boss bar, and the right column came first.
+        assert_eq!(right.iter().flatten().count(), 2);
         assert_eq!(left.iter().flatten().count(), 0);
     }
 
@@ -843,8 +843,8 @@ mod tests {
         let left = place_column(view, true, &[90.0, 90.0, 40.0], room, &mut taken);
         // Every row in its corner, in order, none pushed under the other column.
         for (k, (r, l)) in right.iter().zip(&left).enumerate() {
-            let y = 2.0 + 12.0 * k as f32;
-            assert_eq!(*r, Some([68.0, y, 90.0, 11.0]));
+            let y = 2.0 + 15.0 * k as f32;
+            assert_eq!(*r, Some([68.0, y, 90.0, 14.0]));
             assert_eq!(l.map(|l| l[1]), Some(y));
         }
         assert_eq!(left[0].unwrap()[2], 62.0);
@@ -859,19 +859,19 @@ mod tests {
         place_column(view, false, &[100.0], row_room(view[0]), &mut taken);
         let room = left_room(view[0], 100.0);
         let left = place_column(view, true, &[50.0, 250.0], room, &mut taken);
-        assert_eq!(left[1], Some([2.0, 14.0, 250.0, 11.0]));
+        assert_eq!(left[1], Some([2.0, 17.0, 250.0, 14.0]));
     }
 
     #[test]
     fn rows_stack_up_from_a_bottom_corner_and_drop_above_its_quarter() {
         let view = [200.0, 100.0];
-        let mut taken = vec![[0.0, 80.0, 60.0, 5.0]];
+        let mut taken = vec![[0.0, 79.0, 60.0, 5.0]];
         let left = place_column_up(view, true, &[50.0, 50.0], f32::INFINITY, &mut taken);
-        assert_eq!(left[0], Some([2.0, 87.0, 50.0, 11.0]));
-        // Over the panel at 80 would be 68, under the lower quarter's 75.
+        assert_eq!(left[0], Some([2.0, 84.0, 50.0, 14.0]));
+        // The next row would sit above the lower quarter's 75.
         assert_eq!(left[1], None);
         let right = place_column_up(view, false, &[40.0], f32::INFINITY, &mut taken);
-        assert_eq!(right[0], Some([158.0, 87.0, 40.0, 11.0]));
+        assert_eq!(right[0], Some([158.0, 84.0, 40.0, 14.0]));
     }
 
     fn short(rows: &[Row]) -> Vec<&str> {
@@ -978,13 +978,13 @@ mod tests {
                 f32::INFINITY,
                 &mut taken
             ),
-            [Some([2.0, 2.0, 46.0, 11.0]), Some([2.0, 14.0, 20.0, 11.0])]
+            [Some([2.0, 2.0, 46.0, 14.0]), Some([2.0, 17.0, 20.0, 14.0])]
         );
         // To the view, not to a smaller room, with nothing beside it.
         let mut taken = Vec::new();
         assert_eq!(
             place_column([50.0, 200.0], true, &[60.0], 30.0, &mut taken),
-            [Some([2.0, 2.0, 46.0, 11.0])]
+            [Some([2.0, 2.0, 46.0, 14.0])]
         );
     }
 }

@@ -519,7 +519,7 @@ fn submit_quads(
                 .then(|| match last_glint {
                     Some((sprite, rect)) if sprite == q.material.sprite => rect,
                     _ => {
-                        let rect = atlas.get(sprite_name(&q.material.sprite)).copied();
+                        let rect = atlas.sprites.get(sprite_name(&q.material.sprite)).copied();
                         last_glint = Some((&q.material.sprite, rect));
                         rect
                     }
@@ -684,7 +684,13 @@ pub struct ItemRenderer {
     /// The enabled packs' OptiFine CIT rules and their swapped bakes; `None`
     /// without rules.
     pub cit: Option<cit::CitModels>,
-    glint_atlas: Mutex<HashMap<String, Rect>>,
+    glint_atlas: Mutex<GlintAtlas>,
+}
+
+#[derive(Default)]
+struct GlintAtlas {
+    limits: Option<(u32, u32)>,
+    sprites: HashMap<String, Rect>,
 }
 
 /// Every `items/**/*.json` client item definition, by identifier. Through
@@ -725,14 +731,21 @@ fn glint_padding(filtering: i32, bit: i32) -> usize {
 }
 
 impl ItemRenderer {
-    /// Prepare GUI glint after the device exists; propagate packing failures to pack rollback.
+    /// Prepare GUI glint for these limits; reuse it across renderer rebuilds with the same item resources.
     pub fn prepare_glint_atlas(&self, maximum: u32, filtering: (i32, i32)) -> crate::Result<()> {
-        let padding = glint_padding(filtering.0, filtering.1);
-        let sprites = glint_atlas::load(&self.sprites.root, 1 << padding, maximum)?;
-        *self
+        let padding = 1 << glint_padding(filtering.0, filtering.1);
+        let limits = (maximum, padding);
+        let mut atlas = self
             .glint_atlas
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = sprites;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if atlas.limits != Some(limits) {
+            let sprites = glint_atlas::load(&self.sprites.root, padding, maximum)?;
+            *atlas = GlintAtlas {
+                limits: Some(limits),
+                sprites,
+            };
+        }
         Ok(())
     }
 

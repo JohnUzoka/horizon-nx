@@ -6,6 +6,9 @@ built-in controls, and on a Nintendo Switch with its own (handheld, Joy-Con,
 Pro Controller). Keyboard and mouse keep working exactly as before: with no
 controller connected, or with controllers turned off, nothing changes.
 
+Controllers already connected at startup are available without a connection popup.
+Connecting or reconnecting one after startup can still show the notice.
+
 ## What vanilla has
 
 Nothing. Minecraft Java 26.3 never calls GLFW's gamepad or joystick API, has
@@ -607,8 +610,9 @@ until OK or cancel, starting from the field's text, which its text then
 replaces (a book page and the options' boxes start empty and get it typed in);
 OK on chat sends it, cancel closes chat (in bed, cancel leaves the bed's chat
 open, the player still asleep).
-"On-Screen Keyboard: Auto / Horizon / Steam" (`keyboard:`) picks one; Auto is
-Steam's on a Steam Deck, the Switch's on a Switch, else Horizon's.
+**On-Screen Keyboard** (`keyboard:`) offers **System** (default) and **Horizon** on Switch.
+Desktop still offers Auto / Horizon / Steam; Auto uses Steam's on a Steam Deck,
+and Horizon's elsewhere.
 
 ### Screens covered
 
@@ -624,6 +628,9 @@ villager and wandering-trader trades, mount inventories), and the LAN /
 world options. Where a screen draws something clickable no target names
 (the advancements map, the statistics lists, the pack screen's rows, the
 book's page text), the pad drives the pointer instead.
+
+On the death screen, **Title Screen** opens a separate quit confirmation.
+The death message is shown on the death screen, not over the confirmation.
 
 ### The startup title
 
@@ -676,6 +683,9 @@ button's label leaves room for it.
 Art shows on declared buttons and a focused field's A, in notices, the gameplay guide, the radial
 menu's hints and splitscreen's strips. What runs inside a line of text stays text: the recipe tooltip,
 the on-screen keyboard's hint line and the buttons on the Bindings page. Vanilla's own messages that name a key (tutorial hints) keep the keyboard's names.
+On Switch, **Button Glyphs** defaults to **Off** for profiles with no saved choice. Off hides
+the drawn button prompts but keeps button names in text and in the controller bindings.
+Choose **Auto** to show your controller's glyphs again.
 
 The inventory crosshair is `crosshair_inv` in the same folder, drawn at 16 GUI pixels on the point it
 clicks (`pad_cursor.rs`).
@@ -703,7 +713,8 @@ more than one action is marked "[ ]" in yellow, as vanilla marks conflicts, and 
 it does; an unbound action says so in the strip. A changed binding has a reset at its row's end (Right
 reaches it), and Reset All puts every action back.
 
-General's Play group has the **Gameplay Guide** setting (Full, Basic or Off) and **Trigger Threshold**, how far a trigger is pulled before it counts as pressed:
+General's Play group has the **Gameplay Guide** setting (Off by default; choose Basic or Full to
+show it) and **Trigger Threshold**, how far a trigger is pulled before it counts as pressed:
 0.1 to 0.9, by default 0.4, which also places a DualSense's catch (see "Adaptive triggers"). The screen
 names the player whose profile it edits and the controller the game sees; Device also shows its vendor and
 product ids, the detected glyph family and the override, as lines the focus reaches so the strip can say
@@ -716,6 +727,7 @@ exactly vanilla's, so a vanilla client can share the game folder.
 ```
 enabled:true
 vibration:true
+vibrationStrength:1
 adaptiveTriggers:true
 impulseTriggers:true
 blockVibration:true
@@ -730,7 +742,7 @@ toggleSneak:true
 glyphs:auto
 bind_key.jump:south
 craftOnServers:false
-gameplayGuide:full
+gameplayGuide:off
 bind_pad.hotbarNext:rb
 bindLayout:2
 ```
@@ -753,15 +765,16 @@ every pad: for a pad in one window and the keyboard in another, turn Controllers
 
 ## Gameplay guide
 
-While the pad plays, the HUD's top corners say what its buttons do now: break, use and pick block
+When enabled and a pad is in use, the HUD's top corners say what its buttons do now: break, use and pick block
 at the top right when there is something to do them to, movement and the player's own actions at
 the top left. The rows follow the bindings, the game mode, what the crosshair is on, the held
 items, riding, swimming and flying, and an item in use; an action that would do nothing, or has no
 button, has no row. The mouse or keyboard taking over hides them, as do a menu, F1, F3 and the
 Gameplay Guide option. They read what a click would do from the client's own answers
 (`remote_block_reacts`, `remote_mob_takes`), and a use only a fluid ray or the server can tell (an
-empty bucket) shows nothing. The rows step around what the HUD drew (effect icons, boss bars, the
-sidebar, chat, toasts, splitscreen's badge), and in a small view the last rows drop. The left
+empty bucket) shows nothing. Rows leave space between button glyphs and step around what the HUD
+drew (effect icons, boss bars, the sidebar, chat, toasts, splitscreen's badge, and the performance
+overlay). In a small view the last rows drop. The left
 column's last row names the radial menu's opener, as nothing else in play says it's there (for a
 spectator too, who can open it).
 
@@ -774,19 +787,31 @@ tabs. The creative grid's items aren't slots, so creative has only Close and its
 
 ## Rumble
 
-Vibration (on by default, off in the options): taking damage (stronger with
-the damage), a block broken, a stack split, an explosion nearby (scaled by
-distance), a totem of undying. Short, low-intensity pulses, as on Bedrock. A
-DualSense and an Xbox One pad get them through their own output reports
-(below), on supported platforms; iOS and the Switch have no HID access.
+Vibration (on by default, off in **Controller Settings → Device → Feedback**) plays when taking
+damage, breaking a block, splitting a stack, near an explosion, or using a totem of undying.
+**Vibration Strength** (`vibrationStrength:` in `horizon-controller.txt`) scales all vibration
+motors, including Xbox impulse triggers, for the current profile. It defaults to 100%; 0% is
+silent. In splitscreen each player's profile sets the strength for their own controller only.
 **Haptic Feedback from Bedrock**
 (`blockVibration:`, on by default) turns the broken-block tick off, as
 Bedrock's own option does, and **Split Vibration** (`splitVibration:`, on by
 default) the short tick when a stack splits. The split's tick only plays when
-the pad's own cursor made the click: the mouse never buzzes. Other pads go
-through gilrs force feedback: Linux (evdev force feedback, including Steam
-Input's virtual pad), Windows and the Switch support it; macOS gilrs has no
-force feedback, so it is silently skipped there.
+the pad's own cursor made the click: the mouse never buzzes.
+
+On Switch, handheld controls, Joy-Cons and Pro Controllers use libnx HD rumble through the
+same controller slots as gilrs input. Menu ticks are short and crisp; hits and explosions
+use lower-frequency vibrations that fade. A new effect replaces the previous effect on that
+controller, without interrupting another player's controller.
+
+To check on hardware, compare a radial selection tick with a damage or explosion pulse, then
+repeat at 50% and 0%. With two controllers in splitscreen, give the players different strengths
+and trigger feedback separately: only the assigned controller should respond. Disconnect or
+leave while a pulse is playing and verify it stops; also quit during a pulse and verify the
+game returns cleanly to the loader.
+
+DualSense and Xbox One pads use their own output reports on supported platforms (below).
+Other pads use gilrs force feedback on Linux (evdev, including Steam Input's virtual pad)
+and Windows. macOS gilrs has no force feedback, so it is silently skipped there.
 
 ## DualSense output
 

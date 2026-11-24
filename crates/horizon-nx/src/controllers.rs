@@ -34,6 +34,10 @@ const HOLD_HORIZONTAL: u32 = 1;
 /// Shows the system controller applet and returns when it closes. The usual HID reader still
 /// handles the configured pads when the applet is unavailable (e.g. in an emulator).
 pub fn show() {
+    if !crate::clocks::pause() {
+        log::warn!("Horizon: could not restore Switch clocks before opening Controllers");
+        return;
+    }
     let mut arg = std::mem::MaybeUninit::<Arg>::uninit();
     // SAFETY: libnx fully initializes its argument struct. A null result pointer is supported;
     // joining depends on the pad events, not the number of controllers reported by the applet.

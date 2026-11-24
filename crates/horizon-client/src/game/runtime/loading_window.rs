@@ -50,13 +50,15 @@ pub(super) fn build_renderer(
     // Chinese and Japanese menu labels go blank when the loading screen hands
     // over to the game.
     atlas.font.reset_cache();
+    let started = std::time::Instant::now();
     // Made here when the worker did not: the renderer's own fallback has no LabPBR maps.
     let prepared = Some(prepared.unwrap_or_else(|| prepare_renderer_textures(pack)));
     let atlas_pixels = atlas.pixels();
+    let prepared_at = std::time::Instant::now();
     let mut renderer = pollster::block_on(Renderer::new(
         window,
         offscreen,
-        &assets.pixels.get(),
+        &[], // Raw sprite pixels are only read when prepared textures are absent.
         assets.sprite_size,
         assets.sprite_minimum_size,
         assets.texture_layers,
@@ -80,6 +82,7 @@ pub(super) fn build_renderer(
         shader_pack.frame(),
         display,
     ))?;
+    let created_at = std::time::Instant::now();
     let (prepared_vertices, prepared_ranges) =
         native_block_entity_draw::StandaloneGeometry::new(pack, gui).prepared_upload();
     renderer.install_prepared_models(
@@ -116,6 +119,14 @@ pub(super) fn build_renderer(
         let r = atlas.sprites.get(name)?;
         Some([r.u0, r.v0, r.u1, r.v1])
     })?;
+    if cfg!(target_os = "horizon") && previous.is_some() {
+        log::info!(
+            "Horizon: renderer setup: CPU textures/atlas {} ms, renderer creation {} ms, model and pack setup {} ms",
+            (prepared_at - started).as_millis(),
+            (created_at - prepared_at).as_millis(),
+            created_at.elapsed().as_millis(),
+        );
+    }
     Ok(renderer)
 }
 

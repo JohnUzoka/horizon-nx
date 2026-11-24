@@ -20,7 +20,7 @@ use horizon_shader_api::stages::{
 
 use super::super::native_material::{MaterialPipelines, TerrainShape};
 use super::kept::Reads;
-use super::{NativeFrame, NativePost, post_pipeline};
+use super::{NativeFrame, NativePost, post_pipelines};
 pub(in crate::gfx) use crate::gfx::rt::scene::Traced;
 
 /// What the scene's passes are built against besides the scene: the terrain's sprites and the
@@ -572,7 +572,7 @@ impl NativePost {
                 .map(|(i, (label, module))| {
                     let layout = &pipeline_layouts[i.min(pipeline_layouts.len() - 1)];
                     let target = super::kept::target(kept, plan[i].writes);
-                    post_pipeline(device, &label, layout, module, constants, target)
+                    post_pipelines(device, &label, layout, module, constants, (target, None)).0
                 })
                 .collect();
             // The tracing compute passes' layouts come after the post passes'.

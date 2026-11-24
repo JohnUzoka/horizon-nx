@@ -57,7 +57,11 @@ fn read_at(file: &fs::File, out: &mut [u8], at: u64) -> io::Result<usize> {
 }
 /// The bytes of `file` from `start` to `end`.
 fn read_range(file: &fs::File, start: u64, end: u64) -> io::Result<Vec<u8>> {
-    let mut out = vec![0; (end - start) as usize];
+    let len = (end - start) as usize;
+    let mut out = Vec::new();
+    out.try_reserve_exact(len)
+        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+    out.resize(len, 0);
     let mut done = 0;
     while done < out.len() {
         match read_at(file, &mut out[done..], start + done as u64)? {
@@ -67,13 +71,18 @@ fn read_range(file: &fs::File, start: u64, end: u64) -> io::Result<Vec<u8>> {
     }
     Ok(out)
 }
-/// The archive as the `zip` crate sees it: the file's bytes, with its tail
-/// (the central directory on, END record normalized) from memory. A clone
-/// shares both and has its own position.
+/// The body stays on disk or is read ahead for small downloaded packs.
+enum Body {
+    File(fs::File),
+    Memory(Vec<u8>),
+}
+
+/// The archive as the `zip` crate sees it: the body followed by the tail
+/// (central directory on, END record normalized). Clones have independent cursors.
 #[derive(Clone)]
 struct Reader {
     /// What comes before the tail; none when the tail is the whole archive.
-    file: Option<Arc<fs::File>>,
+    body: Option<Arc<Body>>,
     tail: Arc<[u8]>,
     tail_at: u64,
     position: u64,
@@ -89,9 +98,14 @@ impl Read for Reader {
             }
             None => {
                 let before = (self.tail_at - self.position).min(out.len() as u64) as usize;
-                match &self.file {
-                    Some(file) => read_at(file, &mut out[..before], self.position)?,
-                    None => 0,
+                match self.body.as_deref() {
+                    Some(Body::File(file)) => read_at(file, &mut out[..before], self.position)?,
+                    Some(Body::Memory(bytes)) => {
+                        let at = self.position as usize;
+                        out[..before].copy_from_slice(&bytes[at..at + before]);
+                        before
+                    }
+                    None => return Err(invalid("missing ZIP body before central directory")),
                 }
             }
         };
@@ -119,7 +133,7 @@ impl Zip {
         let mut reader = self.archive.clone().into_inner();
         if self.len > 250 << 20 {
             reader.tail.hash(&mut hash);
-            if let Some(file) = &reader.file {
+            if let Some(Body::File(file)) = reader.body.as_deref() {
                 metadata_fingerprint(&file.metadata()?)?.hash(&mut hash);
             }
         } else {
@@ -140,15 +154,21 @@ impl Zip {
     /// Reads the central directory, not the entries: opening a pack of many
     /// gigabytes for its `pack.mcmeta` costs what opening a small one does.
     pub fn open(path: &Path) -> io::Result<Self> {
-        Self::open_with(path, false)
+        Self::open_with(path, false, None)
     }
+    /// Buffer a small archive using a caller's shared read-ahead budget. Larger archives
+    /// keep their normal positional reader. Charge only after a valid archive opens.
+    pub fn open_with_read_ahead(path: &Path, budget: &mut u64) -> io::Result<Self> {
+        Self::open_with(path, false, Some(budget))
+    }
+
     /// The archive as written, without `normalize_end`'s correction: the bytes and the `zip`
     /// crate a mod package's checks read, so exactly the entries they saw. Refuses an archive the
     /// corrected view would list more of (an entry past the END record's count).
     pub fn open_exact(path: &Path) -> io::Result<Self> {
-        Self::open_with(path, true)
+        Self::open_with(path, true, None)
     }
-    fn open_with(path: &Path, exact: bool) -> io::Result<Self> {
+    fn open_with(path: &Path, exact: bool, mut budget: Option<&mut u64>) -> io::Result<Self> {
         let file = fs::File::open(path)?;
         let len = file.metadata()?.len();
         let mut tail_at = len.saturating_sub((END_HEADER + u16::MAX as usize) as u64);
@@ -164,15 +184,35 @@ impl Zip {
         }
         let written = exact.then(|| tail.clone());
         let corrected = normalize_end(&mut tail);
-        let file = Arc::new(file);
+        let mut buffered = false;
+        let body = if tail_at == 0 {
+            None
+        } else {
+            let mut body = None;
+            if budget.as_deref().is_some_and(|left| len <= *left) {
+                match read_range(&file, 0, tail_at) {
+                    Ok(bytes) => {
+                        body = Some(Body::Memory(bytes));
+                        buffered = true;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::OutOfMemory => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Some(Arc::new(body.unwrap_or(Body::File(file))))
+        };
         let reader = |tail: Vec<u8>| Reader {
-            file: Some(file.clone()),
+            body: body.clone(),
             tail: Arc::from(tail),
             tail_at,
             position: 0,
         };
         let Some(written) = written else {
-            return Self::new(reader(tail));
+            let zip = Self::new(reader(tail))?;
+            if buffered && let Some(left) = budget.as_mut() {
+                **left -= len;
+            }
+            return Ok(zip);
         };
         let zip = Self::new(reader(written))?;
         // The corrected view can also be poorer (a Zip64 record between the directory and the
@@ -191,7 +231,7 @@ impl Zip {
     pub fn from_bytes(mut data: Vec<u8>) -> io::Result<Self> {
         normalize_end(&mut data);
         Self::new(Reader {
-            file: None,
+            body: None,
             tail: Arc::from(data),
             tail_at: 0,
             position: 0,
@@ -462,6 +502,34 @@ mod tests {
         assert_eq!(zip.read("pack.mcmeta").unwrap(), b"{\"pack\":{}}");
         assert_eq!(zip.read("a/b.txt").unwrap(), b"hello hello hello hello");
         assert!(zip.read("missing").is_err());
+    }
+    #[test]
+    fn server_zip_read_ahead_reuses_the_same_snapshot_and_has_a_shared_budget() {
+        let body = vec![0x4d; 128 << 10];
+        let bytes = archive_of(&[("data.bin", &body, false), ("meta", b"hello", true)]);
+        let path = std::env::temp_dir().join(format!(
+            "horizon-zip-{}-read-ahead.zip",
+            std::process::id()
+        ));
+        fs::write(&path, &bytes).unwrap();
+        let mut remaining = bytes.len() as u64 + 1;
+        let buffered = Zip::open_with_read_ahead(&path, &mut remaining).unwrap();
+        assert_eq!(remaining, 1);
+        assert!(matches!(
+            buffered.archive.clone().into_inner().body.as_deref(),
+            Some(Body::Memory(_))
+        ));
+        let positional = Zip::open_with_read_ahead(&path, &mut remaining).unwrap();
+        assert_eq!(remaining, 1);
+        assert!(matches!(
+            positional.archive.clone().into_inner().body.as_deref(),
+            Some(Body::File(_))
+        ));
+        assert_eq!(positional.fingerprint().unwrap(), buffered.fingerprint().unwrap());
+        assert_eq!(buffered.read("data.bin").unwrap(), body);
+        assert_eq!(buffered.read("meta").unwrap(), b"hello");
+        drop(positional);
+        fs::remove_file(path).unwrap();
     }
     #[test]
     fn a_directory_longer_than_the_end_scan_is_read_whole() {

@@ -50,6 +50,11 @@ impl SpriteCache {
             .ok()
             .and_then(|bytes| parse(&bytes, fingerprint))
             .unwrap_or_default();
+        log::debug!(
+            "Horizon: sprite cache {}: {} decoded entries",
+            path.display(),
+            entries.len()
+        );
         Some(Self {
             path,
             fingerprint,
@@ -73,8 +78,9 @@ impl SpriteCache {
         let temporary = self
             .path
             .with_extension(format!("{}.tmp", std::process::id()));
-        if fs::write(&temporary, serialize(self.fingerprint, &self.entries)).is_ok()
-            && fs::rename(&temporary, &self.path).is_err()
+        if fs::write(&temporary, serialize(self.fingerprint, &self.entries))
+            .and_then(|()| fs::rename(&temporary, &self.path))
+            .is_err()
         {
             let _ = fs::remove_file(&temporary);
         }

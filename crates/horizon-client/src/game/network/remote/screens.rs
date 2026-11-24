@@ -2,7 +2,107 @@
 
 use super::*;
 
+#[cfg(target_os = "horizon")]
+use crate::game::PendingWorldEntry;
+
 impl Game<'_> {
+    /// Single player's first Switch screen spans both sides of the local
+    /// connection. Do not hold `PlayerLoaded` (or any packet) for the renderer.
+    #[cfg(target_os = "horizon")]
+    pub(in crate::game) fn switch_local_loading(&mut self) -> Option<(&'static str, Option<f32>)> {
+        if let Some(starting) = &self.integrated_starting {
+            if starting.handle.upgrade().is_file_fixing() {
+                return None;
+            }
+            horizon_nx::loading_world();
+            let view = starting.handle.load_view();
+            let progress = view.has_progress().then(|| view.server_progress());
+            return Some(match progress {
+                Some(p) if p > 0.0 => ("horizon.loading.spawn", progress),
+                _ => ("horizon.loading.server", None),
+            });
+        }
+        if let Some(entry) = &self.pending_entry {
+            return matches!(entry, PendingWorldEntry::Local { .. }).then(|| {
+                horizon_nx::loading_world();
+                let progress = self
+                    .pack_reload
+                    .as_ref()
+                    .map(|reload| reload.progress.fraction())
+                    .or_else(|| self.rest_loader.as_ref().map(|loader| loader.progress.fraction()));
+                ("horizon.loading.resources", progress)
+            });
+        }
+        if self.pack_reload.is_some() {
+            return None;
+        }
+
+        let entry = self.switch_world_entry.as_mut()?;
+        let Some((integrated, remote)) = self.integrated.as_ref().zip(self.remote.as_ref()) else {
+            // An upgrade can be cancelled, or the connection can fail before login.
+            self.switch_world_entry = None;
+            return None;
+        };
+        let opened_at = entry.opened_at;
+        let joined_at = *entry.joined_at.get_or_insert_with(|| {
+            log::info!(
+                "Horizon: Switch local world: local client join observed after {} ms",
+                opened_at.elapsed().as_millis()
+            );
+            Instant::now()
+        });
+        let Some(player) = &self.player else {
+            horizon_nx::loading_world();
+            return Some(("connect.joining", None));
+        };
+        if remote.level_load.is_active() {
+            horizon_nx::loading_world();
+            let view = integrated.load_view();
+            let progress = view.has_progress().then(|| view.server_progress());
+            return Some(match progress {
+                Some(p) if p < 1.0 => ("horizon.loading.spawn", progress),
+                _ => ("horizon.loading.terrain", None),
+            });
+        }
+
+        // A controller-first session need not grab the mouse. Release FastLoad
+        // at this boundary too, before the GPU catches up to the received terrain.
+        horizon_nx::horizon_nx_entered_world();
+        let (cx, cz) = (
+            (player.position.x.floor() as i32) >> 4,
+            (player.position.z.floor() as i32) >> 4,
+        );
+        // The packet tracker's player column is lit, not necessarily meshed.
+        // A new connection clears old GPU sections. One resident mesh is
+        // enough to uncover the world; never wait for the whole view distance.
+        let sections = self.renderer.as_ref().map_or(0, |r| r.section_count());
+        let void = sections == 0
+            && self.world.chunks.get(&(cx, cz)).is_some_and(|column| {
+                column.sections.iter().all(|section| {
+                    section.blocks.bits() == 0
+                        && self.res.facts().is_air(BlockStateId(section.blocks.get(0)))
+                })
+            });
+        let fallback = joined_at.elapsed().as_millis()
+            >= u128::from(horizon_client::level_loading::CLIENT_WAIT_TIMEOUT_MS);
+        if sections != 0 || void || self.renderer.is_none() || fallback {
+            if fallback && sections == 0 && !void && self.renderer.is_some() {
+                log::warn!("Horizon: Switch local world: giving up waiting for the first terrain mesh");
+            }
+            log::info!(
+                "Horizon: Switch local world: revealing scene after {} ms since join (GPU sections: {sections}, empty player column: {void})",
+                joined_at.elapsed().as_millis()
+            );
+            self.switch_world_entry = None;
+            None
+        } else {
+            if !std::mem::replace(&mut entry.waiting_for_scene, true) {
+                log::info!("Horizon: Switch local world: client terrain ready, waiting for a GPU mesh");
+            }
+            Some(("horizon.loading.scene", None))
+        }
+    }
+
     /// The type of the menu a server opened (`MenuType`'s id).
     pub(super) fn remote_menu_type_body(&self) -> Option<&str> {
         Some(self.remote.as_ref()?.menu.as_ref()?.1.as_str())
@@ -227,6 +327,7 @@ impl Game<'_> {
         let atlas = &self.gui.atlas;
         let w = batch.width;
         if self.screen == Screen::Dead
+            && self.ui.death_confirm.is_none()
             && let Some(message) = &r.death_message
         {
             // DeathScreen draws the styled cause component.

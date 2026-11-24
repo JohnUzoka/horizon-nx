@@ -174,6 +174,12 @@ static TABLE: LazyLock<Vec<Def>> = LazyLock::new(|| {
         id("prioritizeChunkUpdates", 3, 0),
         b("fullscreen", false),
         b("exclusiveFullscreen", false),
+        #[cfg(target_os = "horizon")]
+        b("horizonSwitchCpuHigh", false),
+        #[cfg(target_os = "horizon")]
+        b("horizonSwitchGpuHigh", false),
+        #[cfg(target_os = "horizon")]
+        b("horizonSwitchMemoryHigh", false),
         b("macFullscreenMenuVisibility", false),
         u("gamma", 0.5),
         def("guiScale", O(LazyInt(0)), V::Int(0)),

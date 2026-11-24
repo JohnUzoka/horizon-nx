@@ -92,6 +92,7 @@ fn an_install_is_checked_then_recorded_as_the_launchers_own() {
     fs::write(home.join(MANIFEST), theirs.to_string()).unwrap();
 
     let done = install(&index, &home, "ruby", &serve(bytes.clone())).unwrap();
+    assert_eq!(done.kind, ProjectKind::Mod);
     assert_eq!(done.version, "1.0");
     assert!(!done.verified, "the sample isn't signed");
     let path = home.join("horizon-mods/ruby.hmod");
@@ -187,6 +188,7 @@ fn install_reads_the_manifest_after_the_other_installer_finishes() {
     fs::remove_dir_all(home).unwrap();
 }
 
+#[cfg(not(target_os = "horizon"))]
 #[test]
 fn a_lock_error_never_downloads_or_changes_installed_files() {
     let bytes = ruby("1.0");
@@ -220,7 +222,7 @@ fn a_native_pin_is_not_replaced_by_a_content_version_of_the_same_project() {
         panic!("a native pin must be refused before download")
     })
     .unwrap_err();
-    assert!(error.contains("launcher"), "{error}");
+    assert_eq!(error, code_mod_refusal(cfg!(target_os = "horizon")));
     assert_eq!(fs::read_to_string(home.join(MANIFEST)).unwrap(), manifest);
     assert!(!home.join("horizon-mods/ruby.hmod").exists());
     fs::remove_dir_all(home).unwrap();
@@ -315,10 +317,8 @@ fn a_mod_the_player_put_there_is_never_replaced() {
     fs::remove_dir_all(&home).unwrap();
 }
 
-/// A wasm package can declare only registries too; the browser must inspect the package,
-/// rather than treat that capability list as proof that it contains no code.
-#[test]
-fn code_packages_never_reach_the_content_browser_install_path() {
+/// A wasm package can declare only registries too.
+fn wasm_ruby() -> Vec<u8> {
     // The smallest shared group member: `dylink.0` memory info and the three guest exports.
     let module = &[
         b"\0asm\x01\0\0\0".as_slice(),
@@ -333,12 +333,16 @@ fn code_packages_never_reach_the_content_browser_install_path() {
         "id = \"ruby\"\nname = \"Ruby\"\nversion = \"1.0\"\napi = \"0.2\"\nside = \"both\"\ncapabilities = [\"registries\"]\n[wasm]\nsha512 = \"{}\"\ntoolchain = \"1.99.1\"\nbuilt_with = \"test\"\n",
         horizon_mod_package::manifest::sha512_of(module)
     );
-    let bytes =
-        horizon_mod_package::Package::write_files(&manifest, &[("mod.wasm", module)]).unwrap();
+    horizon_mod_package::Package::write_files(&manifest, &[("mod.wasm", module)]).unwrap()
+}
+
+#[test]
+fn code_packages_never_reach_the_content_browser_install_path() {
+    let bytes = wasm_ruby();
     let index = registry("1.0", &bytes, "file:///ruby.hmod");
     let home = scratch("code");
-    let error = install(&index, &home, "ruby", &serve(bytes.clone())).unwrap_err();
-    assert!(error.contains("code mods"), "{error}");
+    let error = install_for(&index, &home, "ruby", &serve(bytes.clone()), false).unwrap_err();
+    assert_eq!(error, "code mods are installed and updated in the launcher");
     assert!(!home.join("horizon-mods/ruby.hmod").exists());
     assert!(!home.join("mod-browser/downloads/ruby.hmod.part").exists());
     assert!(!home.join(MANIFEST).exists());
@@ -351,11 +355,144 @@ fn code_packages_never_reach_the_content_browser_install_path() {
     }]}).to_string()).unwrap();
     let content = ruby("1.1");
     let index = registry("1.1", &content, "file:///ruby.hmod");
-    let error = install(&index, &home, "ruby", &serve(content)).unwrap_err();
-    assert!(error.contains("code mods"), "{error}");
+    let error = install_for(&index, &home, "ruby", &serve(content), false).unwrap_err();
+    assert_eq!(error, "code mods are installed and updated in the launcher");
     assert_eq!(
         fs::read(home.join("horizon-mods/ruby.hmod")).unwrap(),
         bytes
     );
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn switch_remembers_the_code_download_but_offers_new_compatible_bytes() {
+    let bytes = wasm_ruby();
+    let index = registry("1.0", &bytes, "file:///ruby.hmod");
+    let home = scratch("switch-code");
+    assert_eq!(listings_for(&index, &home, true)[0].id, "ruby");
+
+    let mut tampered = bytes.clone();
+    *tampered.last_mut().unwrap() ^= 1;
+    let error = install_for(&index, &home, "ruby", &serve(tampered), true).unwrap_err();
+    assert!(error.contains("SHA-256"), "{error}");
+    assert!(!home.join(CODE_MODS).exists());
+    assert_eq!(listings_for(&index, &home, true)[0].id, "ruby");
+
+    let hash = index::sha256(&bytes);
+    let error = install_for(&index, &home, "ruby", &serve(bytes), true).unwrap_err();
+    assert_eq!(
+        error,
+        "Nintendo Switch can't run native or WebAssembly code mods"
+    );
+    assert!(listings_for(&index, &home, true).is_empty());
+    assert_eq!(
+        fs::read_to_string(home.join(CODE_MODS)).unwrap(),
+        format!("{hash}\n")
+    );
+    assert!(!home.join(DOWNLOADS).join("ruby.hmod.part").exists());
+    assert!(!home.join(MANIFEST).exists());
+    assert_eq!(listings_for(&index, &home, false)[0].id, "ruby");
+
+    let no_download = |_: &str, _: u64| panic!("known code mods must not be downloaded");
+    for id in ["ruby", "zoom"] {
+        assert_eq!(
+            install_for(&index, &home, id, &no_download, true).unwrap_err(),
+            error
+        );
+    }
+
+    // Same project and even the same version label: that is not the rejected file.
+    let content = ruby("1.0");
+    let index = registry("1.0", &content, "file:///ruby.hmod");
+    assert_eq!(listings_for(&index, &home, true)[0].id, "ruby");
+    let done = install_for(&index, &home, "ruby", &serve(content.clone()), true).unwrap();
+    assert_eq!(done.kind, ProjectKind::Mod);
+    assert_eq!(
+        fs::read(home.join("horizon-mods/ruby.hmod")).unwrap(),
+        content
+    );
+    fs::remove_dir_all(home).unwrap();
+}
+
+fn resource_pack(description: &str) -> Vec<u8> {
+    use std::io::{Cursor, Write};
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    zip.start_file("pack.mcmeta", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    let metadata = serde_json::json!({
+        "pack": { "description": description, "min_format": 75, "max_format": 75 }
+    });
+    zip.write_all(metadata.to_string().as_bytes()).unwrap();
+    zip.finish().unwrap().into_inner()
+}
+
+fn pack_registry(version: &str, file: &str, bytes: &[u8]) -> Index {
+    let text = serde_json::json!({ "schema": 1, "projects": [{
+        "id": "crisp", "kind": "resourcepack", "name": "Crisp", "summary": "Sharp textures",
+        "license": "MIT", "source": "https://github.com/someone/crisp",
+        "versions": [{ "version": version, "game": GAME, "api": "75",
+            "file": { "name": file, "url": "file:///crisp.zip", "size": bytes.len(),
+                "sha256": index::sha256(bytes) } }]
+    }] })
+    .to_string();
+    Index::parse_local(&text).unwrap()
+}
+
+#[test]
+fn a_resource_pack_is_listed_checked_installed_and_updated_as_a_pack() {
+    let home = scratch("pack");
+    let bytes = resource_pack("First edition");
+    let index = pack_registry("1", "crisp-1.zip", &bytes);
+    let listed = listings_for(&index, &home, true);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].kind, ProjectKind::ResourcePack);
+    assert_eq!(listed[0].installed, None);
+    let done = install_for(&index, &home, "crisp", &serve(bytes.clone()), true).unwrap();
+    assert_eq!(done.kind, ProjectKind::ResourcePack);
+    let old = home.join("resourcepacks/crisp-1.zip");
+    assert_eq!(fs::read(&old).unwrap(), bytes);
+    assert!(!home.join("horizon-mods").exists());
+    assert_eq!(listings(&index, &home)[0].installed.as_deref(), Some("1"));
+
+    let newer = resource_pack("Second edition");
+    let index = pack_registry("2", "crisp-2.zip", &newer);
+    assert!(listings(&index, &home)[0].has_update());
+    install_for(&index, &home, "crisp", &serve(newer.clone()), true).unwrap();
+    assert_eq!(
+        fs::read(home.join("resourcepacks/crisp-2.zip")).unwrap(),
+        newer
+    );
+    assert!(!old.exists());
+    let manifest = Installed::load(&home).unwrap();
+    assert_eq!(manifest.entries.len(), 1);
+    let entry = &manifest.entries[0];
+    assert_eq!(entry["kind"], "resource-pack");
+    assert_eq!(entry["file"], "resourcepacks/crisp-2.zip");
+    assert_eq!(listings(&index, &home)[0].installed.as_deref(), Some("2"));
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn a_resource_pack_must_be_valid_and_must_not_replace_unmanaged_files() {
+    let home = scratch("invalid-pack");
+    let path = home.join("resourcepacks/crisp.zip");
+    let malformed = b"not a zip";
+    let index = pack_registry("1", "crisp.zip", malformed);
+    assert!(install(&index, &home, "crisp", &serve(malformed.to_vec())).is_err());
+    assert!(!path.exists());
+    assert!(!home.join(DOWNLOADS).join("crisp.zip.part").exists());
+    assert!(!home.join(MANIFEST).exists());
+
+    fs::create_dir(home.join("resourcepacks")).unwrap();
+    fs::write(&path, b"their own pack").unwrap();
+    let bytes = resource_pack("New pack");
+    let index = pack_registry("1", "crisp.zip", &bytes);
+    let error = install(&index, &home, "crisp", &|_, _| {
+        panic!("an unmanaged pack must be detected before downloading")
+    })
+    .unwrap_err();
+    assert!(error.contains("already in resourcepacks"), "{error}");
+    assert_eq!(fs::read(path).unwrap(), b"their own pack");
+    assert!(!home.join(MANIFEST).exists());
     fs::remove_dir_all(home).unwrap();
 }

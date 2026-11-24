@@ -12,6 +12,7 @@ mod ff;
 mod gamepad;
 
 pub use self::ff::Device as FfDevice;
+pub use self::ff::{HorizonRumble, HorizonRumbleStep};
 pub use self::gamepad::{native_ev_codes, EvCode, Gamepad, Gilrs};
 
 // The npad's stick Y axis points up.

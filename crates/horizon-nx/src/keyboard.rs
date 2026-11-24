@@ -24,6 +24,11 @@ const TEXT_BYTES: usize = 1024;
 /// blocks the calling thread until the player is done. The whole text they confirmed (maybe
 /// empty), or `None` when they cancelled or the keyboard couldn't start.
 pub fn software_keyboard(initial: &str) -> Option<String> {
+    // swkbdShow blocks the applet pump. Restore optional clocks before handing over focus;
+    // the next outer pump, not the keyboard return, decides when to reapply them.
+    if !crate::clocks::pause() {
+        return None;
+    }
     let initial = CString::new(initial.replace('\0', "")).unwrap_or_default();
     let mut config = Box::new(SwkbdConfig([0; 4096]));
     let config: *mut SwkbdConfig = &mut *config;

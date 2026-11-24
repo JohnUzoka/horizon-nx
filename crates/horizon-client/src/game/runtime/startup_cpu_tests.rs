@@ -43,6 +43,22 @@ fn a_folder_without_prepared_files_is_named_before_loading() {
 }
 
 #[test]
+fn a_switch_export_without_fluid_definitions_needs_preparing_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("horizon-resources.json"), "{}").unwrap();
+    let behaviours = root.join("block-behaviours.json");
+    std::fs::write(&behaviours, r#"{"fluids":["minecraft:water"]}"#).unwrap();
+    assert!(loading_screen::outdated_prepared(root));
+    std::fs::write(
+        behaviours,
+        r#"{"fluids":["minecraft:water"],"fluid_state_definitions":{"minecraft:water":{}}}"#,
+    )
+    .unwrap();
+    assert!(!loading_screen::outdated_prepared(root));
+}
+
+#[test]
 fn worker_prepares_owned_models_and_inventory_before_handoff() {
     let root = std::env::temp_dir().join(format!("horizon-startup-cpu-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();

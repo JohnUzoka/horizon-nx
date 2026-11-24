@@ -181,8 +181,7 @@ pub fn build_with_conditions(
             }
         }
     }
-    // The overlay links to the base: a relative base would leave them dangling.
-    let base = &std::path::absolute(base)?;
+    let base = &*super::overlay_base(base)?;
     let loaded = load_layers(jar_store, mods)?;
     let plan = Plan::new(base, mods)?;
     // Publish the completed tables as one generation. Passive asset layers
@@ -600,7 +599,7 @@ pub fn resource_root_with_conditions(
     } else {
         // Code-only packages still own an inventory generation, but need no
         // registry-table rewrite or content scan. Existing tables stay linked.
-        let base = std::path::absolute(base)?;
+        let base = super::overlay_base(base)?;
         let overlay = Overlay::new(&base, &out)?;
         overlay.write(
             horizon_mod_package::enabled::MARKER,

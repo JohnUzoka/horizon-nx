@@ -1546,12 +1546,16 @@ pub fn append_atlas_sources(
 /// `DownloadedPackSource.loadRequestedPacks`: a server's downloaded pack,
 /// "World Specific Resources"; None when its `pack.mcmeta` can't be read. Its
 /// id names the file, which is named after its hash.
-pub fn server_pack(id: u128, path: &Path) -> Option<Pack> {
+pub fn server_pack(
+    id: u128,
+    path: &Path,
+    source: crate::resource_source::ResourceSource,
+) -> Option<Pack> {
     let file = path.file_name()?.to_string_lossy();
     pack(
         format!("server/{id:032x}/{file}"),
         Text::translate("resourcePack.server.name", &[]),
-        Source::Zip(path.to_path_buf()),
+        Source::Opened(source),
     )
 }
 /// The packs to apply for an options.txt `resourcePacks` list (bottom first).

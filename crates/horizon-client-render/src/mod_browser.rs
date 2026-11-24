@@ -1,13 +1,21 @@
 //! What Options > Mods > Browse mods shows (docs/design/mod-hotload.md): the
-//! registry's content mods this game installs, a search over them, and the one
+//! registry's content mods and resource packs, a search over them, and the one
 //! whose page is open. The game fills it from a worker
 //! (`horizon_client::mod_registry`, `game/interface/mod_browser.rs`); the options screen
 //! only reads it and asks for installs through its events.
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProjectKind {
+    #[default]
+    Mod,
+    ResourcePack,
+}
 
 /// One project of the registry, as the list and its page show it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Listing {
     pub id: String,
+    pub kind: ProjectKind,
     pub name: String,
     pub summary: String,
     /// Markdown, shown as plain text.
@@ -63,6 +71,13 @@ pub enum Status {
     Failed(String),
 }
 
+#[derive(Clone, Debug)]
+pub struct InstallMessage {
+    pub project: String,
+    pub text: String,
+    pub success: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ModBrowser {
     pub status: Status,
@@ -70,15 +85,17 @@ pub struct ModBrowser {
     /// The project an install runs for.
     pub installing: Option<String>,
     /// The last install's outcome, already translated, for the page it ran on.
-    pub message: Option<(String, bool)>,
+    pub message: Option<InstallMessage>,
 }
 
 impl ModBrowser {
-    /// The listings a search for `query` finds, by index into `listings`.
-    pub fn found(&self, query: &str) -> Vec<usize> {
+    /// The listings of `kind` a search for `query` finds, by index into `listings`.
+    pub fn found(&self, query: &str, kind: ProjectKind) -> Vec<usize> {
         let query = query.to_lowercase();
-        (0..self.listings.len())
-            .filter(|&i| self.listings[i].matches(&query))
+        self.listings
+            .iter()
+            .enumerate()
+            .filter_map(|(i, listing)| (listing.kind == kind && listing.matches(&query)).then_some(i))
             .collect()
     }
 
@@ -151,15 +168,18 @@ mod tests {
     fn a_search_finds_names_tags_and_categories_in_any_case() {
         let mut pipes = listing("pipes", &["tech"]);
         pipes.categories = vec!["technology".into()];
+        let mut textures = listing("textures", &["gems"]);
+        textures.kind = ProjectKind::ResourcePack;
         let browser = ModBrowser {
-            listings: vec![listing("ruby", &["gems"]), pipes],
+            listings: vec![listing("ruby", &["gems"]), pipes, textures],
             ..ModBrowser::default()
         };
-        assert_eq!(browser.found(""), [0, 1]);
-        assert_eq!(browser.found("RUBY"), [0]);
-        assert_eq!(browser.found("gems"), [0]);
-        assert_eq!(browser.found("techno"), [1]);
-        assert!(browser.found("nothing like it").is_empty());
+        assert_eq!(browser.found("", ProjectKind::Mod), [0, 1]);
+        assert_eq!(browser.found("RUBY", ProjectKind::Mod), [0]);
+        assert_eq!(browser.found("gems", ProjectKind::Mod), [0]);
+        assert_eq!(browser.found("techno", ProjectKind::Mod), [1]);
+        assert!(browser.found("nothing like it", ProjectKind::Mod).is_empty());
+        assert_eq!(browser.found("GEMS", ProjectKind::ResourcePack), [2]);
     }
 
     #[test]

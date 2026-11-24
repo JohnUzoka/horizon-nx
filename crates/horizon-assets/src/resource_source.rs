@@ -3,6 +3,7 @@
 //! Diverges from upstream: asset and passive jar-data layers share this source.
 #[cfg(not(target_arch = "wasm32"))]
 use crate::zip::Zip;
+use horizon_core::prepared_files;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,
@@ -244,15 +245,36 @@ fn prefix_inside(prefix: &str) -> bool {
     prefix.is_empty() || stays_inside(prefix.trim_end_matches('/'))
 }
 
-fn walk(root: &Path, dir: &Path, out: &mut Vec<String>, active: &mut BTreeSet<PathBuf>) {
-    let Ok(canonical) = fs::canonicalize(dir) else {
-        return;
-    };
-    if !active.insert(canonical.clone()) {
+fn walk(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<String>,
+    active: &mut BTreeSet<PathBuf>,
+    skip_indexed: bool,
+) {
+    if skip_indexed
+        && let Ok(relative) = dir.strip_prefix(root)
+        && prepared_files::holds_folder(&relative.to_string_lossy().replace('\\', "/"))
+    {
         return;
     }
+    // libnx's SD and ROMFS mounts have no symlinks. Avoid resolving every
+    // directory again before reading it on Switch.
+    let canonical = if cfg!(target_os = "horizon") {
+        None
+    } else {
+        let Ok(path) = fs::canonicalize(dir) else {
+            return;
+        };
+        if !active.insert(path.clone()) {
+            return;
+        }
+        Some(path)
+    };
     let Ok(entries) = fs::read_dir(dir) else {
-        active.remove(&canonical);
+        if let Some(path) = canonical {
+            active.remove(&path);
+        }
         return;
     };
     let mut entries: Vec<_> = entries.flatten().collect();
@@ -264,7 +286,7 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<String>, active: &mut BTreeSet<Pa
             _ => path.is_dir(),
         };
         if directory {
-            walk(root, &path, out, active);
+            walk(root, &path, out, active, skip_indexed);
         } else if let Ok(relative) = path.strip_prefix(root) {
             let name = relative.to_string_lossy().replace('\\', "/");
             if stays_inside(&name) {
@@ -272,7 +294,9 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<String>, active: &mut BTreeSet<Pa
             }
         }
     }
-    active.remove(&canonical);
+    if let Some(path) = canonical {
+        active.remove(&path);
+    }
 }
 
 impl ResourceSource {
@@ -559,7 +583,21 @@ impl ResourceSource {
                 } else {
                     prefix.rsplit_once('/').map_or("", |(parent, _)| parent)
                 };
-                walk(root, &root.join(directory), &mut out, &mut BTreeSet::new());
+                let bundle = prepared_index(root);
+                if let Some(bundle) = &bundle {
+                    let names = bundle.names(prefix).map(str::to_owned);
+                    if prepared_files::holds_folder(directory.trim_end_matches('/')) {
+                        return names.collect();
+                    }
+                    out.extend(names);
+                }
+                walk(
+                    root,
+                    &root.join(directory),
+                    &mut out,
+                    &mut BTreeSet::new(),
+                    bundle.is_some(),
+                );
                 out.retain(|name| name.starts_with(prefix));
                 out.sort();
                 out
@@ -591,8 +629,28 @@ impl ResourceSource {
         if !stays_inside(top) || kinds.iter().any(|kind| !stays_inside(kind)) {
             return Vec::new();
         }
+        let prefix = format!("{top}/");
+        let of_kind = |name: &str| {
+            name.strip_prefix(&prefix)
+                .and_then(|rest| rest.split_once('/'))
+                .is_some_and(|(_, rest)| {
+                    kinds.iter().any(|kind| {
+                        rest.strip_prefix(kind)
+                            .is_some_and(|tail| tail.starts_with('/'))
+                    })
+                })
+        };
         match self.0.as_ref() {
             Storage::Directory(root, _) => {
+                if prepared_files::holds_folder(top)
+                    && let Some(bundle) = prepared_index(root)
+                {
+                    return bundle
+                        .names(&prefix)
+                        .filter(|name| of_kind(name))
+                        .map(str::to_owned)
+                        .collect();
+                }
                 let Ok(entries) = fs::read_dir(root.join(top)) else {
                     return Vec::new();
                 };
@@ -601,26 +659,22 @@ impl ResourceSource {
                 let mut out = Vec::new();
                 for namespace in namespaces {
                     for kind in kinds {
-                        walk(root, &namespace.join(kind), &mut out, &mut BTreeSet::new());
+                        walk(
+                            root,
+                            &namespace.join(kind),
+                            &mut out,
+                            &mut BTreeSet::new(),
+                            false,
+                        );
                     }
                 }
                 out.sort();
                 out
             }
             _ => self
-                .list(&format!("{top}/"))
+                .list(&prefix)
                 .into_iter()
-                .filter(|name| {
-                    name.strip_prefix(top)
-                        .and_then(|rest| rest.strip_prefix('/'))
-                        .and_then(|rest| rest.split_once('/'))
-                        .is_some_and(|(_, rest)| {
-                            kinds.iter().any(|kind| {
-                                rest.strip_prefix(kind)
-                                    .is_some_and(|tail| tail.starts_with('/'))
-                            })
-                        })
-                })
+                .filter(|name| of_kind(name))
                 .collect(),
         }
     }
@@ -645,6 +699,11 @@ impl ResourceSource {
     fn file_fingerprint(&self, name: &str, archives: &mut HashMap<usize, u64>) -> Option<u64> {
         match self.0.as_ref() {
             Storage::Directory(root, _) => {
+                if prepared_files::holds_folder(name)
+                    && let Some(fingerprint) = prepared_index(root).and_then(|f| f.fingerprint(name))
+                {
+                    return Some(fingerprint);
+                }
                 metadata_fingerprint(&fs::metadata(root.join(name)).ok()?).ok()
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -675,6 +734,16 @@ impl ResourceSource {
                 }
             },
         }
+    }
+}
+
+// Only the Switch changes enumeration to match the prepared snapshot; other targets retain
+// their directory walks. Host tests exercise the same branch with a real bundle.
+fn prepared_index(root: &Path) -> Option<Arc<prepared_files::PreparedFiles>> {
+    if cfg!(any(target_os = "horizon", test)) {
+        prepared_files::open(root)
+    } else {
+        None
     }
 }
 
@@ -927,6 +996,7 @@ mod tests {
         let fixture = Fixture::new();
         fs::write(fixture.0.join("horizon-resources.json"), b"{}").unwrap();
         let image = "assets/demo/textures/image.png";
+        fs::write(fixture.0.join("facts.json"), b"{}").unwrap();
         let sound = "assets/demo/sounds/sound.ogg";
         for (name, bytes) in [(image, b"image".as_slice()), (sound, b"sound")] {
             let path = fixture.0.join(name);
@@ -939,6 +1009,8 @@ mod tests {
             b"not prepared",
         )
         .unwrap();
+        // A prepared asset must list, fingerprint and read without touching the loose copy.
+        fs::remove_file(fixture.0.join(image)).unwrap();
         let source = ResourceSource::directory(fixture.0.clone());
         assert!(source.contains(image));
         assert!(source.contains(sound));
@@ -946,11 +1018,14 @@ mod tests {
         assert_eq!(source.read_limited(sound, 5).unwrap(), b"sound");
         assert!(!source.contains("assets/demo/textures/added.png"));
         assert!(!source.contains("assets/demo/textures"));
-        assert!(
-            source
-                .list("assets/demo/sounds/")
-                .contains(&sound.to_owned())
-        );
+        assert_eq!(source.list("assets/demo/sounds/"), [sound]);
+        assert_eq!(source.list_under("assets", &["textures"]), [image]);
+        assert!(source.fingerprint_under("assets", &["textures"]).is_some());
+        let all = source.list("");
+        assert!(all.iter().any(|name| name == "facts.json"));
+        assert!(all.iter().any(|name| name == image));
+        assert!(all.iter().any(|name| name == sound));
+        assert!(!all.iter().any(|name| name.ends_with("added.png")));
     }
 
     #[test]

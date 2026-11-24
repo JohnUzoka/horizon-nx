@@ -230,13 +230,20 @@ pub(crate) fn release_horizon_services() {
         return;
     }
 
+    let clocks_restored = crate::clocks::on_exit();
     crate::boost::on_exit();
     write_log(b"[Exit] userAppExit: main has returned; releasing services before the loader takes the heap back\n");
     // From here on every log line is written before the next step runs. The writer's stack is
     // closed with the other detached threads' below.
     crate::logging::stop_log_writer();
+    if !clocks_restored {
+        // Let AM tear down the application and choose the HOME profile, rather than
+        // handing the loader another title or changing focus mode with a restore still owed.
+        unsafe { ffi::__nx_applet_exit_mode = 1 };
+        write_log(b"[Exit] clock restore incomplete; exiting through AM instead\n");
+    }
     // The loader runs in this process until the next NRO's libnx sets the mode again.
-    if NO_SUSPEND_SET.swap(false, Ordering::SeqCst) {
+    if clocks_restored && NO_SUSPEND_SET.swap(false, Ordering::SeqCst) {
         let rc = unsafe { ffi::appletSetFocusHandlingMode(focus::MODE_SUSPEND_HOME_SLEEP) };
         write_log_line(format_args!(
             "[Exit] focus handling back to SuspendHomeSleep: {}",
@@ -381,11 +388,19 @@ fn close_detached_threads() -> u32 {
     threads.running + threads.untracked_total
 }
 
+#[cfg(target_os = "horizon")]
+fn clocks_in_focus() -> bool {
+    use core::sync::atomic::Ordering;
+    NO_SUSPEND_SET.load(Ordering::Relaxed)
+        && unsafe { ffi::appletGetFocusState() } == focus::IN_FOCUS
+}
+
 /// Handles every applet message waiting, as `appletMainLoop` does for one. False once the system
 /// asked the app to exit. Each frame also checks for cancelled world loads.
 #[cfg(target_os = "horizon")]
 pub fn process_applet_messages() -> bool {
     crate::boost::tick_loading();
+    let mut clock_transition = false;
     // The bound only stops a frame from spinning if messages kept coming.
     for _ in 0..16 {
         let mut message = 0;
@@ -393,14 +408,22 @@ pub fn process_applet_messages() -> bool {
             break;
         }
         if !unsafe { ffi::appletProcessMessage(message) } {
+            crate::clocks::on_exit();
+            crate::boost::on_exit();
             return false;
         }
+        // OutOfFocus includes a library applet: restore before it takes over, not just at HOME.
+        if message == 15 && !clocks_in_focus() {
+            crate::clocks::update(false, false);
+        }
+        clock_transition |= matches!(message, 16 | 30 | 31);
         // libnx AppletMessage_OperationModeChanged (30) and _PerformanceModeChanged (31): docked
         // or not, so other clocks (clocks.rs).
         if message == 30 || message == 31 {
             crate::clocks::log_clocks("the system changed the mode");
         }
     }
+    crate::clocks::update(clocks_in_focus(), clock_transition);
     true
 }
 
@@ -426,14 +449,19 @@ pub fn suspend_until_out_of_background() -> Option<u32> {
     use std::time::{Duration, Instant};
 
     let loading_boost = crate::boost::pause_loading();
-    let ask_system = !SUSPEND_UNRELIABLE.load(Ordering::Relaxed);
+    // Do not switch to a mode that may report a synthetic InFocus while clock overrides are
+    // requested, or suspend with a restore still owed. Wait for real focus without rendering.
+    let clocks_restored = crate::clocks::pause();
+    let ask_system = clocks_restored
+        && !crate::clocks::needs_focus_wait()
+        && !SUSPEND_UNRELIABLE.load(Ordering::Relaxed);
     if ask_system {
         log::info!(
             "[Applet] the last frame before the background has run; switching to SuspendHomeSleepNotify so the system suspends the app"
         );
     } else {
         log::info!(
-            "[Applet] the last frame before the background has run; waiting for focus without frames, since the system didn't suspend the app before"
+            "[Applet] the last frame before the background has run; waiting for focus without frames"
         );
     }
     // If the app is closed from HOME while suspended, nothing else of it runs.
@@ -475,8 +503,10 @@ pub fn suspend_until_out_of_background() -> Option<u32> {
         );
         return None;
     }
-    crate::boost::resume_loading(loading_boost);
     if !ask_system {
+        if state == focus::IN_FOCUS {
+            crate::boost::resume_loading(loading_boost);
+        }
         log::info!(
             "[Applet] {} again {:.2} s later, after {waits} wait(s) for the focus message",
             focus::name(state),
@@ -502,10 +532,13 @@ pub fn suspend_until_out_of_background() -> Option<u32> {
         );
     }
     if resume_rc != 0 {
+        NO_SUSPEND_SET.store(false, Ordering::Relaxed);
         log::warn!(
             "[Applet] couldn't go back to NoSuspend ({}): HOME won't be reported again",
             ResultCode(resume_rc)
         );
+    } else if state == focus::IN_FOCUS && total >= Duration::from_millis(100) {
+        crate::boost::resume_loading(loading_boost);
     }
     Some(state)
 }

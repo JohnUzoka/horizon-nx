@@ -118,6 +118,12 @@ pub enum H {
     HdrColorBoost,
     HdrLook,
     BatteryMode,
+    #[cfg(target_os = "horizon")]
+    SwitchCpu,
+    #[cfg(target_os = "horizon")]
+    SwitchGpu,
+    #[cfg(target_os = "horizon")]
+    SwitchMemory,
     ShadowCache,
     /// Opens the shader pack list (`options_ui::Page::ShaderPacks`).
     ShaderPacks,
@@ -533,6 +539,15 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                         None,
                         "60 FPS cap (30 in menus or unfocused), half the workers: less power.",
                     )],
+                ),
+                #[cfg(target_os = "horizon")]
+                (
+                    "Switch clocks",
+                    vec![
+                        h(H::SwitchCpu, None, "Request CPU 1224 MHz. Uses more power."),
+                        h(H::SwitchGpu, None, "Request GPU 460.8 MHz in handheld mode only."),
+                        h(H::SwitchMemory, None, "Request memory 1600 MHz in handheld mode only."),
+                    ],
                 ),
             ],
         ),
@@ -1004,6 +1019,11 @@ impl H {
                 }),
             ),
             H::BatteryMode => labelled("Battery Mode", on_off(g.battery)),
+            #[cfg(target_os = "horizon")]
+            H::SwitchCpu | H::SwitchGpu | H::SwitchMemory => {
+                let (key, caption) = self.switch_clock().unwrap();
+                labelled(caption, on_off(s.file.bool(key)))
+            }
             H::ShadowCache => labelled("Shadow Cache", on_off(g.shadow_cache)),
             // A press across the row, as Calibrate...: the list it opens shows the pick.
             H::ShaderPacks => Text::literal(lang::get("Shader Packs...")),
@@ -1063,6 +1083,11 @@ impl H {
             let preset = step(&Preset::ALL, s.horizon.preset, back);
             crate::graphics::apply_preset(preset, s);
             s.horizon.preset = preset;
+            return;
+        }
+        #[cfg(target_os = "horizon")]
+        if let Some((key, _)) = self.switch_clock() {
+            s.file.set(key, crate::options_file::V::Bool(!s.file.bool(key)));
             return;
         }
         let g = &mut s.horizon;
@@ -1172,6 +1197,16 @@ impl H {
             }
             _ => {}
         }
+    }
+
+    #[cfg(target_os = "horizon")]
+    fn switch_clock(self) -> Option<(&'static str, &'static str)> {
+        Some(match self {
+            H::SwitchCpu => ("horizonSwitchCpuHigh", "CPU 1224 MHz"),
+            H::SwitchGpu => ("horizonSwitchGpuHigh", "Handheld GPU 460.8 MHz"),
+            H::SwitchMemory => ("horizonSwitchMemoryHigh", "Handheld RAM 1600 MHz"),
+            _ => return None,
+        })
     }
 }
 fn max_workers() -> u32 {
@@ -1291,6 +1326,10 @@ impl Item {
             Item::Horizon(H::DynamicResolution) => g.dynamic_resolution,
             Item::Horizon(H::DitherCutoutMips) => g.dither_cutout_mips,
             Item::Horizon(H::BatteryMode) => g.battery,
+            #[cfg(target_os = "horizon")]
+            Item::Horizon(h @ (H::SwitchCpu | H::SwitchGpu | H::SwitchMemory)) => {
+                s.file.bool(h.switch_clock().unwrap().0)
+            }
             Item::Horizon(H::ShadowCache) => g.shadow_cache,
             Item::Horizon(H::TranslucentBatching) => {
                 g.translucent_batching && crate::graphics::translucent_batching_offered()
@@ -1357,6 +1396,10 @@ impl Item {
     }
     /// A preset no longer describes the settings once one of them changes.
     fn touched(self, s: &mut Settings) {
+        #[cfg(target_os = "horizon")]
+        if matches!(self, Item::Horizon(h) if h.switch_clock().is_some()) {
+            return;
+        }
         let presetless = matches!(
             self,
             Item::Extra(_)
@@ -1995,6 +2038,25 @@ mod tests {
         lights.cycle(&mut s, false, FB, &NONE);
         assert!(s.extras.dynamic_lights);
         assert_eq!(lights.switch(&s), Some(true));
+    }
+
+    #[cfg(target_os = "horizon")]
+    #[test]
+    fn switch_clock_controls_default_off_and_persist_independently() {
+        let [cpu, gpu, ram] = [H::SwitchCpu, H::SwitchGpu, H::SwitchMemory].map(Item::Horizon);
+        let mut settings = Settings::default();
+        for item in [cpu, gpu, ram] {
+            assert_eq!(item.switch(&settings), Some(false));
+        }
+        let preset = settings.horizon.preset;
+        cpu.cycle(&mut settings, false, FB, &NONE);
+        ram.cycle(&mut settings, false, FB, &NONE);
+        let settings = Settings::from_file(settings.to_file());
+        assert_eq!(
+            [cpu, gpu, ram].map(|item| item.switch(&settings)),
+            [Some(true), Some(false), Some(true)]
+        );
+        assert_eq!(settings.horizon.preset, preset);
     }
 
     #[test]

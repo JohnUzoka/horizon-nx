@@ -20,10 +20,38 @@ The launcher does not create firewall rules or change network-profile settings.
 
 ## Switch: loading and hardware tests
 
-Launch the NRO in application mode, not from Album. Horizon draws the first wordmark with its
-renderer, not an early libnx framebuffer. Its Switch loading overlay keeps the wordmark and shows
-the stage and progress. Menu input does not cancel FastLoad: the CPU stays boosted until world
-entry, but the GPU runs at its lowest clock during loading, so navigating menus can be slower.
+If upgrading from Switch 0.1.0 with its original prepared files, prepare
+Minecraft Java 26.3 again on your PC and replace the `resources` folder on
+your SD card. Keep your `saves` folder. The Switch shows **Prepared game files
+are out of date** at launch if the old export is still installed.
+
+Launch the NRO in application mode, not from Album. Horizon draws the launch wordmark with its
+renderer, not an early libnx framebuffer. Single-player entry uses one **Loading Terrain** screen
+through resource preparation, the renderer handoff if the startup menu is still active, server
+startup, and the client joining. The bar reports the current step's progress only when that step
+can measure it. On an ordinary return to a save, the already loaded resources are reused, so
+the resource step can be skipped. The world is uncovered once the client is ready and a terrain
+mesh is uploaded (an empty player column needs no mesh), not when the whole render distance fills.
+World entry and saving leave the renderer's background visible behind
+their progress. If a resource refresh is already queued when opening a
+world, its progress stays on Loading Terrain. A resource refresh triggered
+from in-world Options displays the Horizon logo and progress until it is
+ready. World upgrades keep their separate Cancel screen.
+
+The Switch keeps the preload title responsive while the world resources finish
+in the background. Opening Options or browsing worlds does not start the full
+renderer. Play, Create, and Join show their loading screen before handing off
+the existing swapchain, so renderer setup does not interrupt menu navigation.
+
+In `latest.log`, `Switch launch wordmark` means the startup menu bundle was not yet ready.
+`Switch local world queued on startup menu` identifies a selection made before Game took over;
+`Switch local world deferred` identifies a Game selection that had to wait on the background
+resource worker. `rest worker not blocking entry` identifies a request that can go straight to
+server startup. The handoff and first-scene lines distinguish that resource work from client join
+and mesh upload.
+
+FastLoad boosts the CPU during boot and world entry. It releases when the title is interactive
+or when the player takes control, so the GPU is not held at its lowest clock while using menus.
 `HORIZON_NX_CPU_BOOST=0` in `env.txt` beside the NRO disables the boost.
 
 For local testing, hbmenu's [netloader](https://switchbrew.org/wiki/Homebrew_Menu#Netloader)
@@ -31,6 +59,78 @@ accepts `nxlink` uploads after you press Y. Use a test location containing `clie
 the matching prepared `resources/`. Netloader deploys an NRO; it does not provide remote
 controller input. Use the same save copy, camera, settings, shader selection, clocks and
 handheld/docked mode when comparing builds.
+
+Switch defaults to the wide terrain vertex layout. In a stock-clock 720p jungle scene,
+it raised steady performance from about 21 to 24 FPS, while using about 154 MiB more GPU
+memory for the settled scene. Set `HORIZON_PACKED_QUADS=1` in `env.txt` to opt into the
+more compact layout if GPU memory is tighter than frame time.
+
+The first boot with content mods can take much longer than subsequent boots. Switch
+cannot link the base files into the generated mod cache, so it copies them to the SD
+card. In a stock-clock Recipe Pilot test, resources were ready after 19 min 26 s on
+the first run and 2 min 7 s with the existing cache.
+Resource paths in `args.txt` are relative to the NRO's directory unless they name
+an SD or ROMFS root explicitly. A relative path such as `../horizon/resources`
+also works when the mod cache is being generated.
+
+On Switch, the first successful resource load can build `horizon-data.bin` in the
+background. Later launches use its index for most prepared resource reads and listings, while
+keeping the original export, large loose sounds and saves intact. The bundle is local to
+that resource path and to the manifest (`horizon-resources.json`) and preparation generation
+(`horizon-prepare.json`). A missing, older, incomplete or stale bundle falls back to the loose
+export. Full preparation and `horizon-prepare` asset repairs retire the old generation; exports
+without the preparation stamp stay loose. If you hand-edit the prepared assets, use a resource
+pack instead or set `HORIZON_NO_DATA_FILE=1` in `env.txt` before starting; removing
+`horizon-data.bin` while the game is closed rebuilds it from the edited files. A stopped or
+low-space build never replaces the original assets; leave the game open until the log says
+`wrote horizon-data.bin` if you want the next launch to use the bundle.
+
+### Local splitscreen
+
+Pair another controller, open a single-player world, and enable **Options →
+Horizon Settings → Splitscreen**. Use **Controllers** in Setup to assign the
+pads. Back in the world, press a button on the second pad and follow its join
+prompt to choose a profile. On Switch Lite, the built-in controls and paired
+pads are separate inputs. All players share the console's one screen.
+
+The Switch controller and Setup work is adapted from
+[KoHaku743's Switch fork](https://github.com/KoHaku743/horizon-nx/tree/switch-next).
+
+### Optional performance clocks
+
+**Graphics → Performance → Switch clocks** offers independent switches for
+CPU (1224 MHz), handheld GPU (460.8 MHz), and handheld memory (1600 MHz).
+All three are off by default; they do not change the existing temporary
+FastLoad behavior when left off. The optional clocks require application
+mode under Atmosphère and defer to sys-clk when it is registered. The
+game restores settings it owns when it loses focus or exits. Higher
+clocks can increase battery drain and heat; keep them off for stock-clock
+comparisons.
+
+### Test a local skin without signing in
+
+Put a recognizable Java skin PNG on the SD card. For example, if the NRO is in
+`sdmc:/switch/horizon/`, put `skin.png` there and add these lines to its `env.txt`:
+
+```text
+HORIZON_OFFLINE_SKIN=sdmc:/switch/horizon/skin.png
+HORIZON_OFFLINE_SKIN_MODEL=classic
+```
+
+Use a 64×64 PNG for either model, or a legacy 64×32 PNG for classic. Set the model
+to `slim` for a slim skin; the default is classic. The `sdmc:/` path works even if
+`--game-dir` points elsewhere. A relative path is read from the game directory,
+which defaults to the NRO's directory.
+
+In the test copy's `args.txt`, add `--developer-single-player` to skip account
+restore. Launch in application mode, open a single-player world, and check the
+texture in the survival inventory preview (**X**) and in third person (**−**,
+with fresh controller defaults). Quit and relaunch with a slim PNG and
+`HORIZON_OFFLINE_SKIN_MODEL=slim`; check for three-texel-wide arms instead of four.
+The PNG is read once per launch. A missing or invalid PNG leaves the default
+skin in this offline test and logs `Horizon: no offline skin` in `log.txt`.
+
+### Microsoft sign-in
 
 The in-game Microsoft sign-in needs a Minecraft-services-approved Azure public client ID,
 `HORIZON_MSA_CLIENT_ID`, supplied at build time or in `env.txt` before launch. Do not put a

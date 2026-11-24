@@ -206,7 +206,18 @@ impl Game<'_> {
                 horizon_core::VANILLA_VERSION
             ),
         );
-        self.open_integrated(folder, name, seed, creative, create)
+        #[cfg(target_os = "horizon")]
+        let opened_at = Instant::now();
+        self.open_integrated(folder, name, seed, creative, create)?;
+        #[cfg(target_os = "horizon")]
+        if self.window.is_some() {
+            self.switch_world_entry = Some(world_entry::SwitchWorldEntry {
+                opened_at,
+                joined_at: None,
+                waiting_for_scene: false,
+            });
+        }
+        Ok(())
     }
 
     /// Load authoritative world state synchronously, without client entry or

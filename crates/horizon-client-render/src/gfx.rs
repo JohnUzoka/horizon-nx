@@ -66,7 +66,52 @@ fn taa_light_key(
 }
 
 pub(in crate::gfx) fn terrain_shader() -> String {
-    wgsl_prefix::HDR_LIGHT.to_owned() + include_str!("terrain.wgsl")
+    let terrain = include_str!("terrain.wgsl");
+    if switch_nearest_terrain() {
+        let (before, after) = terrain
+            .split_once("const SWITCH_NEAREST_TERRAIN = false;")
+            .expect("terrain shader declares the Switch sampling switch");
+        [
+            wgsl_prefix::HDR_LIGHT,
+            before,
+            "const SWITCH_NEAREST_TERRAIN = true;",
+            after,
+        ]
+        .concat()
+    } else {
+        wgsl_prefix::HDR_LIGHT.to_owned() + terrain
+    }
+}
+
+/// A/B the Build 40 nearest sampler against the upstream terrain filter on Tegra.
+fn switch_nearest_terrain() -> bool {
+    static ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        cfg!(target_os = "horizon")
+            && std::env::var_os("HORIZON_NX_NEAREST_TERRAIN").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+    });
+    *ENABLED
+}
+
+/// Test whether removing discard from opaque terrain helps Tegra's depth rejection.
+fn split_solid_terrain(backend: wgpu::Backend) -> bool {
+    static SWITCH_SPLIT: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        cfg!(target_os = "horizon")
+            && std::env::var("HORIZON_NX_SPLIT_SOLID").as_deref() == Ok("1")
+    });
+    backend == wgpu::Backend::Metal || (backend == wgpu::Backend::Vulkan && *SWITCH_SPLIT)
+}
+
+fn terrain_sampler(filtering: u32, anisotropy: u16) -> wgpu::SamplerDescriptor<'static> {
+    if filtering == 0 && switch_nearest_terrain() {
+        wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..SPRITE_NEAREST
+        }
+    } else {
+        sprite_sampler_descriptor(anisotropy)
+    }
 }
 
 fn border_shader() -> String {
@@ -473,9 +518,14 @@ fn translucent_split(batching: bool, flat_draws: bool, terrain: bool, shadow: bo
     batching && !(flat_draws && (terrain || shadow))
 }
 
-/// The compact layout of solid quads, unless `HORIZON_PACKED_QUADS=0` (A/B checks).
+/// Prefer the wide layout on Switch: compact terrain trades VRAM for vertex decoding on Tegra.
+/// `HORIZON_PACKED_QUADS=0` or `1` overrides the platform default for A/B checks.
 fn packed_wanted() -> bool {
-    std::env::var("HORIZON_PACKED_QUADS").as_deref() != Ok("0")
+    match std::env::var("HORIZON_PACKED_QUADS").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => !cfg!(target_os = "horizon"),
+    }
 }
 
 pub(crate) mod animate;
@@ -2527,6 +2577,7 @@ impl Renderer {
             Some(renderer) => {
                 describe_adapter(&renderer.adapter);
                 check_layers(&renderer.adapter, layers)?;
+                let mut configured = None;
                 Opened {
                     surface: if offscreen {
                         None
@@ -2537,7 +2588,24 @@ impl Renderer {
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .take();
                         Some(match spare {
-                            Some(surface) => surface,
+                            Some(surface) => {
+                                // Keep the last presented frame on Switch while the new
+                                // renderer builds. Reconfiguring would retire the swapchain.
+                                let size = window.inner_size();
+                                if cfg!(target_os = "horizon")
+                                    && !renderer.surface_unconfigured
+                                    && renderer.hdr.is_none()
+                                    && size.width == renderer.config.width
+                                    && size.height == renderer.config.height
+                                {
+                                    configured = Some((
+                                        renderer.config.clone(),
+                                        surface.get_capabilities(&renderer.adapter),
+                                    ));
+                                    log::info!("Horizon renderer: kept the Switch swapchain");
+                                }
+                                surface
+                            }
                             None => renderer.instance.create_surface(window.clone())?,
                         })
                     },
@@ -2546,7 +2614,7 @@ impl Renderer {
                     device: renderer.device.clone(),
                     queue: renderer.queue.clone(),
                     device_lost: renderer.device_lost.clone(),
-                    configured: None,
+                    configured,
                 }
             }
             None => {
@@ -3295,7 +3363,7 @@ impl Renderer {
                 ..Default::default()
             });
         let sprite_views = sprite_views(&sprite_textures, &sprite_unused, None);
-        let sprite_sampler = device.create_sampler(&sprite_sampler_descriptor(1));
+        let sprite_sampler = device.create_sampler(&terrain_sampler(0, 1));
         let sprite_nearest = device.create_sampler(&SPRITE_NEAREST);
         let lightmap = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Lightmap"),
@@ -4316,9 +4384,8 @@ impl Renderer {
             .flags
             .contains(wgpu::DownlevelFlags::INDIRECT_EXECUTION);
         let flat_wanted = flat::wanted(&adapter, &device);
-        // Metal draws solid terrain in two passes (`split_solid`): meshes put all
-        // their opaque quads first, so each pass draws its part in a run or two.
-        crate::mesher::group_parts(adapter.get_info().backend == wgpu::Backend::Metal);
+        // Group opaque and cutout quads where the world can draw them separately.
+        crate::mesher::group_parts(split_solid_terrain(adapter.get_info().backend));
         // Readable as storage where flat draws run: a shader pack's terrain program reads them.
         let arena = arena::Arena::new(
             &device,
@@ -7089,6 +7156,9 @@ impl Renderer {
             sprite_views: &self.sprite_views,
             format: self.output.frame.format,
             linear: self.output.frame.linear_light,
+            sdr_output: (cfg!(target_os = "horizon")
+                && self.output.frame.overlay_format != self.output.frame.format)
+                .then_some(self.output.frame.overlay_format),
             msaa: self.msaa.built(),
             sprite_tags: &sprite_tags,
             sprite_materials: &sprite_materials,
@@ -7098,7 +7168,7 @@ impl Renderer {
             pbr: self.pbr_maps.as_ref().and_then(|arrays| arrays.first()),
             looks: self.looks_layout.as_ref().filter(|_| terrain_looks),
         };
-        let metadata = native_pack::Metadata::of(&report);
+        let mut metadata = native_pack::Metadata::of(&report);
         let (pack, labels) = native_pack::NativePack::new(
             &self.device,
             &self.queue,
@@ -7107,6 +7177,7 @@ impl Renderer {
             &constants,
             lights,
         )?;
+        metadata.sdr_format = pack.post.sdr_format();
         if let Some(refused) = self.replace_executor(Some(Box::new(pack))) {
             return Err(refused);
         }
@@ -7263,7 +7334,7 @@ impl Renderer {
         self.max_anisotropy = anisotropy;
         self.sprite_sampler = self
             .device
-            .create_sampler(&sprite_sampler_descriptor(anisotropy));
+            .create_sampler(&terrain_sampler(filtering, anisotropy));
         self.rebuild_terrain_group();
     }
     fn rebuild_terrain_group(&mut self) {
@@ -7732,6 +7803,16 @@ impl Renderer {
         if self.suspended {
             return self.refuse(NotDrawn::Suspended);
         }
+        // SDR overlays can draw on the same 8-bit target as the pack's output. Keep the float
+        // path for native world hooks, screenshots and HDR, which have their own target rules.
+        let direct_sdr = self.pack_metadata.as_ref().is_some_and(|pack| {
+            pack.sdr_format == Some(self.output.frame.overlay_format)
+                && !frame.title
+                && self.hdr.is_none()
+                && !native_render::world_drawn_hooked()
+                && !native_render::world_views_hooked()
+                && self.screenshot.is_none()
+        });
         // A window frame without the room for a target it draws into is skipped before it takes
         // a swapchain image, and tried again on the next (#13624). A scaled screenshot's frame
         // is under its own scopes (`checks`), which take it again at half the size.
@@ -7769,6 +7850,7 @@ impl Renderer {
             };
             let (format, screenshot) = (self.output.frame.format, self.screenshot.is_some());
             if self.hdr.is_none()
+                && !direct_sdr
                 && let Some(image) = image
                 && !self.readback.ready(&self.device, image, format, screenshot)
             {
@@ -7910,27 +7992,6 @@ impl Renderer {
         // once.
         let backstop = checks.is_none().then(|| GpuChecks::push(&self.device));
         let size = [self.config.width, self.config.height];
-        let target_texture = match (&surface_frame, &mut self.hdr) {
-            (_, Some(hdr)) => hdr.frame(&self.device, size),
-            _ if let Some((real, _)) = &fg_frames => real.clone(),
-            // A screenshot of a swapchain without COPY_SRC (OpenGL), and a float frame
-            // with HDR off, draw into a texture of their own, then onto the swapchain or
-            // the offscreen target.
-            (f, None) => {
-                let image = match f {
-                    Some(f) => f.texture.clone(),
-                    None => self.offscreen.clone().ok_or("no offscreen target")?,
-                };
-                self.readback
-                    .target(
-                        &self.device,
-                        &image,
-                        self.output.frame.format,
-                        self.screenshot.is_some(),
-                    )
-                    .unwrap_or(image)
-            }
-        };
         // The section copies staged since the last frame, in a command buffer of their own
         // submitted before the frame's: a frame given up (`abandon_frame`) still submits them.
         let mut copies = self.take_section_copies();
@@ -8672,11 +8733,11 @@ impl Renderer {
         self.phase2_pages.clear();
         self.solid_runs.clear();
         self.phase2_runs.clear();
-        // On Metal, phase 1 goes the opaque quads of every list, then the cutout
+        // When split, phase 1 goes the opaque quads of every list, then the cutout
         // ones (`Part`), each solid pass drawing its own: `[..opaque_draws]`,
         // then the rest; phase 2 likewise. A fading list's quads all draw in the
         // cutout pass.
-        let split_solid = self.info.backend == wgpu::Backend::Metal && !msaa_on;
+        let split_solid = split_solid_terrain(self.info.backend) && !msaa_on && !gpu_frame;
         let parts = |fading: bool| -> &'static [(u8, Quads)] {
             match (split_solid, fading) {
                 (false, _) => &[(0, Quads::All)],
@@ -8685,10 +8746,6 @@ impl Renderer {
             }
         };
         let (mut opaque_draws, mut phase2_opaque) = (0, 0);
-        debug_assert!(
-            !(split_solid && gpu_frame),
-            "GPU culling is never offered on Metal"
-        );
         // In a GPU frame the GPU draws the solid quads of the whole sections within the
         // render distance that have records (`SectionGpu::gpu_draws_solid`), and the walk
         // listed those among them with translucent quads. Here stay those fading in or out
@@ -9977,8 +10034,29 @@ impl Renderer {
             };
             section_draw_calls = mesh_calls + translucent_calls;
         }
+        // A native pack always asks for a scaled world, even at 100%. If it couldn't be
+        // allocated, the world draws in its normal format and the 8-bit finish still runs.
+        let direct_sdr = direct_sdr && native_post && !pack_post && scaled.is_some() && !fg;
+        let target_format = if direct_sdr {
+            self.output.frame.overlay_format
+        } else {
+            self.output.frame.format
+        };
+        let target_texture = match (&surface_frame, &mut self.hdr) {
+            (_, Some(hdr)) => hdr.frame(&self.device, size),
+            _ if let Some((real, _)) = &fg_frames => real.clone(),
+            (f, None) => {
+                let image = match f {
+                    Some(f) => f.texture.clone(),
+                    None => self.offscreen.clone().ok_or("no offscreen target")?,
+                };
+                self.readback
+                    .target(&self.device, &image, target_format, self.screenshot.is_some())
+                    .unwrap_or(image)
+            }
+        };
         let view_target = target_texture.create_view(&wgpu::TextureViewDescriptor {
-            format: Some(self.output.frame.format),
+            format: Some(target_format),
             ..Default::default()
         });
         if let Some(timer) = &mut self.gpu_timer {
@@ -10334,10 +10412,8 @@ impl Renderer {
             let multisampled = m.msaa.filter(|_| msaa.is_some());
             multisampled.map_or(m.solid, |(solid, _)| solid)
         });
-        // Two solid passes only where a discard costs the GPU its hidden surface
-        // removal: Apple's tiled GPUs, behind Metal. Elsewhere the second pass
-        // would double the solid draw calls and vertex work for nothing.
-        let split_solid = self.info.backend == wgpu::Backend::Metal && !msaa_on;
+        // Metal benefits from discard-free opaque terrain. Tegra can opt in for comparison.
+        let split_solid = split_solid_terrain(self.info.backend) && !msaa_on && !gpu_frame;
         let translucent_pipeline = material.map_or(&self.translucent, |m| m.translucent);
         let pack_flat = material.and_then(|m| m.flat);
         let pack_flat_msaa = material
@@ -11757,7 +11833,7 @@ impl Renderer {
         }
         // A 0.2 pack in SDR: its picture finishes on 8 bits before the hand, the camera overlays
         // and the HUD draw over it (`overlay_format`).
-        let finished = (self.output.frame.overlay_format != self.output.frame.format)
+        let finished = (self.output.frame.overlay_format != target_format)
             .then(|| {
                 let image = surface_frame.as_ref().map(|f| &f.texture);
                 image.or(self.offscreen.as_ref())
@@ -11776,7 +11852,7 @@ impl Renderer {
                 });
                 (texture, view, self.output.frame.overlay_format)
             }
-            None => (target_texture, view_target, self.output.frame.format),
+            None => (target_texture, view_target, target_format),
         };
         let overlay = Overlay {
             hand_quads: hand_quads * u32::from(!pack_draws_hand && !hand_in_world),

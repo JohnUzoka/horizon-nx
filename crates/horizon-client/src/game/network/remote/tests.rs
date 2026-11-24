@@ -1108,6 +1108,33 @@ fn dimension_transition_screen_is_selected_at_entry_drawn_and_dropped() {
     );
 }
 
+#[test]
+#[ignore = "daily"]
+fn quit_confirmation_does_not_draw_the_death_cause_over_its_title() {
+    use super::super::{
+        Screen, execution_role::ExecutionRole, native_entity_refs::tests::with_game,
+    };
+    use horizon_client::hud::HudBatch;
+
+    with_game(|game| {
+        game.options.execution_role = ExecutionRole::Client;
+        let (client, _server) = horizon_protocol::connection::Pipe::pair();
+        game.connect_local(client, "DeathConfirm").unwrap();
+        game.screen = Screen::Dead;
+        game.remote.as_mut().unwrap().death_message =
+            Some(horizon_client::text::Text::literal("Slain by a spider"));
+
+        let mut death = HudBatch::scratch([400, 240]);
+        game.remote_hud_body(&mut death);
+        assert!(!death.vertices.is_empty());
+
+        game.ui.death_confirm = Some(std::time::Instant::now());
+        let mut confirm = HudBatch::scratch([400, 240]);
+        game.remote_hud_body(&mut confirm);
+        assert!(confirm.vertices.is_empty());
+    });
+}
+
 /// Spawns the connected client in the overworld as entity 7, profile 42.
 fn spawn_menu_test(game: &mut super::Game<'_>) -> horizon_protocol::packets::play::SpawnInfo {
     use horizon_client::level_loading::Reason;

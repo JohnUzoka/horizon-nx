@@ -449,6 +449,12 @@ impl PlayerSender {
     pub fn timed_out(&self) -> bool {
         matches!(&self.to, To::Pool(_, watch) if watch.timed_out())
     }
+    /// Missing a keep-alive is not a disconnect for an in-process peer: both ends can suspend
+    /// together. A connection already kicked still has a deadline to drain.
+    pub(super) fn keep_alive_timed_out(&self) -> bool {
+        matches!(self.framing, horizon_protocol::connection::Framing::Network(_))
+            && self.timed_out()
+    }
     /// Close the connection now, dropping what is still queued for it.
     pub fn close(&self) {
         self.payload_transport.close();
@@ -4299,6 +4305,20 @@ mod outgoing_budget_tests {
             menu_extra_rev: 0,
             packet_counts: Arc::default(),
             connect: None,
+        }
+    }
+
+    #[test]
+    fn only_a_network_peer_is_kicked_for_missing_keep_alives() {
+        let expired = Instant::now() - Duration::from_secs(31);
+        for (framing, expires) in [(Framing::Memory, false), (Framing::Network(None), true)] {
+            let mut peer = sender(framing);
+            let To::Pool(_, watch) = &mut peer.to else {
+                unreachable!();
+            };
+            Arc::get_mut(watch).unwrap().start = expired;
+            assert_eq!(peer.keep_alive_timed_out(), expires);
+            assert!(peer.timed_out(), "a kicked peer still has a close deadline");
         }
     }
     #[test]

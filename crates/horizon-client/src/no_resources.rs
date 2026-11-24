@@ -65,6 +65,25 @@ impl NoResources {
         }
     }
 
+    /// The resource folder exists, but its export predates this Switch build.
+    pub fn outdated(looked_in: &std::path::Path) -> Self {
+        // The Switch's devoptab paths are rooted, even though Rust's Unix
+        // Path::is_absolute does not recognise their device prefixes.
+        let shown = if looked_in.as_os_str().as_encoded_bytes().starts_with(b"sdmc:/") {
+            std::borrow::Cow::Borrowed(looked_in)
+        } else {
+            std::path::absolute(looked_in)
+                .map(std::borrow::Cow::Owned)
+                .unwrap_or(std::borrow::Cow::Borrowed(looked_in))
+        };
+        Self {
+            title: lang::get("horizon.no_resources.outdated.title"),
+            paragraphs: vec![lang::get("horizon.no_resources.outdated.prepare")],
+            buttons: vec![(lang::get("horizon.no_resources.switch_quit"), Action::Quit)],
+            looked_in: lang::tr("horizon.no_resources.outdated.looked_in", &[&shown.display()]),
+        }
+    }
+
     /// The buttons' labels, actions and rectangles in dp, and the paragraphs' wrapped
     /// lines: one layout for drawing and clicks.
     fn layout(&self, ui: &Ui) -> Layout {

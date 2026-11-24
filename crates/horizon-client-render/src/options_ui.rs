@@ -17,6 +17,7 @@ use crate::{
     hud::{HudAtlas, HudBatch, rgba},
     keybinds::{self, CATEGORIES, KeyBinds},
     lang::{self, LanguageInfo},
+    mod_browser::{ProjectKind, Status as BrowserStatus},
     settings::{SOUND_SOURCES, Settings},
     settings_shell as shell,
     text::{self, Style, Text},
@@ -327,6 +328,7 @@ impl Opt {
             // the namespace the client bundles (assets/horizon/lang).
             Opt::PadEnabled => "horizon.options.controller",
             Opt::PadVibration => "horizon.options.vibration",
+            Opt::PadVibrationStrength => "horizon.options.vibration_strength",
             Opt::PadPlayInBackground => "horizon.options.play_in_background",
             Opt::PadAdaptiveTriggers => "horizon.options.adaptive_triggers",
             Opt::PadLightbar => "horizon.options.lightbar",
@@ -430,6 +432,7 @@ impl Opt {
             Opt::ChatHeightFocused => Kind::Slider(s.chat_height_focused),
             Opt::ChatHeightUnfocused => Kind::Slider(s.chat_height_unfocused),
             Opt::ChatLineSpacing => Kind::Slider(s.chat_line_spacing),
+            Opt::PadVibrationStrength => Kind::Slider(s.controller.vibration_strength),
             Opt::PadLookSensitivity => Kind::Slider(s.controller.look_sensitivity),
             Opt::PadGyroSensitivity => Kind::Slider(s.controller.gyro_sensitivity),
             Opt::PadPointerSpeed => unit(s.controller.pointer_speed, 0.25, 3.0),
@@ -717,6 +720,7 @@ impl Opt {
                     &[&format!("{:.1}", s.notification_display_time)],
                 ),
             ),
+            Opt::PadVibrationStrength => percent(c, s.controller.vibration_strength),
             Opt::PadLookSensitivity => percent(c, 2.0 * s.controller.look_sensitivity),
             Opt::PadGyroSensitivity => percent(c, 2.0 * s.controller.gyro_sensitivity),
             Opt::PadPointerSpeed => percent(c, s.controller.pointer_speed),
@@ -935,6 +939,7 @@ impl Opt {
                 GlyphStyle::Xbox => "horizon.options.glyphs.xbox",
                 GlyphStyle::PlayStation => "horizon.options.glyphs.playstation",
                 GlyphStyle::Nintendo => "horizon.options.glyphs.nintendo",
+                GlyphStyle::Off => "options.off",
             }),
             Opt::PadNintendoButtons => tr(if s.controller.nintendo_letters {
                 "horizon.options.nintendo_buttons.letter"
@@ -945,6 +950,7 @@ impl Opt {
                 gamepad::TextKeyboard::Auto => "horizon.options.keyboard.auto",
                 gamepad::TextKeyboard::Horizon => "horizon.options.keyboard.horizon",
                 gamepad::TextKeyboard::Steam => "horizon.options.keyboard.steam",
+                gamepad::TextKeyboard::System => "horizon.options.keyboard.system",
             }),
             Opt::PadRadialMode | Opt::PadRadialStick => self.radial_text(s),
             Opt::Page(page, row) => pages::slider_text(page, row),
@@ -1029,6 +1035,7 @@ impl Opt {
             Opt::ChatHeightFocused => s.chat_height_focused = v,
             Opt::ChatHeightUnfocused => s.chat_height_unfocused = v,
             Opt::ChatLineSpacing => s.chat_line_spacing = v,
+            Opt::PadVibrationStrength => s.controller.vibration_strength = v,
             Opt::PadLookSensitivity => s.controller.look_sensitivity = v,
             Opt::PadGyroSensitivity => s.controller.gyro_sensitivity = v,
             Opt::PadPointerSpeed => s.controller.pointer_speed = step(25.0, 300.0) / 100.0,
@@ -1277,7 +1284,8 @@ impl Opt {
                     .iter()
                     .position(|g| *g == s.controller.glyphs)
                     .unwrap_or(0) as u8;
-                s.controller.glyphs = GlyphStyle::ALL[usize::from(next(i, 4))];
+                s.controller.glyphs =
+                    GlyphStyle::ALL[usize::from(next(i, GlyphStyle::ALL.len() as u8))];
             }
             Opt::PadGameplayGuide => {
                 let all = gamepad::GuideDetail::ALL;
@@ -1288,12 +1296,12 @@ impl Opt {
                 s.controller.guide_detail = all[usize::from(next(i, 3))];
             }
             Opt::PadKeyboard => {
-                let all = gamepad::TextKeyboard::ALL;
+                let all = gamepad::TextKeyboard::CHOICES;
                 let i = all
                     .iter()
                     .position(|k| *k == s.controller.keyboard)
                     .unwrap_or(0) as u8;
-                s.controller.keyboard = all[usize::from(next(i, 3))];
+                s.controller.keyboard = all[usize::from(next(i, all.len() as u8))];
             }
             Opt::PadRadialMode | Opt::PadRadialStick => self.radial_step(s, back),
             _ => {}
@@ -1525,7 +1533,7 @@ pub enum Page {
     Font,
     Packs,
     Mods,
-    /// Browse mods: the registry's content mods, searched (`mod_browser`).
+    /// Browse mods: the registry's content mods and resource packs.
     ModBrowser,
     /// One registry project's page: `OptionsUi::mod_project`.
     ModProject,
@@ -1598,6 +1606,7 @@ pub(crate) enum Act {
     /// Setting `.1` of native mod `.0`'s page clicked: a toggle, choice or colour steps on.
     NativeSetting(usize, usize),
     PageRow(usize, usize),
+    ModBrowserTab(ProjectKind),
     /// Browse mods: the page of listing `.0` of `mod_browser`.
     ModProject(usize),
     /// The open project page's Install or Update.
@@ -1836,6 +1845,7 @@ pub struct OptionsUi {
     pub(crate) settings_search: ui::EditBox,
     /// Browse mods: the registry's projects, filled by the game.
     pub mod_browser: crate::mod_browser::ModBrowser,
+    mod_browser_kind: ProjectKind,
     /// The project whose page is open (`Page::ModProject`).
     pub mod_project: String,
     /// The line about mods that wait for a restart to switch, for Browse mods' message.
@@ -1961,6 +1971,7 @@ impl Default for OptionsUi {
             language_search: search,
             settings_search,
             mod_browser: Default::default(),
+            mod_browser_kind: ProjectKind::default(),
             mod_project: String::new(),
             mods_note: None,
             mods_screen: None,
@@ -2595,22 +2606,32 @@ impl OptionsUi {
 
     /// Browse mods: what the registry offers this game, by the search box.
     fn mod_browser_rows(&self) -> Vec<Row> {
-        use crate::mod_browser::Status;
         let b = &self.mod_browser;
         match &b.status {
-            Status::Idle | Status::Loading => {
+            BrowserStatus::Idle | BrowserStatus::Loading => {
                 return vec![Row::Note(lang::get("horizon.mods.browse.loading"))];
             }
-            Status::Failed(why) => {
+            BrowserStatus::Failed(why) => {
                 return vec![Row::Note(lang::tr("horizon.mods.browse.failed", &[why]))];
             }
-            Status::Ready => {}
+            BrowserStatus::Ready => {}
         }
-        let found = b.found(&self.settings_search.value);
+        let tab = |kind, key| {
+            let b = button(0.0, 0.0, 150.0, tr(key), Act::ModBrowserTab(kind));
+            if self.mod_browser_kind == kind {
+                inactive(b)
+            } else {
+                b
+            }
+        };
+        let mut rows = vec![Row::Buttons(
+            tab(ProjectKind::Mod, "horizon.pages.mods"),
+            Some(tab(ProjectKind::ResourcePack, "horizon.mods.browse.resource_packs")),
+        )];
+        let found = b.found(&self.settings_search.value, self.mod_browser_kind);
         if found.is_empty() {
-            return vec![Row::Note(lang::get("horizon.mods.browse.none"))];
+            rows.push(Row::Note(lang::get("horizon.mods.browse.none")));
         }
-        let mut rows = Vec::new();
         for i in found {
             let l = &b.listings[i];
             let mut label = Text::literal(format!("{} {}", l.name, l.version));
@@ -2627,12 +2648,17 @@ impl OptionsUi {
         }
         rows
     }
-    /// A registry project's page: what it is, Install or Update, its description and
-    /// changelog. An installed mod is on already: the install turned it on.
+    /// A registry project's page: what it is, Install or Update, its description and changelog.
     fn mod_project_rows(&self) -> Vec<Row> {
         let b = &self.mod_browser;
+        let message = b.message.as_ref().filter(|m| m.project == self.mod_project);
         let Some(l) = b.listing(&self.mod_project) else {
-            return vec![Row::Note(lang::get("horizon.mods.browse.none"))];
+            // Switch removes a code package from the catalog after rejecting it. Keep the
+            // reason on the open page even though there is no longer a listing to render.
+            return message.map_or_else(
+                || vec![Row::Note(lang::get("horizon.mods.browse.none"))],
+                |m| wrap(&m.text, 64).into_iter().map(Row::Note).collect(),
+            );
         };
         let mut rows = vec![Row::Note(format!("{} {}", l.name, l.version))];
         let by = [
@@ -2694,8 +2720,8 @@ impl OptionsUi {
             Act::OpenModPage,
         );
         rows.push(Row::Buttons(install, Some(page)));
-        if let Some((message, _)) = &b.message {
-            rows.extend(wrap(message, 64).into_iter().map(Row::Note));
+        if let Some(message) = message {
+            rows.extend(wrap(&message.text, 64).into_iter().map(Row::Note));
         }
         let description = crate::mod_browser::plain_lines(if l.description.is_empty() {
             &l.summary
@@ -3530,16 +3556,17 @@ impl OptionsUi {
                                 events.push(Event::NativeSetting(*i, *j));
                             }
                         }
+                        Act::ModBrowserTab(kind) => {
+                            self.mod_browser_kind = *kind;
+                            self.relayout();
+                        }
                         Act::ModProject(i) => {
                             if let Some(listing) = self.mod_browser.listings.get(*i) {
                                 self.mod_project = listing.id.clone();
                                 self.push(Page::ModProject);
                             }
                         }
-                        Act::InstallMod => {
-                            self.mod_browser.message = None;
-                            events.push(Event::InstallMod(self.mod_project.clone()));
-                        }
+                        Act::InstallMod => events.push(Event::InstallMod(self.mod_project.clone())),
                         Act::OpenModPage => {
                             if let Some(l) = self.mod_browser.listing(&self.mod_project) {
                                 events.push(Event::OpenModPage(l.page.clone()));
@@ -4581,16 +4608,17 @@ impl OptionsUi {
                                 events.push(Event::NativeSetting(i, j));
                             }
                         }
+                        Act::ModBrowserTab(kind) => {
+                            self.mod_browser_kind = kind;
+                            self.relayout();
+                        }
                         Act::ModProject(i) => {
                             if let Some(listing) = self.mod_browser.listings.get(i) {
                                 self.mod_project = listing.id.clone();
                                 self.push(Page::ModProject);
                             }
                         }
-                        Act::InstallMod => {
-                            self.mod_browser.message = None;
-                            events.push(Event::InstallMod(self.mod_project.clone()));
-                        }
+                        Act::InstallMod => events.push(Event::InstallMod(self.mod_project.clone())),
                         Act::OpenModPage => {
                             if let Some(l) = self.mod_browser.listing(&self.mod_project) {
                                 events.push(Event::OpenModPage(l.page.clone()));
@@ -4632,6 +4660,23 @@ mod tests {
     use super::*;
     use crate::extras_ui::ExtraRow;
     use crate::gfx::EffectiveOutput;
+
+    #[test]
+    fn mod_browser_keeps_the_refusal_visible_after_a_project_is_hidden() {
+        let mut ui = OptionsUi {
+            mod_project: "ruby".into(),
+            ..OptionsUi::default()
+        };
+        let refusal = "Nintendo Switch can't run native or WebAssembly code mods";
+        ui.mod_browser.message = Some(crate::mod_browser::InstallMessage {
+            project: "ruby".into(),
+            text: refusal.into(),
+            success: false,
+        });
+        assert!(matches!(ui.mod_project_rows().as_slice(), [Row::Note(text)] if text == refusal));
+        ui.mod_project = "another".into();
+        assert!(matches!(ui.mod_project_rows().as_slice(), [Row::Note(text)] if text != refusal));
+    }
 
     /// A renderer whose destination offers nothing and whose display reports nothing.
     const NONE: EffectiveOutput = EffectiveOutput::NONE;
