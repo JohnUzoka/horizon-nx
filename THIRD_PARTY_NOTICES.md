@@ -127,8 +127,8 @@ comparisons on `samplerCubeArrayShadow` use core `texture` instead of `textureLo
 2026 John Uzoka, copied unmodified by bevy-horizon's `scripts/vendor_deko3d.sh`; its `README.md`
 names the bevy-horizon commit it was copied from. Only the Switch build with the `deko3d` feature
 uses it ([docs/switch.md](docs/switch.md)). It is licensed under MIT or Apache-2.0
-(`license` in its `Cargo.toml`); both licenses are in bevy-horizon's root (`LICENSE-MIT`,
-`LICENSE-APACHE`).
+(`license` in its `Cargo.toml`); both licence texts are copied beside it
+(`third_party/wgpu_deko3d/LICENSE-MIT`, `third_party/wgpu_deko3d/LICENSE-APACHE`).
 
 ## deko3d
 
