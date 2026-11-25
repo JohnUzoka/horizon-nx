@@ -79,13 +79,19 @@ Horizon's own benchmark (`--benchmark forest`, [Benchmark your own machine](benc
 render distance 12, 1280x720, stock clocks, the 12-second forest flight, on one console. "Before" is
 deko3d without the changes in the next table; "now" is the `deko3d` branch with them.
 
-| | NVK (3 runs) | deko3d before (2) | deko3d now (2) |
-| --- | --- | --- | --- |
-| avg FPS | 24.4 | 21.2 | 25.7 |
-| 1% low FPS | 14.3 | 11.6 | 16.1 |
-| p50 / p99 frame ms | 35.8 / 69.5 | 49.6 / 83.2 | 34.7 / 60.0 |
-| CPU p50 ms | 7.1 | 31.1 | 6.6 |
-| GPU p50 ms | 34.2 | 32.4 | 33.8 |
+| | NVK, packed terrain vertices (3 runs) | NVK, wide terrain vertices (1) | Build 40, NVK (1) | deko3d before (2) | deko3d now (2) |
+| --- | --- | --- | --- | --- | --- |
+| avg FPS | 24.4 | 36.9 | 42.2 | 21.2 | 25.7 |
+| 1% low FPS | 14.3 | 23.3 | 24.4 | 11.6 | 16.1 |
+| p50 / p99 frame ms | 35.8 / 69.5 | 24.2 / 42.7 | 20.1 / 40.2 | 49.6 / 83.2 | 34.7 / 60.0 |
+| CPU p50 ms | 7.1 | 6.3 | 5.2 | 31.1 | 6.6 |
+| GPU p50 ms | 34.2 | 23.0 | 16.4 | 32.4 | 33.8 |
+
+Packed terrain vertices (the default; `HORIZON_PACKED_QUADS=0` turns them off) cost NVK about
+11 ms of median GPU and make no difference on deko3d (25.6 FPS with wide ones). Against NVK with wide
+vertices, deko3d is slower: solid terrain is 93% of the heavy frame on both backends, and takes about
+56 ms on deko3d against about 38 ms on NVK for the same 650–775 draws. Build 40, whose terrain shader
+is simpler, takes 24–27 ms. Closing both gaps is the current work.
 
 What moved deko3d from "before" to "now", as measured on the console:
 
