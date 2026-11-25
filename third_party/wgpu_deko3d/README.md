@@ -2,7 +2,7 @@
 
 Generated from bevy-horizon's `crates/wgpu_deko3d` (https://github.com/JohnUzoka/bevy-horizon)
 by its `scripts/vendor_deko3d.sh`, at commit
-99f716922709f183ee2f02b575ca236d57781a0c.
+164e7e45a2c524fc0ebbf0e68129354140aa8af9, with uncommitted changes.
 Do not edit these files by hand: change the backend in bevy-horizon and run the script again.
 
 A wgpu-hal backend on deko3d, the Nintendo Switch's own GPU API; `wgpu_deko3d::instance()` makes a

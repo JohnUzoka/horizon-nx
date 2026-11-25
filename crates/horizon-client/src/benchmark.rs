@@ -72,7 +72,7 @@ pub struct Switch {
     pub a: &'static str,
     pub b: &'static str,
 }
-pub const SWITCHES: [Switch; 4] = [
+pub const SWITCHES: [Switch; 5] = [
     Switch {
         name: "gpu-culling",
         word: "gpu-culling",
@@ -100,6 +100,13 @@ pub const SWITCHES: [Switch; 4] = [
         key: "flat",
         a: "flat",
         b: "indirect",
+    },
+    Switch {
+        name: "solid-split",
+        word: "solid-split",
+        key: "split",
+        a: "off",
+        b: "on",
     },
 ];
 

@@ -15,6 +15,7 @@ pub const HELP: &[&str] = &[
     "section-layout compact|wide    solid quads' layout in the arena, all meshed again (A/B checks); replies compact",
     "section-cull [on|off]          occlusion culling of solid sections (A/B checks); replies the mode",
     "section-sides [on|off]         leave out solid quads facing away from the eye (A/B checks); replies the mode",
+    "solid-split [on|off]           solid terrain as an opaque pass, then a cutout one (A/B checks); replies the mode",
     "gpu-culling [on|off|auto]     GPU Culling as its setting sets it, not saved (A/B checks); replies the mode",
     "render-capture on|off|DIR      keep copies of the meshes drawn (on), or write the next frame's scene to DIR for scene_replay",
 ];

@@ -570,6 +570,16 @@ impl Game<'_> {
                 }
                 Ok(Some(json!({ "ok": true, "sides": r.section_sides() })))
             }
+            "solid-split" => {
+                let r = self.renderer.as_mut().ok_or("no renderer")?;
+                match words.get(1).copied() {
+                    None => {}
+                    Some("on") => r.set_solid_split(true),
+                    Some("off") => r.set_solid_split(false),
+                    Some(other) => return Err(format!("unknown solid split mode {other}").into()),
+                }
+                Ok(Some(json!({ "ok": true, "split": r.solid_split() })))
+            }
             "parallel-tick" => {
                 use horizon_client::graphics::ParallelTickMode as Mode;
                 match words.get(1).copied() {

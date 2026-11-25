@@ -1598,6 +1598,11 @@ pub struct Renderer {
     cull_on: bool,
     /// Solid quads facing away from the eye are left out (`mesher::Sides`).
     sides_on: bool,
+    /// Solid terrain in two passes without MSAA (`split_solid`): the opaque quads through
+    /// a shader that never discards, then the cutout ones. On on Metal, where a discard
+    /// costs the tiled GPU its hidden surface removal; `HORIZON_SOLID_SPLIT=1|0` and the
+    /// `solid-split` control word set it elsewhere (A/B checks).
+    split_solid_on: bool,
     /// The near solid sections culled and drawn on the GPU (`gpu_culling`): its pass,
     /// records and fades while it is on, where it is offered (`gpu_culling_offer`, mirrored
     /// for the settings in `graphics::gpu_culling_offer`), and whether the last frame drew
@@ -4318,7 +4323,15 @@ impl Renderer {
         let flat_wanted = flat::wanted(&adapter, &device);
         // Metal draws solid terrain in two passes (`split_solid`): meshes put all
         // their opaque quads first, so each pass draws its part in a run or two.
-        crate::mesher::group_parts(adapter.get_info().backend == wgpu::Backend::Metal);
+        // deko3d's meshes are grouped too, so `solid-split` A/B checks compare like with like.
+        let backend = adapter.get_info().backend;
+        let deko3d = cfg!(feature = "deko3d") && backend == wgpu::Backend::Noop;
+        crate::mesher::group_parts(backend == wgpu::Backend::Metal || deko3d);
+        let split_solid_on = match std::env::var("HORIZON_SOLID_SPLIT").as_deref() {
+            Ok("1") => true,
+            Ok("0") => false,
+            _ => backend == wgpu::Backend::Metal,
+        };
         // Readable as storage where flat draws run: a shader pack's terrain program reads them.
         let arena = arena::Arena::new(
             &device,
@@ -4626,6 +4639,7 @@ impl Renderer {
             packed_on: packed_wanted(),
             cull_on: cull.is_some(),
             sides_on: true,
+            split_solid_on,
             gpu_culling: None,
             gpu_culling_offer,
             gpu_frame: false,
@@ -5259,6 +5273,14 @@ impl Renderer {
     /// Switches leaving out solid quads facing away, for A/B checks.
     pub fn set_section_sides(&mut self, on: bool) {
         self.sides_on = on;
+    }
+    /// Whether solid terrain is drawn in two passes, opaque then cutout (`split_solid_on`).
+    pub fn solid_split(&self) -> bool {
+        self.split_solid_on
+    }
+    /// Switches solid terrain's opaque-then-cutout passes, for A/B checks.
+    pub fn set_solid_split(&mut self, on: bool) {
+        self.split_solid_on = on;
     }
     /// Whether solid sections are occlusion culled (`cull`).
     pub fn section_cull(&self) -> bool {
@@ -8672,11 +8694,11 @@ impl Renderer {
         self.phase2_pages.clear();
         self.solid_runs.clear();
         self.phase2_runs.clear();
-        // On Metal, phase 1 goes the opaque quads of every list, then the cutout
-        // ones (`Part`), each solid pass drawing its own: `[..opaque_draws]`,
-        // then the rest; phase 2 likewise. A fading list's quads all draw in the
-        // cutout pass.
-        let split_solid = self.info.backend == wgpu::Backend::Metal && !msaa_on;
+        // Where solid terrain is split (Metal, or `solid-split`), phase 1 goes the opaque
+        // quads of every list, then the cutout ones (`Part`), each solid pass drawing its
+        // own: `[..opaque_draws]`, then the rest; phase 2 likewise. A fading list's quads all
+        // draw in the cutout pass. GPU culling's frames draw their solid quads in one pass.
+        let split_solid = self.split_solid_on && !msaa_on && !gpu_frame;
         let parts = |fading: bool| -> &'static [(u8, Quads)] {
             match (split_solid, fading) {
                 (false, _) => &[(0, Quads::All)],
@@ -8685,10 +8707,6 @@ impl Renderer {
             }
         };
         let (mut opaque_draws, mut phase2_opaque) = (0, 0);
-        debug_assert!(
-            !(split_solid && gpu_frame),
-            "GPU culling is never offered on Metal"
-        );
         // In a GPU frame the GPU draws the solid quads of the whole sections within the
         // render distance that have records (`SectionGpu::gpu_draws_solid`), and the walk
         // listed those among them with translucent quads. Here stay those fading in or out
@@ -10335,9 +10353,9 @@ impl Renderer {
             multisampled.map_or(m.solid, |(solid, _)| solid)
         });
         // Two solid passes only where a discard costs the GPU its hidden surface
-        // removal: Apple's tiled GPUs, behind Metal. Elsewhere the second pass
-        // would double the solid draw calls and vertex work for nothing.
-        let split_solid = self.info.backend == wgpu::Backend::Metal && !msaa_on;
+        // removal (`split_solid_on`): Apple's tiled GPUs, behind Metal, by default.
+        // Elsewhere the second pass doubles the solid draw calls; as the list split above.
+        let split_solid = self.split_solid_on && !msaa_on && !gpu_frame;
         let translucent_pipeline = material.map_or(&self.translucent, |m| m.translucent);
         let pack_flat = material.and_then(|m| m.flat);
         let pack_flat_msaa = material
