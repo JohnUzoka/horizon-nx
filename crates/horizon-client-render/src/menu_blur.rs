@@ -8,7 +8,9 @@
 //! On a software adapter (WARP, llvmpipe) the rounds run at half the frame's
 //! width and height with half the radius: the same blur, a quarter of the
 //! pixels. At full size they took 250 ms of a CPU per frame at 1440x900, and
-//! every blurred menu ran at 3 FPS (#5185).
+//! every blurred menu ran at 3 FPS (#5185). The Switch's GPU (307 MHz
+//! handheld) blurs at half size too: with six full-size passes at 1280x720 the
+//! Create World screen's frames took 37-107 ms of GPU, at 8-18 FPS.
 
 /// `blur.json`: the passes' directions, ping-ponging between the copied
 /// frame and a swap texture; the last one writes the frame.
@@ -47,7 +49,7 @@ pub struct MenuBlur {
 }
 impl MenuBlur {
     /// `format` is the swapchain's; the blur works in its non-sRGB view. `software`:
-    /// the adapter renders on the CPU, so the blur runs at half size.
+    /// the adapter renders on the CPU, so the blur runs at half size, as it does on a Switch.
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, software: bool) -> Self {
         let format = format.remove_srgb_suffix();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -142,7 +144,7 @@ impl MenuBlur {
             targets: Vec::new(),
             size: [0, 0],
             format,
-            half: software,
+            half: software || cfg!(target_os = "horizon"),
             no_room: None,
         }
     }
