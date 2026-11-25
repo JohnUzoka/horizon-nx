@@ -258,10 +258,10 @@ impl Cull {
     pub fn features(adapter: &wgpu::Adapter) -> wgpu::Features {
         adapter.features() & wgpu::Features::SHADER_EARLY_DEPTH_TEST
     }
-    /// Where the device can run the test, if it can: Vulkan with early
-    /// depth tests (Adreno's in the shader), or Metal and DirectX 12 with the
-    /// test in the shader, all drawing an indirect multi-draw's entries with
-    /// the instance counts the GPU wrote, with fragment shaders that write
+    /// Where the device can run the test, if it can: Vulkan (and deko3d) with
+    /// early depth tests (Adreno's in the shader), or Metal and DirectX 12 with
+    /// the test in the shader, all drawing an indirect multi-draw's entries
+    /// with the instance counts the GPU wrote, with fragment shaders that write
     /// storage.
     pub fn supported(adapter: &wgpu::Adapter, device: &wgpu::Device) -> Option<DepthTest> {
         let info = adapter.get_info();
@@ -274,7 +274,11 @@ impl Cull {
             // when fragment shaders write to storage buffers with early depth tests and indirect
             // execution (#15633).
             wgpu::Backend::Gl if is_nouveau(&info) => return None,
-            wgpu::Backend::Vulkan | wgpu::Backend::Gl
+            // deko3d (third_party/wgpu_deko3d), which wgpu reports as `Noop`: UAM compiles
+            // naga's `layout(early_fragment_tests)` into the program, and deko3d forces the early
+            // test for it.
+            wgpu::Backend::Noop if !cfg!(feature = "deko3d") => return None,
+            wgpu::Backend::Vulkan | wgpu::Backend::Gl | wgpu::Backend::Noop
                 if device
                     .features()
                     .contains(wgpu::Features::SHADER_EARLY_DEPTH_TEST) =>
