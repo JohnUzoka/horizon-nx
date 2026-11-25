@@ -72,7 +72,7 @@ pub struct Switch {
     pub a: &'static str,
     pub b: &'static str,
 }
-pub const SWITCHES: [Switch; 4] = [
+pub const SWITCHES: [Switch; 5] = [
     Switch {
         name: "gpu-culling",
         word: "gpu-culling",
@@ -100,6 +100,14 @@ pub const SWITCHES: [Switch; 4] = [
         key: "flat",
         a: "flat",
         b: "indirect",
+    },
+    // What it changes is `HORIZON_FRAME_PATH`'s list (the renderer's `gfx/frame_path.rs`).
+    Switch {
+        name: "frame-path",
+        word: "frame-path",
+        key: "frame_path",
+        a: "off",
+        b: "on",
     },
 ];
 

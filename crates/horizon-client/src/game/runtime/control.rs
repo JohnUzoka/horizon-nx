@@ -570,6 +570,17 @@ impl Game<'_> {
                 }
                 Ok(Some(json!({ "ok": true, "sides": r.section_sides() })))
             }
+            "frame-path" => {
+                let r = self.renderer.as_mut().ok_or("no renderer")?;
+                match words.get(1).copied() {
+                    None => {}
+                    Some("on") => r.set_frame_path(true),
+                    Some("off") => r.set_frame_path(false),
+                    Some(other) => return Err(format!("unknown frame path mode {other}").into()),
+                }
+                let on = if r.frame_path_on() { "on" } else { "off" };
+                Ok(Some(json!({ "ok": true, "frame_path": on })))
+            }
             "parallel-tick" => {
                 use horizon_client::graphics::ParallelTickMode as Mode;
                 match words.get(1).copied() {

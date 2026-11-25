@@ -6,6 +6,9 @@ pub(super) struct Celestial {
     /// `fs_sky_celestial`, added onto the sky: the End sky, the moon, and the sun wherever the
     /// world isn't lifted.
     pub(super) added: wgpu::RenderPipeline,
+    /// `added` depth-tested (`GreaterEqual`), for a sky drawn after the solid terrain at the
+    /// far plane (`frame_path`'s `sky-late`), where it is asked for.
+    pub(super) added_late: Option<wgpu::RenderPipeline>,
     /// `fs_sky_sun` (src + frame × alpha) and `fs_sky_sun_clip` (the min): only on the float
     /// frame, which writes light.
     sun: Option<[wgpu::RenderPipeline; 2]>,
@@ -18,8 +21,9 @@ impl Celestial {
         shader: &wgpu::ShaderModule,
         vertex: &[Option<wgpu::VertexBufferLayout<'_>>],
         (format, linear): (wgpu::TextureFormat, bool),
+        late: bool,
     ) -> Self {
-        let pipeline = |label, entry, blend, write_mask| {
+        let pipeline = |label, entry, blend, write_mask, compare| {
             kept.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(layout),
@@ -36,7 +40,7 @@ impl Celestial {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    depth_compare: Some(compare),
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
@@ -66,15 +70,26 @@ impl Celestial {
         use wgpu::{BlendFactor as F, BlendOperation as Op};
         // RenderPipelines.CELESTIAL: additive (src alpha, one), with the colour premultiplied
         // in fs_sky_celestial. The frame's alpha is left alone: nothing reads it here.
+        let added_blend = wgpu::BlendState {
+            color: component(F::One, F::One, Op::Add),
+            alpha: component(F::Zero, F::OneMinusSrcAlpha, Op::Add),
+        };
         let added = pipeline(
             "Celestial bodies",
             "fs_sky_celestial",
-            wgpu::BlendState {
-                color: component(F::One, F::One, Op::Add),
-                alpha: component(F::Zero, F::OneMinusSrcAlpha, Op::Add),
-            },
+            added_blend,
             wgpu::ColorWrites::ALL,
+            wgpu::CompareFunction::Always,
         );
+        let added_late = late.then(|| {
+            pipeline(
+                "Celestial bodies (after the terrain)",
+                "fs_sky_celestial",
+                added_blend,
+                wgpu::ColorWrites::ALL,
+                wgpu::CompareFunction::GreaterEqual,
+            )
+        });
         // The float frame clamps neither the fragment's alpha nor the factor, so the sky's
         // weight may pass 1. The frame's alpha is left alone here too.
         let sun = (format == super::LINEAR_FRAME).then(|| {
@@ -89,6 +104,7 @@ impl Celestial {
                         alpha: affine,
                     },
                     wgpu::ColorWrites::COLOR,
+                    wgpu::CompareFunction::Always,
                 ),
                 pipeline(
                     "The sun's clip",
@@ -98,10 +114,15 @@ impl Celestial {
                         alpha: min,
                     },
                     wgpu::ColorWrites::COLOR,
+                    wgpu::CompareFunction::Always,
                 ),
             ]
         });
-        Self { added, sun }
+        Self {
+            added,
+            added_late,
+            sun,
+        }
     }
 
     /// The Overworld's sun and moon (`Game::celestial_geometry`: the sun's quad first, unless a

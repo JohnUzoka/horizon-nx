@@ -494,6 +494,7 @@ pub mod entity_skin;
 pub mod external;
 mod flat;
 mod frame_gen;
+mod frame_path;
 pub(crate) mod frame_targets;
 mod frustum;
 mod gpu_culling;
@@ -1596,6 +1597,11 @@ pub struct Renderer {
     /// counts reach a multi-draw's entries (Vulkan, Metal).
     cull: Option<cull::Cull>,
     cull_on: bool,
+    /// The frame's A/B switch (`frame_path`): what it changes, and whether it is on.
+    frame_path: frame_path::FramePath,
+    frame_path_on: bool,
+    /// `fs_cloud`'s pipeline, where `frame_path` asks for it.
+    cloud_shader_pipeline: Option<wgpu::RenderPipeline>,
     /// Solid quads facing away from the eye are left out (`mesher::Sides`).
     sides_on: bool,
     /// The near solid sections culled and drawn on the GPU (`gpu_culling`): its pass,
@@ -1614,6 +1620,8 @@ pub struct Renderer {
     /// geometry over it. The mirror keeps `sky`: its per-pixel fan is cheap at
     /// the reflection's size and needs no second projection.
     sky_base: wgpu::RenderPipeline,
+    /// `frame_path`'s `sky-late` pipelines, where it is asked for.
+    sky_late: Option<frame_path::SkyLate>,
     sunrise_pipeline: wgpu::RenderPipeline,
     sunrise_buffer: wgpu::Buffer,
     dark_disc: wgpu::RenderPipeline,
@@ -3022,6 +3030,33 @@ impl Renderer {
             false,
             Some(sunrise_blend),
         );
+        let (frame_path, frame_path_on) = frame_path::FramePath::from_env();
+        // `frame_path`'s `sky-late`: the sky's base and the sunrise fan depth-tested at the far
+        // plane, drawn after the solid terrain over what it left uncovered.
+        let sky_late = frame_path.sky_late.then(|| frame_path::SkyLate {
+            base: pipeline(
+                "Sky base (after the terrain)",
+                "vs_sky",
+                "fs_sky_base",
+                &[],
+                tri,
+                None,
+                false,
+                true,
+                None,
+            ),
+            sunrise: pipeline(
+                "Sunrise fan (after the terrain)",
+                "vs_sunrise",
+                "fs_sunrise",
+                &sunrise_buffers,
+                tri,
+                None,
+                false,
+                true,
+                Some(sunrise_blend),
+            ),
+        });
         let dark_disc = pipeline(
             "Dark disc",
             "vs_sky",
@@ -3801,6 +3836,21 @@ impl Renderer {
             alpha_blend,
             true,
         );
+        // `fs_cloud`, made only where the frame-path switch asks for it.
+        let cloud_shader_pipeline = frame_path.cloud_shader.then(|| {
+            entity_pipeline_with(EntityPipelineOptions {
+                label: "Clouds (own shader)",
+                cull_mode: Some(wgpu::Face::Back),
+                depth_write: true,
+                compare: wgpu::CompareFunction::GreaterEqual,
+                bias: Default::default(),
+                blend: alpha_blend,
+                clouds: true,
+                vertex: "vs_entity",
+                fragment: "fs_cloud",
+                write_mask: wgpu::ColorWrites::ALL,
+            })
+        });
         // RenderPipelines.TEXT_SEE_THROUGH: translucent, no depth test or
         // writes, culled like every world text pipeline (TEXT_SNIPPET keeps
         // RenderPipeline.Builder's default): a name tag or text display hides
@@ -4035,6 +4085,7 @@ impl Renderer {
             &entity_shader,
             &entity_vertex,
             (frame_format, linear_light),
+            frame_path.sky_late,
         );
         drop(entity_step);
         // WorldBorderRenderer: misc/forcefield.png as a MipmappedTexture
@@ -4625,6 +4676,9 @@ impl Renderer {
             world_held: false,
             packed_on: packed_wanted(),
             cull_on: cull.is_some(),
+            frame_path,
+            frame_path_on,
+            cloud_shader_pipeline,
             sides_on: true,
             gpu_culling: None,
             gpu_culling_offer,
@@ -4637,6 +4691,7 @@ impl Renderer {
             mesh_terrain,
             sky,
             sky_base,
+            sky_late,
             sunrise_pipeline,
             sunrise_buffer,
             dark_disc,
@@ -5271,6 +5326,22 @@ impl Renderer {
         }
         self.cull_on = on;
         Ok(())
+    }
+    /// Whether the frame's A/B switch is on (`frame_path`).
+    pub fn frame_path_on(&self) -> bool {
+        self.frame_path_on
+    }
+    /// Turns the frame's A/B switch on or off, for A/B checks.
+    pub fn set_frame_path(&mut self, on: bool) {
+        self.frame_path_on = on;
+    }
+    /// What this frame draws differently, by the frame's A/B switch.
+    fn frame_path(&self) -> frame_path::FramePath {
+        if self.frame_path_on {
+            self.frame_path
+        } else {
+            Default::default()
+        }
     }
     /// Of the boxes occlusion culling's last test read back drew, how many
     /// it did not see and how many it drew, and the share of solid indices
@@ -8034,6 +8105,7 @@ impl Renderer {
         let sun = Vec3::new(0.0, sun_angle.cos(), -sun_angle.sin());
         let (fog_color, fog) = fog_uniform(frame);
         let sky_visible = sky_open(frame);
+        let fp = self.frame_path();
         let globals = Globals {
             view_proj: jittered.to_cols_array_2d(),
             fog_color,
@@ -10057,6 +10129,8 @@ impl Renderer {
         // between them (a scaled world's post pass, HDR's world copy, a native mod's
         // `world_drawn`): one render pass fewer, ~10 µs of wgpu's encoding a frame.
         let hand_in_world = (frame.hand.len() / 4) > 0
+            && !fp.hand_pass
+            && !fp.no_hand
             && !pack_draws_hand
             && scaled.is_none()
             && self.hdr.is_none()
@@ -10378,6 +10452,35 @@ impl Renderer {
             // Without the room for its IDs (#13624) solid terrain draws as without it.
             vis_frame = vis.fit(&self.device, [depth.width(), depth.height()], flat);
         }
+        // `frame_path`'s `sky-late`: the Overworld's plain sky, its sunrise fan and its sun and
+        // moon after the solid terrain, at the far plane only, so they shade just the pixels the
+        // terrain left uncovered. Only in frames whose sky is nothing else (no pack, mod, core or
+        // custom sky, stars, dark disc or End sky, no HDR) and whose solid terrain draws in the
+        // world pass itself.
+        let sky_late = self.sky_late.as_ref().filter(|_| {
+            fp.sky_late
+                && !frame.title
+                && sky_visible
+                && frame.skybox
+                && !frame.end_sky
+                && frame.stars.is_none()
+                && !frame.dark_disc
+                && !pack_draws_sky
+                && !pack_draws_celestial
+                && !pack_draws_terrain
+                && !native_sky_pass
+                && self.external.is_none()
+                && self.executor.is_none()
+                && self.hdr.is_none()
+                && !self.core_sky.as_ref().is_some_and(|c| c.draws_disc())
+                && !self.custom_sky.is_drawing()
+                && self.celestial.added_late.is_some()
+                && !world_primitives
+                && msaa.is_none()
+                && surface.is_none()
+                && material.is_none()
+                && !vis_frame
+        });
         {
             let attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: world_view,
@@ -10421,7 +10524,8 @@ impl Renderer {
             );
             pass.set_bind_group(0, &self.group, &[]);
             pack_frame(&mut pass);
-            if frame.title || (sky_visible && (frame.skybox || frame.end_sky)) {
+            let early_sky = (frame.skybox || frame.end_sky) && !fp.no_sky && sky_late.is_none();
+            if frame.title || (sky_visible && early_sky) {
                 pass.stage(self.own_timing.as_mut(), "sky");
                 let native_sky = !frame.title
                     && frame.skybox
@@ -10480,7 +10584,7 @@ impl Renderer {
                             pass.set_bind_group(0, &self.entity_group, &[]);
                         }
                     }
-                    if celestial_vertices > 0 && !pack_draws_celestial {
+                    if celestial_vertices > 0 && !pack_draws_celestial && !fp.no_celestial {
                         // The Overworld's bodies are the sun's quad and the moon's
                         // (`Game::celestial_geometry`): a pack sky drawing its own skips one.
                         let own = |hides: fn(&external::Capabilities) -> bool| {
@@ -10501,7 +10605,12 @@ impl Renderer {
                     pass.set_bind_group(0, &self.group, &[]);
                 }
                 let own_stars = self.executor.is_some_and(|c| c.hides_stars);
-                if !frame.title && frame.stars.is_some() && !pack_draws_sky && !own_stars {
+                if !frame.title
+                    && frame.stars.is_some()
+                    && !pack_draws_sky
+                    && !own_stars
+                    && !fp.no_celestial
+                {
                     match self.core_sky.as_ref().filter(|c| c.draws_stars()) {
                         Some(core) => core.draw_stars(&mut pass),
                         None => self.stars.draw(&mut pass),
@@ -10886,6 +10995,36 @@ impl Renderer {
             } else if surface.is_some() {
                 drop(pass);
                 pass = plain_pass(&mut encoder);
+            }
+            if let Some(late) = sky_late.filter(|_| !fp.no_sky) {
+                pass.stage(self.own_timing.as_mut(), "sky");
+                let target = world_depth.texture();
+                let (w, h) = (target.width() as f32, target.height() as f32);
+                // The far plane alone: every fragment at the depth the pass cleared to, which
+                // the test (`GreaterEqual`) passes only where nothing solid was drawn.
+                pass.set_viewport(0.0, 0.0, w, h, 0.0, 0.0);
+                pass.set_bind_group(0, &self.group, &[]);
+                pass.set_pipeline(&late.base);
+                pass.draw(0..3, 0..1);
+                if frame.sky.sunrise_color[3] > 0.001 {
+                    pass.set_pipeline(&late.sunrise);
+                    pass.set_vertex_buffer(0, self.sunrise_buffer.slice(..));
+                    pass.draw(0..sunrise_fan::VERTICES as u32, 0..1);
+                }
+                if celestial_vertices > 0
+                    && !fp.no_celestial
+                    && let Some(added) = &self.celestial.added_late
+                {
+                    pass.set_pipeline(added);
+                    pass.set_bind_group(0, &self.entity_group, &[]);
+                    pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.set_vertex_buffer(0, self.celestial_buffer.slice(..));
+                    let quads = &frame.celestial[..celestial_vertices];
+                    pass.draw_indexed(celestial::bodies(quads, false, false), 0, 0..1);
+                }
+                pass.set_viewport(0.0, 0.0, w, h, 0.0, 1.0);
+                pass.set_bind_group(0, &self.group, &[]);
+                pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
             }
             // RenderLevelStageEvent.AfterOpaqueBlocks: after solid and cutout terrain, before
             // entities.
@@ -11442,9 +11581,13 @@ impl Renderer {
                     0..1,
                 );
             }
-            if cloud_quads > 0 && !pack_draws_clouds && !oit_on {
+            if cloud_quads > 0 && !pack_draws_clouds && !oit_on && !fp.no_clouds {
                 pass.stage(self.own_timing.as_mut(), "clouds");
-                pass.set_pipeline(&self.cloud_pipeline);
+                pass.set_pipeline(
+                    (self.cloud_shader_pipeline.as_ref())
+                        .filter(|_| fp.cloud_shader)
+                        .unwrap_or(&self.cloud_pipeline),
+                );
                 pass.set_bind_group(0, &self.entity_group, &[]);
                 pass.set_bind_group(1, &self.cloud_group, &[]);
                 pass.set_vertex_buffer(0, self.cloud_buffer.slice(..));
@@ -11779,7 +11922,7 @@ impl Renderer {
             None => (target_texture, view_target, self.output.frame.format),
         };
         let overlay = Overlay {
-            hand_quads: hand_quads * u32::from(!pack_draws_hand && !hand_in_world),
+            hand_quads: hand_quads * u32::from(!pack_draws_hand && !hand_in_world && !fp.no_hand),
             first_hand_vertex: match fg_made && frame_gen::generated_only() && self.hdr.is_some() {
                 true => made_hand_vertex,
                 false => ((world_quads + additive_quads) * 4) as i32,
@@ -12216,7 +12359,7 @@ impl Renderer {
         {
             hdr.tonemap(encoder, timing.as_mut());
         }
-        if !frame.screen.is_empty() {
+        if !frame.screen.is_empty() && !(self.frame_path().no_screen && !frame.title) {
             let attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: view_target,
                 resolve_target: None,
@@ -12379,7 +12522,10 @@ impl Renderer {
             self.depth.as_ref().expect(WINDOW_DEPTH),
             frame.hud,
             [self.config.width, self.config.height],
-            blur_at..frame.hud.vertices.len() as u32,
+            match self.frame_path().no_hud && !frame.title {
+                true => blur_at..blur_at,
+                false => blur_at..frame.hud.vertices.len() as u32,
+            },
             timing.as_mut(),
         );
         if overlay.real {

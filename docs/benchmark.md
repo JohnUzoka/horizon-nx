@@ -60,6 +60,9 @@ It starts at the title screen, creates the world `horizon-benchmark` (seed 1234,
 | `section-cull` | `on` | `off` |
 | `section-sides` | `on` | `off` |
 | `section-draws` | `flat` | `indirect` |
+| `frame-path` | `off` | `on` |
+
+`frame-path` turns on what `HORIZON_FRAME_PATH` (read at startup, comma-separated) lists, and `HORIZON_FRAME_PATH_ON=1` starts with it on (`gfx/frame_path.rs`): `sky-late` draws the Overworld's plain sky, sunrise fan, sun and moon after the solid terrain, depth-tested at the far plane, so only the pixels the terrain left uncovered shade it; `hand-pass` draws the first-person hand in a pass of its own whose depth starts cleared instead of after a full-screen depth reset in the world pass; `cloud-shader` shades the clouds with their own fragment shader instead of the entity shader's. These draw the same picture. To time a part of the frame, `no-sky`, `no-celestial`, `no-clouds`, `no-screen` (the camera overlays, the vignette among them), `no-hand` and `no-hud` leave it out.
 
 ```sh
 horizon-client --benchmark ab:gpu-culling --render-distance 12

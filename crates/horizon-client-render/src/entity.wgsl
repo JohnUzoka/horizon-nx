@@ -190,6 +190,14 @@ struct CloudInfo {
     @location(2) overlay: u32, @location(3) color: vec4<f32>, @location(4) light: vec4<u32>, @location(5) normal: vec4<f32>) -> Out {
     return entity_vertex(position + cloud.offset.xyz, uv, overlay, cloud.colors[light.x], light, normal);
 }
+// clouds.fsh alone: `fs_entity`'s cloud branch (overlay 4) without the entity shader's other
+// branches, so the clouds do not run with the registers its worst branch takes. The cloud
+// pipeline culls back faces, so every fragment is front-facing.
+@fragment fn fs_cloud(in: Out) -> @location(0) vec4<f32> {
+    let color = textureSample(atlas, atlas_sampler, in.uv) * in.color;
+    return entity_written_color(in,
+        vec4(color.rgb, color.a * (1.0 - linear_fog(in.fog_distance.x, 0.0, globals.fog_ends.y))));
+}
 // rendertype_end_portal.fsh: the layer colours.
 const PORTAL_COLORS = array<vec3<f32>, 16>(
     vec3(0.022087, 0.098399, 0.110818),
