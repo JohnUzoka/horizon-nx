@@ -492,6 +492,20 @@ fn energy_swirl_fog(in: Out) -> f32 {
     return vec4(0.0);
 }
 
+// The first-person hand's occluder (gfx/hand_depth.rs), depth only: `fs_hand_cover` keeps the
+// hand's pixels that replace what is under them (alpha 1 through the hand's alpha blend),
+// `fs_hand_uncover` those that blend over it.
+@fragment fn fs_hand_cover(in: Out, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    let color = entity_color(in, front);
+    if color.a < 1.0 { discard; }
+    return vec4(0.0);
+}
+@fragment fn fs_hand_uncover(in: Out, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    let color = entity_color(in, front);
+    if color.a >= 1.0 { discard; }
+    return vec4(0.0);
+}
+
 // WEATHER_MATH_BEGIN
 // Unsigned 64-bit helpers (low word first). Snow adds a random double to a
 // float drift before casting to float. Retaining the 53-bit base avoids early

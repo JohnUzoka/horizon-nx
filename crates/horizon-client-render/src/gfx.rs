@@ -238,6 +238,7 @@ mod entity_outline;
 #[doc(hidden)]
 pub mod entity_pixel_test;
 mod fluid;
+mod hand_depth;
 mod prepared_model;
 #[cfg(feature = "test-support")]
 pub use prepared_model::fail_next_prepared_upload;
@@ -1668,6 +1669,8 @@ pub struct Renderer {
     translucent_item_pipeline: wgpu::RenderPipeline,
     /// `RenderPipelines.WATER_MASK`: depth writes only, no colour.
     water_mask_pipeline: wgpu::RenderPipeline,
+    /// `hand_depth::cover`'s pipelines: `fs_hand_cover`, then `fs_hand_uncover`.
+    hand_cover: [wgpu::RenderPipeline; 2],
     cloud_pipeline: wgpu::RenderPipeline,
     cloud_mesh: crate::clouds::Mesh,
     cloud_buffer: wgpu::Buffer,
@@ -3738,6 +3741,20 @@ impl Renderer {
             fragment: "fs_water_mask",
             write_mask: wgpu::ColorWrites::empty(),
         });
+        let hand_cover = ["fs_hand_cover", "fs_hand_uncover"].map(|fragment| {
+            entity_pipeline_with(EntityPipelineOptions {
+                label: "First-person hand cover",
+                cull_mode: None,
+                depth_write: true,
+                compare: wgpu::CompareFunction::Always,
+                bias: Default::default(),
+                blend: alpha_blend,
+                clouds: false,
+                vertex: "vs_entity",
+                fragment,
+                write_mask: wgpu::ColorWrites::empty(),
+            })
+        });
         let crumbling_pipeline = entity_pipeline(
             "Breaking cracks",
             Some(wgpu::Face::Back),
@@ -4670,6 +4687,7 @@ impl Renderer {
             shadow_blob_pipeline,
             translucent_item_pipeline,
             water_mask_pipeline,
+            hand_cover,
             cloud_pipeline,
             cloud_mesh: Default::default(),
             cloud_buffer,
@@ -10056,13 +10074,15 @@ impl Renderer {
         // The hand draws at the end of the world pass, after a depth reset, when nothing runs
         // between them (a scaled world's post pass, HDR's world copy, a native mod's
         // `world_drawn`): one render pass fewer, ~10 µs of wgpu's encoding a frame.
+        // `HORIZON_HAND_DEPTH=pass` keeps it in its own pass (`hand_depth`).
         let hand_in_world = (frame.hand.len() / 4) > 0
             && !pack_draws_hand
             && scaled.is_none()
             && self.hdr.is_none()
             // Frame generation draws the hand over the real and the made frame after the world.
             && fg_frames.is_none()
-            && !native_render::world_drawn_hooked();
+            && !native_render::world_drawn_hooked()
+            && hand_depth::mode() != hand_depth::HandDepth::Pass;
         if oit_on && let Some(oit) = &mut self.oit {
             oit.prepare(
                 &self.device,
@@ -10551,6 +10571,30 @@ impl Renderer {
             } else if let Some(surface) = &surface {
                 drop(pass);
                 pass = terrain_pass(&mut encoder, surface, true);
+            }
+            // The hand's cover, before the terrain it hides (`hand_depth`), in the world's own
+            // single-sampled depth, which the reset before the hand clears again.
+            if hand_in_world
+                && hand_depth::mode() == hand_depth::HandDepth::Cover
+                && msaa.is_none()
+                && surface.is_none()
+                && !vis_frame
+                && !pack_draws_terrain
+            {
+                pass.stage(self.own_timing.as_mut(), "hand cover");
+                let size = world_depth.texture().size();
+                pass.set_bind_group(0, &self.hand_group, &[]);
+                pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_vertex_buffer(0, self.entity_buffer.slice(..));
+                hand_depth::cover(
+                    &mut pass,
+                    self.hand_cover.each_ref(),
+                    [size.width, size.height],
+                    hand_quads,
+                    world_quads + additive_quads,
+                );
+                pass.set_bind_group(0, &self.group, &[]);
+                pack_frame(&mut pass);
             }
             match self
                 .flat
@@ -11509,9 +11553,22 @@ impl Renderer {
             }
             if hand_in_world {
                 pass.stage(self.own_timing.as_mut(), "hand");
+                // Only the hand reads the reset depth unless something after the world pass
+                // does: then the reset covers just the hand's pixels (`hand_depth`).
+                let size = world_depth.texture().size();
+                let size = [size.width, size.height];
+                let rect = (hand_depth::mode().rect() && !keep_depth)
+                    .then(|| hand_depth::rect(frame.hand, hand_view_proj, size))
+                    .flatten();
+                if let Some([x, y, w, h]) = rect {
+                    pass.set_scissor_rect(x, y, w, h);
+                }
                 pass.set_pipeline(&self.depth_reset);
                 pass.set_bind_group(0, &self.group, &[]);
                 pass.draw(0..3, 0..1);
+                if rect.is_some() {
+                    pass.set_scissor_rect(0, 0, size[0], size[1]);
+                }
                 self.draw_hand(&mut pass, hand_quads, world_quads + additive_quads);
             }
         }
