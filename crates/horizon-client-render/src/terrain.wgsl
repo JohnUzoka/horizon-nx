@@ -189,6 +189,11 @@ fn sprite(tiled: vec2<f32>, layer: u32) -> vec4<f32> {
 fn sprite_at(tiled: vec2<f32>, layer: u32, du: vec2<f32>, dv: vec2<f32>) -> vec4<f32> {
     // terrain.fsh's two sampling paths: sampleRGSS for RGSS, sampleNearest otherwise.
     let uv = tile_uv(tiled);
+    if terrain_ab(16u) {
+        // Build 40's sampling: under the A/B's nearest sampler, the sprite at the UV's own
+        // gradients (taken unwrapped, so the level holds across a tile's block seams).
+        return sprite_grad(uv, layer, du, dv);
+    }
     if terrain_ab(2u) {
         let level = max(length(du), length(dv)) * globals.filtering.y;
         return sprite_level(uv, layer, max(0.0, log2(level)));

@@ -7274,12 +7274,48 @@ impl Renderer {
             .create_sampler(&sprite_sampler_descriptor(anisotropy));
         self.rebuild_terrain_group();
     }
+    /// `HORIZON_TERRAIN_AB`'s bit 16 (`terrain_ab::NEAREST`): this frame's terrain group samples
+    /// the sprites with Build 40's nearest sampler; the usual group waits in `alt_group`.
+    fn swap_terrain_ab_group(&mut self, ab: u32) {
+        let Some(t) = &mut self.terrain_ab else {
+            return;
+        };
+        let nearest = ab & terrain_ab::NEAREST != 0;
+        if nearest == t.swapped {
+            return;
+        }
+        let alt = t.alt_group.get_or_insert_with(|| {
+            let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("Block sprites (Build 40's nearest, terrain A/B)"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                ..SPRITE_NEAREST
+            });
+            terrain_group(
+                &self.device,
+                "Horizon terrain resources (terrain A/B nearest)",
+                &self.terrain_layout,
+                &self.globals,
+                &self.sprite_views,
+                &sampler,
+                &self.lightmap_view,
+                &self.lightmap_sampler,
+                &self.emission_stats.view,
+            )
+        });
+        std::mem::swap(&mut self.group, alt);
+        t.swapped = nearest;
+    }
     fn rebuild_terrain_group(&mut self) {
         self.sprite_views = sprite_views(
             &self.sprite_textures,
             &self.sprite_unused,
             Some(self.mipmaps + 1),
         );
+        if let Some(t) = &mut self.terrain_ab {
+            t.alt_group = None;
+            t.swapped = false;
+        }
         self.group = terrain_group(
             &self.device,
             "Horizon terrain resources",
@@ -7688,6 +7724,7 @@ impl Renderer {
         let mut laps = crate::spans::laps();
         // This frame's `HORIZON_TERRAIN_AB` variant bits (terrain.wgsl's `terrain_ab`).
         let ab = self.terrain_ab.as_mut().map_or(0, |a| a.next_frame());
+        self.swap_terrain_ab_group(ab);
         let landing = Instant::now();
         self.land_frame();
         // Waiting for the previous frame (offscreen: at most two on the GPU), not work.
