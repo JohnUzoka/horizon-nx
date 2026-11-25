@@ -119,6 +119,10 @@ plain `sampler2D*` rather than `*Shadow`, so loads, gathers and ordinary samplin
 `.x` (modules passing depth textures to functions keep the upstream behaviour); level-zero
 comparisons on `samplerCubeArrayShadow` use core `texture` instead of `textureLod`, so
 `GL_EXT_texture_shadow_lod` is only requested when a call really needs it.
+The GLSL backend writes a loop's continuing block (and `break if`) after the body when the body
+has no `continue` of that loop. Upstream writes it first, behind a `loop_init` gate, where a `let`
+of the body that the continuing block uses is written out again and reads the variables as the
+next iteration starts; loops with a `continue` keep that form.
 
 ## wgpu_deko3d
 
