@@ -1140,6 +1140,13 @@ real pad, which is how to check a change without the game.
   console in handheld mode, a pair of Joy-Con held together or a Pro
   Controller all come through as one pad. A single sideways Joy-Con is not
   supported.
+- The backend samples libnx's pads on its own thread every 4 ms and queues each change, so a tap
+  shorter than a frame still registers: reading only the latest state once a frame lost a press
+  and release between two reads (D-pad taps at 7–11 FPS behind a blurred menu, every tap during a
+  stall of several seconds). A button pressed and released between two of the game's reads is down
+  for one read and released at the next (`game/interface/pad/hardware.rs`), as the stick's peaks
+  are for flicks. When nothing reads, the full queue holds the sampler back. The splitscreen pad
+  reader and ZL/ZR don't do this yet ([Switch builds](switch.md#known-issues)).
 - Buttons are reported by position: B is South, A East, Y West, X North;
   L/R are the bumpers, ZL/ZR the triggers (digital), Minus/Plus are
   Select/Start. The controller is identified as Nintendo, and the Switch

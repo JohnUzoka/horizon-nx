@@ -125,3 +125,4 @@ only the spans' CPU times mean anything.
 Saved runs go to `benchmarks/perf/`; `--table` prints them as Markdown.
 
 - [Horizon v0.2.97 vs vanilla 26.3 on Windows 11, Ryzen 7 9800X3D + RTX 5080](../benchmarks/perf/windows-9800x3d-5080-2026-10-29.md) (2026-10-29)
+- [Switch: deko3d against NVK](switch.md#performance-against-nvk), the game's `--benchmark forest` on the console (2026-11-25)

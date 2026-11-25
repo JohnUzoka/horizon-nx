@@ -92,7 +92,9 @@ where WebGL2's minimum 16 was reported before), so a pipeline layout the driver 
 not refused. Its GL backend copies depth and stencil textures with a framebuffer blit, where
 `glCopyTexSubImage` read only colour and left the copy empty. Its DirectX 12 backend leaves out
 an adapter that offers neither `IDXGIAdapter4` nor `IDXGIAdapter3`, where an `unwrap` ended the
-program. It is licensed under MIT or
+program. `InstanceError::new` and `BufferBinding::buffer` are public, as in bevy-horizon's patched
+wgpu-hal 29, so `third_party/wgpu_deko3d` (below), a backend outside wgpu-hal, can refuse a surface
+and read a binding's buffer. It is licensed under MIT or
 Apache-2.0; both licenses are in that folder
 (`LICENSE.MIT`, `LICENSE.APACHE`).
 
@@ -117,6 +119,65 @@ plain `sampler2D*` rather than `*Shadow`, so loads, gathers and ordinary samplin
 `.x` (modules passing depth textures to functions keep the upstream behaviour); level-zero
 comparisons on `samplerCubeArrayShadow` use core `texture` instead of `textureLod`, so
 `GL_EXT_texture_shadow_lod` is only requested when a call really needs it.
+
+## wgpu_deko3d
+
+`third_party/wgpu_deko3d` is the deko3d backend for wgpu-hal from
+[bevy-horizon](https://github.com/JohnUzoka/bevy-horizon)'s `crates/wgpu_deko3d`, Copyright (c)
+2026 John Uzoka, copied unmodified by bevy-horizon's `scripts/vendor_deko3d.sh`; its `README.md`
+names the bevy-horizon commit it was copied from. Only the Switch build with the `deko3d` feature
+uses it ([docs/switch.md](docs/switch.md)). It is licensed under MIT or Apache-2.0
+(`license` in its `Cargo.toml`); both licence texts are copied beside it
+(`third_party/wgpu_deko3d/LICENSE-MIT`, `third_party/wgpu_deko3d/LICENSE-APACHE`).
+
+## deko3d
+
+The Switch build with the `deko3d` feature statically links [deko3d](https://github.com/devkitPro/deko3d)
+v0.5.0, the Switch's GPU API, by fincs (devkitPro), Copyright (C) 2018-2020 fincs, under the zlib
+license. It is not in this repository: bevy-horizon's `scripts/build_uam.sh` clones the tag and
+builds it as `libdeko3d_bh.a` (and the debug `libdeko3dd_bh.a`) with three of bevy-horizon's
+patches (`patches/deko3d/`), so this is an altered version:
+
+- `alpha-dst-blend-factor.patch`: blend states take the alpha destination factor from
+  `dstAlphaBlendFactor`, not `dstColorBlendFactor`
+  ([devkitPro/deko3d#27](https://github.com/devkitPro/deko3d/issues/27));
+- `release-reports.patch`: the release library passes its fatal errors and warnings to the
+  backend, which writes them to `sdmc:/switch/deko3d.log`, where upstream's aborts silently;
+- `multi-draw-indirect.patch`: `dkCmdBufMultiDrawIndirect` and `dkCmdBufMultiDrawIndexedIndirect`,
+  which draw a whole indirect multi-draw with one macro call.
+
+## UAM
+
+The Switch build with the `deko3d` feature statically links [UAM](https://github.com/devkitPro/uam)
+v1.1.0, deko3d's shader compiler, by fincs (devkitPro), which compiles the game's shaders on the
+console. bevy-horizon's `scripts/build_uam.sh` builds it as `libuam.a` with its
+`patches/uam/console-library.patch` (a static library with a C API for the console, scheduling data
+initialised before the GM107 scheduler reads it, a 2-cycle stall after a block-ending barrier, no
+dual issue), so this is an altered version. Files outside its `mesa-imported/` folder are Copyright
+(C) 2018-2020 fincs under the zlib license. `mesa-imported/` holds sources from the
+[Mesa 3-D graphics library](https://www.mesa3d.org/) (its GLSL frontend, TGSI and nouveau's code
+generator), each under the license in its header; UAM's `LICENSE` reproduces Mesa's default
+license:
+
+Copyright (C) 1999-2007  Brian Paul   All Rights Reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ## DirectX Shader Compiler
 
