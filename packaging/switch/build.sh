@@ -22,6 +22,8 @@
 #                    (default audio,controllers,horizon-extras)
 #   HX_TARGET_DIR    a cargo target directory to mount instead of this checkout's target/
 #   HORIZON_SWITCH_VERSION, HX_NACP_VERSION  passed through (release builds)
+#   BEVY_HORIZON_DEKO3D_DEBUG  deko3d: set (to anything) to link deko3d's validating debug library,
+#                    which reports misuse and GPU faults to sdmc:/switch/deko3d.log
 #   HORIZON_GAME_BUILD_ID  the build's identity (default: this checkout's commit, read here: a git
 #                    worktree's .git points outside the mount, where the container's git can't go)
 #
@@ -98,6 +100,7 @@ docker run --rm --ulimit core=0 \
     -e OUT_NAME="$out_name" \
     -e HORIZON_SWITCH_VERSION \
     -e HX_NACP_VERSION \
+    -e BEVY_HORIZON_DEKO3D_DEBUG \
     -e HORIZON_GAME_BUILD_ID \
     "${HX_IMAGE:-bevy-horizon-toolchain:pre-curl}" \
     sh -euc '
