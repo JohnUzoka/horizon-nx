@@ -66,7 +66,35 @@ fn taa_light_key(
 }
 
 pub(in crate::gfx) fn terrain_shader() -> String {
-    wgsl_prefix::HDR_LIGHT.to_owned() + include_str!("terrain.wgsl")
+    shader_experiments(wgsl_prefix::HDR_LIGHT.to_owned() + include_str!("terrain.wgsl"))
+}
+
+// Measurements: HZ_SHADER_EXP=token,... rewrites terrain.wgsl for one run.
+fn shader_experiments(mut source: String) -> String {
+    let Ok(tokens) = std::env::var("HZ_SHADER_EXP") else {
+        return source;
+    };
+    for token in tokens.split(',').filter(|t| !t.is_empty()) {
+        let (from, to) = match token {
+            "lod" => (
+                "    return sprite_grad(at, layer, du, dv);\n}",
+                "    return sprite_level(at, layer, max(0.0, log2(max(length(du), length(dv)) / min(pixel.x, pixel.y))));\n}",
+            ),
+            "old" => (
+                "    return sprite_at(tiled, layer, dpdx(tiled), dpdy(tiled));",
+                "    return textureSample(sprites, sprite_sampler, tile_uv(tiled), i32(layer % SPRITE_SPLIT));",
+            ),
+            "noemis" => (
+                "for (var i = 0u; i < min(globals.emissive_count.x, 128u); i++) {",
+                "for (var i = 0u; i < 0u; i++) {",
+            ),
+            other => panic!("HZ_SHADER_EXP: unknown token {other}"),
+        };
+        assert!(source.contains(from), "HZ_SHADER_EXP {token}: pattern not found");
+        source = source.replace(from, to);
+        eprintln!("HZ_SHADER_EXP: applied {token}");
+    }
+    source
 }
 
 fn border_shader() -> String {
