@@ -18,6 +18,14 @@ archive generation retain its open files. Prepared registry tables and disposabl
 separate filesystem locations. [The older overlay measurements](reuse-pack-overlays.md) describe the
 previous materializing loader, not the current startup path.
 
+On Switch, the reload worker opens each downloaded ZIP once for metadata and resources.
+It can read small ZIPs ahead within a shared 24 MiB budget to avoid many short SD reads;
+larger ZIPs remain file-backed. Downloads, the SHA-1 checks and pack priorities are unchanged.
+The last server stack's decoded block sprites have a separate slot under
+`.horizon-cache/resourcepacks/server/`, so leaving and rejoining does not displace them
+with the local stack's sprites. The slot is reused only when its winning texture inputs match.
+No extracted overlay or second copy of the downloaded ZIP is written.
+
 Vanilla 26.3's reload listeners (`Minecraft.<init>`, `Gui`, `Hud`): languages, textures, shaders, sounds, atlases,
 fonts, grass / foliage / dry foliage colour maps, models (block states, block models, item definitions), equipment
 assets, paletted textures, entity and block entity renderers, particles, the game renderer (post effects), the level

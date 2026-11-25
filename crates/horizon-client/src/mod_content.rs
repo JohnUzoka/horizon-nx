@@ -3377,6 +3377,16 @@ pub fn check_jars(root: &Path, jar_store: &Path) -> std::result::Result<(), JarI
     Ok(())
 }
 
+/// Only the link-based desktop overlay needs a POSIX/Windows absolute source.
+/// On Switch the overlay copies files, and Rust treats device roots like
+/// `sdmc:/` as relative even though libnx treats them as absolute.
+fn overlay_base(base: &Path) -> std::io::Result<std::borrow::Cow<'_, Path>> {
+    #[cfg(target_os = "horizon")]
+    return Ok(std::borrow::Cow::Borrowed(base));
+    #[cfg(not(target_os = "horizon"))]
+    std::path::absolute(base).map(std::borrow::Cow::Owned)
+}
+
 /// What a content root is built from: this build of the game, the base's
 /// manifest and the tables [`build`] rewrites, and every file of every mod
 /// in order. Files count by size and modification time, as build tools do.
@@ -3390,7 +3400,8 @@ fn stamp(
     let meta = |path: &Path| -> Result<String> {
         let m = fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let modified = m
-            .modified()?
+            .modified()
+            .map_err(|e| format!("mod cache timestamp {}: {e}", path.display()))?
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
         Ok(format!(
@@ -3410,9 +3421,13 @@ fn stamp(
     // Some homebrew loaders do not pass argv[0]. An explicit build id keeps
     // generated content roots distinct across NRO versions even on those loaders.
     parts.push(env!("HORIZON_GAME_BUILD_ID").to_owned());
-    let base = std::path::absolute(base)?;
+    let base = overlay_base(base)?;
     parts.push(
-        String::from_utf8_lossy(&fs::read(base.join("horizon-resources.json"))?).into_owned(),
+        String::from_utf8_lossy(
+            &fs::read(base.join("horizon-resources.json"))
+                .map_err(|e| format!("mod cache resource manifest {}: {e}", base.display()))?,
+        )
+        .into_owned(),
     );
     for name in JSON_TABLES.iter().chain(&NBT_TABLES).chain(&TAG_BUNDLES) {
         if base.join(name).exists() {

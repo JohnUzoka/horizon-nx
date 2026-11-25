@@ -73,6 +73,7 @@ override SPRITE_SPLIT: u32 = 2048u;
 // branch never taken costs Apple GPUs ~15% of a solid pixel's time (gfx.rs's
 // `SolidPipeline`).
 override HDR_LIGHTING: bool = true;
+const SWITCH_NEAREST_TERRAIN = false;
 // A sprite sampled with the given gradients, from whichever array holds its layer.
 fn sprite_grad(uv: vec2<f32>, layer: u32, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
     let l = i32(layer % SPRITE_SPLIT);
@@ -185,6 +186,9 @@ fn sprite(tiled: vec2<f32>, layer: u32) -> vec4<f32> {
 fn sprite_at(tiled: vec2<f32>, layer: u32, du: vec2<f32>, dv: vec2<f32>) -> vec4<f32> {
     // terrain.fsh's two sampling paths: sampleRGSS for RGSS, sampleNearest otherwise.
     let uv = tile_uv(tiled);
+    if SWITCH_NEAREST_TERRAIN && globals.filtering.x == 0.0 {
+        return sprite_grad(uv, layer, du, dv);
+    }
     // The wrap shifts a face's UVs by whole blocks, so half of one tells a tile's face from a
     // block's (whose UVs stay inside its sprite).
     let tiled_face = any(tiled - uv >= vec2(0.5));

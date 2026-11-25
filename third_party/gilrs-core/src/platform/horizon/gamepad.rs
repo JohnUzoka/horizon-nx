@@ -66,7 +66,7 @@ extern "C" {
 const STYLE_SET_STANDARD: u32 = 0x1F;
 /// HID accepts four numbered controllers in addition to the handheld one (npad id 32).
 const PLAYERS: u32 = 4;
-const NPAD_IDS: [u32; PLAYERS as usize + 1] = [32, 0, 1, 2, 3];
+pub(super) const NPAD_IDS: [u32; PLAYERS as usize + 1] = [32, 0, 1, 2, 3];
 /// libnx `HidNpadAttribute_IsConnected`.
 const ATTRIBUTE_IS_CONNECTED: u32 = 1 << 0;
 /// libnx `HidNpadStyleTag`s that name the controller.
@@ -163,13 +163,20 @@ impl Gilrs {
         unsafe { padConfigureInput(PLAYERS, STYLE_SET_STANDARD) };
         let slots = NPAD_IDS.map(|npad_id| {
             let mut pad = PadState::default();
-            // SAFETY: each bit corresponds to a valid libnx npad id; libnx fills the struct.
-            unsafe { padInitializeWithMask(&mut pad, 1 << npad_id) };
+            // Seed enumeration before gilrs opens. Only changes after this snapshot
+            // should produce connection events; the first poll still reads held input.
+            // SAFETY: the mask names a valid libnx npad ID, and initialization fills `pad`.
+            unsafe {
+                padInitializeWithMask(&mut pad, 1 << npad_id);
+                padUpdate(&mut pad);
+            }
+            let mut gamepad = Gamepad::new(npad_id);
+            gamepad.update(&pad, pad.attributes & ATTRIBUTE_IS_CONNECTED != 0);
             Slot {
                 pad,
                 buttons: 0,
                 axes: [0; 4],
-                gamepad: Gamepad::new(npad_id),
+                gamepad,
             }
         });
         Ok(Gilrs {

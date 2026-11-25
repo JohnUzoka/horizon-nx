@@ -257,7 +257,6 @@ impl Game<'_> {
             let [x, y, w, h] = rect;
             let shown = hint::plated_width(atlas, &line, &look);
             let x = if left { x } else { x + w - shown };
-            // The glyphs' art reaches a pixel above its row, into the gap: rows meet, not overlap.
             let plate = Plate::Backing { alpha };
             hint::draw_plated(batch, atlas, &line, &look, plate, [x, y, shown, h]);
             widest = widest.max(rect[2]);

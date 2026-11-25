@@ -53,6 +53,8 @@ pub struct Metadata {
     pub particle_lights: Vec<horizon_shader_api::manifest::ParticleLight>,
     /// `[[lights]]`, for the colour of held and dropped items' light.
     pub light_colors: Vec<horizon_shader_api::manifest::LightColor>,
+    /// The format the renderer may use to finish this pack directly in SDR, if supported.
+    pub sdr_format: Option<wgpu::TextureFormat>,
 }
 
 impl Metadata {
@@ -61,6 +63,7 @@ impl Metadata {
             name: report.manifest.name.clone(),
             particle_lights: report.manifest.particle_lights.clone(),
             light_colors: report.manifest.lights.clone(),
+            sdr_format: None,
         }
     }
 }
@@ -506,7 +509,15 @@ impl NativePack {
             .filter_map(|s| Some((s.label.clone(), s.scene.take()?)))
             .collect();
         let manifest = &report.manifest;
-        let mut post = NativePost::new(device, post, manifest, constants, format, &frame, tonemap)?;
+        let mut post = NativePost::new(
+            device,
+            post,
+            manifest,
+            constants,
+            (format, terrain.sdr_output),
+            &frame,
+            tonemap,
+        )?;
         // One scene for every stage, as `frame.has_ray_tracing` says: where the material or the
         // entity stage traces and the device refuses its pipelines, the other stages keep
         // missing too.
@@ -1118,6 +1129,7 @@ file = \"material.wgsl\"
             sprite_views: &[],
             format: wgpu::TextureFormat::Rgba8Unorm,
             linear: false,
+            sdr_output: None,
             msaa: false,
             sprite_tags: &[],
             sprite_materials: &[],
@@ -1614,6 +1626,7 @@ file = \"material.wgsl\"
             sprite_views: &views,
             format: wgpu::TextureFormat::Rgba16Float,
             linear: true,
+            sdr_output: None,
             msaa: false,
             sprite_tags: &[],
             sprite_materials: &[],

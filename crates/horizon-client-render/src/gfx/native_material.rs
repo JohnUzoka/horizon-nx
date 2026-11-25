@@ -352,6 +352,8 @@ pub struct TerrainShape<'a> {
     /// The world target's colour format, and whether it holds linear light (`linear_blend`).
     pub format: wgpu::TextureFormat,
     pub linear: bool,
+    /// Optional 8-bit destination for the pack's final post pass in SDR.
+    pub sdr_output: Option<wgpu::TextureFormat>,
     /// The renderer was made with 4x MSAA on (`msaa::Msaa::built`): the pack's solid terrain
     /// gets four-sample pipelines too.
     pub msaa: bool,

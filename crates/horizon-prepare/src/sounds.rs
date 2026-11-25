@@ -236,7 +236,16 @@ pub fn add_assets(
         .ok_or_else(|| format!("no assets called {kind}"))?;
     let mut assets = Assets::load(root, output, minecraft, inputs, log)?;
     let _lock = crate::hold_lock(&assets.target, log)?;
-    assets.copy(*wanted, label, required, log)
+    // Standalone repairs can change nested files without changing the export manifest.
+    // Retire its generation before copying, then stamp the result without changing the
+    // output version. Games that start during the copy must use the loose files.
+    let version = crate::check::written_version(&assets.target);
+    crate::check::remove_stamp(&assets.target)?;
+    let copied = assets.copy(*wanted, label, required, log);
+    if let Some(version) = version {
+        crate::check::write_version_stamp(&assets.target, version)?;
+    }
+    copied
 }
 
 /// A preparation's index and verified destinations. Never persisted: a later invocation

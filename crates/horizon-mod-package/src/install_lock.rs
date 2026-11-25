@@ -1,11 +1,13 @@
-//! Exclusive browser mutations per game home, shared by the game and launcher.
+//! Exclusive browser mutations per game home.
 //!
-//! Hold a guard across the entire load/modify/save transaction, including package
-//! replacement. The persistent `.mod-browser.lock` file must never be removed:
-//! locking the manifest itself would stop protecting it when it is replaced.
-//! Nested operations on the owning thread reuse the same OS lock.
+//! Hold a guard across the entire load/modify/save transaction, including package replacement.
+//! On desktop this also locks out other processes. The persistent `.mod-browser.lock` file
+//! must never be removed: locking the manifest would stop protecting it when it is replaced.
+//! Switch has no filesystem locks or separate launcher; it uses only the in-process registry.
 use std::collections::HashMap;
-use std::fs::{self, File};
+#[cfg(not(target_os = "horizon"))]
+use std::fs::File;
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -14,6 +16,7 @@ use std::thread::ThreadId;
 struct LockState {
     holder: ThreadId,
     count: usize,
+    #[cfg(not(target_os = "horizon"))]
     file: Option<File>,
 }
 
@@ -32,6 +35,10 @@ fn registry() -> &'static Registry {
 /// Normalize existing homes, including aliases of the same directory.
 fn normalize_home(home: &Path) -> io::Result<PathBuf> {
     fs::create_dir_all(home)?;
+    // devoptab need not support canonicalization. Both game browsers use the same home path.
+    #[cfg(target_os = "horizon")]
+    let path = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    #[cfg(not(target_os = "horizon"))]
     let path = home.canonicalize()?;
     #[cfg(windows)]
     {
@@ -49,8 +56,8 @@ fn normalize_home(home: &Path) -> io::Result<PathBuf> {
     }
 }
 
-/// Exclusive mutation access to one game home. Releases the OS lock when the
-/// last nested guard drops. A guard must stay on the thread that acquired it.
+/// Exclusive mutation access to one game home. Releases the reservation (and the OS lock
+/// where supported) when the last nested guard drops. A guard must stay on its owning thread.
 #[must_use = "if unused the lock drops immediately"]
 pub struct HomeLockGuard {
     path: PathBuf,
@@ -95,6 +102,7 @@ fn acquire(home: &Path, blocking: bool) -> io::Result<Option<HomeLockGuard>> {
                     LockState {
                         holder: current_tid,
                         count: 1,
+                        #[cfg(not(target_os = "horizon"))]
                         file: None,
                     },
                 );
@@ -102,46 +110,48 @@ fn acquire(home: &Path, blocking: bool) -> io::Result<Option<HomeLockGuard>> {
             }
         }
     }
-    // Reserve this home before waiting on another process, but do not hold the
-    // registry mutex: unrelated homes must still be able to make progress.
+    // Reserve this home before acquiring the OS lock, but don't hold the registry mutex:
+    // unrelated homes must still be able to make progress.
     drop(locks);
     let guard = HomeLockGuard {
         path,
         _not_send: std::marker::PhantomData,
     };
-    let file = File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(guard.path.join(".mod-browser.lock"))?;
-    if blocking {
-        file.lock()?;
-    } else {
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(fs::TryLockError::WouldBlock) => return Ok(None),
-            Err(fs::TryLockError::Error(e)) => return Err(e),
+    #[cfg(not(target_os = "horizon"))]
+    {
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(guard.path.join(".mod-browser.lock"))?;
+        if blocking {
+            file.lock()?;
+        } else {
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(fs::TryLockError::WouldBlock) => return Ok(None),
+                Err(fs::TryLockError::Error(e)) => return Err(e),
+            }
         }
+        reg.locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&guard.path)
+            .expect("the guard reserves this home")
+            .file = Some(file);
     }
-    reg.locks
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_mut(&guard.path)
-        .expect("the guard reserves this home")
-        .file = Some(file);
     Ok(Some(guard))
 }
 
-/// Acquires exclusive mutation access, waiting for other threads or processes.
+/// Acquires exclusive mutation access, waiting for other threads (and other processes on desktop).
 /// Re-entrant on the owning thread. Filesystem errors refuse the operation.
 pub fn lock_home(home: &Path) -> io::Result<HomeLockGuard> {
     acquire(home, true).map(|guard| guard.expect("blocking acquisition returns a guard"))
 }
 
-/// Acquires exclusive mutation access without waiting for another thread or
-/// process. Returns `None` when busy or on an I/O error (logged); callers must
-/// leave the home unchanged in either case.
+/// Tries to acquire exclusive mutation access without waiting. Returns `None` when busy
+/// or on an I/O error (logged); callers must leave the home unchanged in either case.
 pub fn try_lock_home(home: &Path) -> Option<HomeLockGuard> {
     match acquire(home, false) {
         Ok(guard) => guard,

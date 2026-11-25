@@ -239,7 +239,8 @@ impl Game<'_> {
             return;
         }
         state.looked = Some(now);
-        let stamp = fingerprint(path);
+        let scanned = fingerprint_with_manifest(path);
+        let stamp = scanned.as_ref().map(|(stamp, _)| *stamp);
         if stamp == state.stamp {
             // A pack gone (no stamp) is never read: a renderer made again holds the world for
             // nothing (`release_world`, which leaves a running pack's alone).
@@ -262,7 +263,10 @@ impl Game<'_> {
         let Some(renderer) = &mut self.renderer else {
             return;
         };
-        let manifest_refused = manifest_refused(path);
+        let manifest = scanned
+            .map(|(_, manifest)| manifest)
+            .unwrap_or_else(|| Pack::read_manifest(path));
+        let manifest_refused = manifest_refused(manifest);
         let running = renderer.shader_pack_kind() == Some("native");
         let read = match &manifest_refused {
             Some(why) => Err(vec![why.clone()]),
@@ -399,12 +403,12 @@ impl Game<'_> {
     }
 }
 
-/// Why the manifest of the pack at `path` is refused, if it is: it doesn't read (a shader API
-/// line this build doesn't serve, a mistake in it), or it asks for what isn't drawn yet
+/// Why the pack's manifest is refused, if it is: it doesn't read (a shader API line this
+/// build doesn't serve, a mistake in it), or it asks for what isn't drawn yet
 /// (`not_drawn`). A pack that ran before stops then; one whose stages fail keeps its last good
 /// version drawing.
-fn manifest_refused(path: &Path) -> Option<String> {
-    match Pack::read_manifest(path) {
+fn manifest_refused(manifest: Result<Manifest, String>) -> Option<String> {
+    match manifest {
         Ok(manifest) => not_drawn(&manifest).map(Into::into),
         Err(e) => Some(e),
     }
@@ -428,6 +432,11 @@ fn not_drawn(m: &Manifest) -> Option<&'static str> {
 /// A hash of the names, sizes and modification times of the pack's files and of its saved
 /// option values (`None` when the pack is unreadable).
 pub(super) fn fingerprint(path: &Path) -> Option<u64> {
+    fingerprint_with_manifest(path).map(|(stamp, _)| stamp)
+}
+
+/// Keeps the manifest read for option-value fingerprinting for the loader's policy check.
+fn fingerprint_with_manifest(path: &Path) -> Option<(u64, Result<Manifest, String>)> {
     fn walk(path: &Path, hasher: &mut std::hash::DefaultHasher) -> Option<()> {
         let meta = std::fs::metadata(path).ok()?;
         path.hash(hasher);
@@ -450,12 +459,13 @@ pub(super) fn fingerprint(path: &Path) -> Option<u64> {
     let mut hasher = std::hash::DefaultHasher::new();
     walk(path, &mut hasher)?;
     // The player's option values, when there are any.
-    if let Ok(manifest) = Pack::read_manifest(path) {
+    let manifest = Pack::read_manifest(path);
+    if let Ok(manifest) = &manifest {
         let values_pack = horizon_client::shader_pack_list::native_values_pack(path, &manifest.id);
         let values = horizon_client::shader_pack_list::values_path(&values_pack);
         let _ = walk(&values, &mut hasher);
     }
-    Some(hasher.finish())
+    Some((hasher.finish(), manifest))
 }
 
 #[cfg(test)]
@@ -575,8 +585,9 @@ mod tests {
     /// version keeps drawing.
     #[test]
     fn a_refused_manifest_stops_the_pack_and_a_failing_stage_does_not() {
-        use super::manifest_refused;
+        use super::{fingerprint_with_manifest, manifest_refused};
         let pack = std::env::temp_dir().join(format!("horizon-refused-{}", std::process::id()));
+        let refusal = || manifest_refused(fingerprint_with_manifest(&pack).unwrap().1);
         std::fs::create_dir_all(&pack).unwrap();
         let write = |api: &str, extra: &str| {
             let text = format!(
@@ -588,7 +599,7 @@ mod tests {
         // A stage the check refuses: the manifest itself is taken.
         std::fs::write(pack.join("post.wgsl"), "not wgsl").unwrap();
         write("0.2", "");
-        assert_eq!(manifest_refused(&pack), None);
+        assert_eq!(refusal(), None);
         assert!(
             horizon_shader_api::check(&horizon_shader_api::Pack::read(&pack).unwrap()).is_err()
         );
@@ -602,7 +613,7 @@ mod tests {
             ("0.2", "[frame\n", "horizon-shaders.toml"),
         ] {
             write(api, extra);
-            let refused = manifest_refused(&pack).unwrap_or_default();
+            let refused = refusal().unwrap_or_default();
             assert!(refused.contains(why), "{api} {extra}: {refused}");
         }
         std::fs::remove_dir_all(pack).unwrap();

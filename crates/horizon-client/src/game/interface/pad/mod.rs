@@ -38,7 +38,7 @@ pub(super) const HELP: &[&str] = &[
 fn style_named(name: &str) -> Result<GlyphStyle> {
     GlyphStyle::ALL
         .into_iter()
-        .find(|style| style.name() == name)
+        .find(|style| *style != GlyphStyle::Off && style.name() == name)
         .ok_or_else(|| {
             format!("family must be xbox, playstation, nintendo or auto, not {name}").into()
         })
@@ -214,6 +214,8 @@ mod hardware {
         pub(in crate::game) fn switch_pad(&self) -> Option<PadId> {
             None
         }
+        #[cfg(target_os = "horizon")]
+        pub(super) fn stop_switch_rumble(&mut self) {}
     }
 
     pub(in crate::game) type PadId = usize;
@@ -266,7 +268,7 @@ mod hardware {
         pub(super) fn pad_output_off(&mut self) {}
         pub(super) fn pad_output_frame(&mut self) {}
         pub(in crate::game) fn pad_close_output(&mut self) {}
-        pub(super) fn pad_vibrate(&mut self, _: Rumble, _: Pulse) {}
+        pub(super) fn pad_vibrate(&mut self, _: Rumble, _: Pulse, _: f32) {}
         pub(super) fn pad_devices_status(&self) -> Value {
             json!({ "backend": false, "controllers": [] })
         }
@@ -303,6 +305,8 @@ impl Pads {
     ) {
         self.peaks = peaks;
         if self.feed_source != source {
+            #[cfg(target_os = "horizon")]
+            self.stop_switch_rumble();
             self.feed_source = source;
             self.menu.armed = None;
             self.radial.cancel();
@@ -936,7 +940,8 @@ impl Game<'_> {
     /// playing (a pad lying idle while the mouse plays stays still).
     pub(super) fn pad_rumble(&mut self, rumble: Rumble) {
         let settings = &self.settings.controller;
-        if !settings.enabled || !settings.vibration || !self.pad.in_use {
+        let strength = settings.vibration_strength;
+        if !settings.enabled || !settings.vibration || strength <= 0.0 || !self.pad.in_use {
             return;
         }
         // Bedrock's own switch, off for a player who doesn't want every block to tick; the
@@ -949,8 +954,9 @@ impl Game<'_> {
         let Some(pulse) = rumble.pulse() else {
             return;
         };
+        let pulse = pulse.scaled(strength);
         self.pad.last_rumble = Some((rumble.name(), pulse));
-        self.pad_vibrate(rumble, pulse);
+        self.pad_vibrate(rumble, pulse, strength);
     }
 
     /// `horizon-ctl pad ...`.

@@ -1571,6 +1571,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn network_recipe_resolves_nested_world_block_tags_to_their_items() {
+        use horizon_world::loot::PackOverlay;
+        use serde_json::json;
+
+        let root = resources("nested_block_tag", &[]);
+        for (file, contents) in [
+            (
+                "items.json",
+                r#"{"minecraft:redstone":{},"minecraft:raw_copper":{}}"#,
+            ),
+            (
+                "facts.json",
+                r#"{"defaults":{"fixture:first_wall":0,"fixture:second_wall":1}}"#,
+            ),
+            (
+                "gameplay-facts.json",
+                r#"{"states":[{"item":"minecraft:redstone"},{"item":"minecraft:raw_copper"}]}"#,
+            ),
+        ] {
+            std::fs::write(root.join(file), contents).unwrap();
+        }
+        let defaults = horizon_world::item_defaults::read(&root).unwrap();
+        for field in ["type", "neoforge:ingredient_type"] {
+            let cut = format!(
+                r#"{{"type":"minecraft:stonecutting",
+                "ingredient":{{"type":"neoforge:compound","children":[
+                    {{"{field}":"neoforge:block_tag","tag":"fixture:aliases"}}
+                ]}},"result":{{"id":"minecraft:copper_ingot"}}}}"#,
+            );
+            let packs = [
+                ("recipe/fixture:cut".to_owned(), vec![cut.into_bytes()]),
+                (
+                    "tags/fixture:block/aliases".to_owned(),
+                    vec![
+                        br#"{"values":["fixture:second_wall","fixture:first_wall"]}"#.to_vec(),
+                        br#"{"remove":["fixture:second_wall"]}"#.to_vec(),
+                        br#"{"values":["fixture:second_wall"]}"#.to_vec(),
+                    ],
+                ),
+            ];
+            let overlay = PackOverlay::new(&packs);
+            let sync = SyncData::load(
+                &root,
+                &overlay,
+                &defaults,
+                &crate::test_resources::server_sources(&root, &overlay),
+            )
+            .unwrap();
+            let recipe: serde_json::Value =
+                serde_json::from_str(&sync.advancements.recipes["fixture:cut"]).unwrap();
+            assert_eq!(
+                recipe["ingredient"],
+                json!(["minecraft:redstone", "minecraft:raw_copper"])
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// The stonecutter's recipes go out in registration order (path, then
     /// namespace): a guest's button picks by position in the host's list,
     /// which keeps that order too.

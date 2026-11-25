@@ -3,12 +3,13 @@
 //! (switch/services/apm.h). Loading on the Switch is CPU-bound: in log14 the two big loader threads
 //! were on a core 88% and 90% of their lives, and with the boost (log16) resources loaded in 88 s
 //! instead of 174 s. The GPU runs slower during FastLoad, so menus can feel less responsive.
-//! Launch keeps the CPU boost through menu input until the first world. While opening later
-//! worlds, a cancelled load restores normal clocks too. Gameplay never requests a sustained
+//! Launch drops the CPU boost when the title becomes interactive. Opening a world restores
+//! the boost until entry or cancellation. Gameplay never requests a sustained
 //! CPU overclock. HOME/sleep temporarily releases the boost, and exit restores normal clocks.
 //! `HORIZON_NX_CPU_BOOST=0` in env.txt keeps the normal clocks throughout, to compare, and
 //! `HORIZON_NX_WORLD_BOOST=0` only while a world opens. Only an Application (title takeover) may
 //! boost; an applet (album) logs why and loads at the normal clocks.
+//! Explicit gameplay clock preferences take precedence over FastLoad.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::LazyLock;
@@ -81,6 +82,9 @@ fn elapsed_ms() -> u64 {
 }
 
 fn begin(reason: u8) -> bool {
+    if crate::clocks::preferences_requested() || !crate::clocks::prepare_fastload() {
+        return false;
+    }
     // SAFETY: appletInitialize has registered an application with the applet service.
     let rc = unsafe { appletSetCpuBoostMode(BOOST_FAST_LOAD) };
     if rc != 0 {
@@ -96,6 +100,19 @@ fn begin(reason: u8) -> bool {
     true
 }
 
+pub(crate) fn release_for_clock_preferences() -> bool {
+    end("explicit Switch clock preferences")
+}
+
+pub(crate) fn fastload_active() -> bool {
+    BOOSTED.load(Ordering::Relaxed)
+}
+
+/// Restore normal GPU clocks for the interactive title. Repeated frames are cheap once off.
+pub fn title_ready() {
+    end("the title is interactive");
+}
+
 /// The game draws a world's loading screen (opening a world, its server starting, "Loading
 /// terrain"), once a frame. Opening a world is CPU-bound too (log22: 170 s at the normal clocks),
 /// so the boost goes back on for it, and off at the world (`horizon_nx_entered_world`) or once
@@ -108,6 +125,9 @@ pub fn loading_world() {
         return;
     }
     if !ALLOWED.load(Ordering::Relaxed) {
+        return;
+    }
+    if crate::clocks::preferences_requested() {
         return;
     }
     ITERATIONS_WITHOUT_LOADING.store(0, Ordering::Relaxed);
@@ -140,8 +160,7 @@ pub(crate) fn pause_loading() -> Option<u8> {
         return None;
     }
     let reason = REASON.load(Ordering::Relaxed);
-    end("application in background");
-    Some(reason)
+    end("application in background").then_some(reason)
 }
 
 pub(crate) fn resume_loading(reason: Option<u8>) {
@@ -163,14 +182,18 @@ pub extern "C" fn horizon_nx_entered_world() {
 }
 
 /// Ends the boost (once) and says why.
-fn end(why: &str) {
+fn end(why: &str) -> bool {
     if !BOOSTED.swap(false, Ordering::SeqCst) {
-        return;
+        return true;
     }
     // SAFETY: as in `start_from_env`.
     let rc = unsafe { appletSetCpuBoostMode(BOOST_NORMAL) };
+    if rc != 0 {
+        BOOSTED.store(true, Ordering::SeqCst);
+    }
     let secs = elapsed_ms().saturating_sub(SINCE_MS.load(Ordering::Relaxed)) as f64 / 1000.0;
     write_log_line(format_args!(
         "[Boost] CPU boost off: {why}, {secs:.1} s after it went on (result 0x{rc:x})\n"
     ));
+    rc == 0
 }

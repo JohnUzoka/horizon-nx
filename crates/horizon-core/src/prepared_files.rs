@@ -9,20 +9,21 @@
 //!
 //! A reader asks it first and falls back to the folder for what it doesn't hold
 //! (sounds, the top-level tables), and for everything when it is missing,
-//! written for another root (a resource pack's or a content mod's mirror of
-//! this one), from another preparation (its copy of `horizon-resources.json`
-//! differs), or damaged. `HORIZON_NO_DATA_FILE=1` turns it off.
+//! written for another root or preparation generation, or damaged.
+//! `HORIZON_NO_DATA_FILE=1` turns it off.
 //!
 //! Layout, little-endian, every part 8-aligned:
 //! - `HZDATA\0\0`, the version (u32), the file count (u32), the lengths (u64)
-//!   of the root's path, of `horizon-resources.json` and of the name pool;
+//!   of the root's path, of `horizon-resources.json` and of the name pool,
+//!   then the preparation generation stamp (u64);
 //! - the root's canonical path and the bytes of `horizon-resources.json`;
-//! - the entries, in name order: name offset (u32) and length (u32) in the
-//!   pool, data offset (u64, from the start of the file) and length (u64);
+//! - the entries, in name order: name offset (u32) and length (u32) in
+//!   the pool, data offset (u64, or `LOOSE`) and length (u64);
 //! - the name pool: `/`-separated paths from the root;
-//! - the files' bytes.
+//! - the packed files' bytes, then their digest (u64) for derived cache keys.
 use std::{
     fs::{self, File},
+    hash::{DefaultHasher, Hash, Hasher},
     io::{self, BufWriter, Read, Write},
     path::{Path, PathBuf},
     sync::{
@@ -35,14 +36,17 @@ use std::{
 pub const FILE_NAME: &str = "horizon-data.bin";
 /// The file it checks its preparation against.
 const SOURCE: &str = "horizon-resources.json";
-/// The folders it holds, with their subfolders: the resources, and the
-/// structure templates world generation loads one by one.
+const PREPARATION: &str = "horizon-prepare.json";
+/// The folders it lists and holds, with their subfolders.
 const FOLDERS: [&str; 3] = ["data", "assets", "worldgen/structure"];
 const MAGIC: [u8; 8] = *b"HZDATA\0\0";
-/// 2: `worldgen/structure` joined the folders (a version 1 file lacks it).
-const VERSION: u32 = 2;
-const HEADER: usize = 40;
+/// 3: generation stamp and a directory index including loose sounds.
+const VERSION: u32 = 3;
+const HEADER: usize = 48;
 const ENTRY: usize = 24;
+const DIGEST_SIZE: u64 = 8;
+/// Offset of an entry listed in the index but read from the original folder.
+const LOOSE: u64 = u64::MAX;
 
 /// Whether `name` (from the root) is a file this holds: under its folders,
 /// and not a sound (hundreds of MB, read one at a time while playing).
@@ -51,7 +55,7 @@ fn holds_file(name: &str) -> bool {
 }
 
 /// Whether `dir` (from the root) is one of the folders this holds, or under one.
-fn holds_folder(dir: &str) -> bool {
+pub fn holds_folder(dir: &str) -> bool {
     FOLDERS
         .iter()
         .any(|f| dir == *f || dir.strip_prefix(f).is_some_and(|r| r.starts_with('/')))
@@ -67,12 +71,37 @@ pub struct PreparedFiles {
     file: File,
     names: Box<str>,
     entries: Box<[Entry]>,
+    fingerprint: u64,
 }
 
 impl PreparedFiles {
     fn name(&self, entry: &Entry) -> &str {
         &self.names[entry.name.0 as usize..][..entry.name.1 as usize]
     }
+    fn entry(&self, name: &str) -> Option<&Entry> {
+        self.entries
+            .binary_search_by(|e| self.name(e).cmp(name))
+            .ok()
+            .map(|i| &self.entries[i])
+    }
+
+    /// Whether a name is served from the bundle, and its generation for derived caches.
+    pub fn fingerprint(&self, name: &str) -> Option<u64> {
+        (self.entry(name)?.data.0 != LOOSE).then_some(self.fingerprint)
+    }
+
+    /// File names from the root, including known loose files, in name order.
+    pub fn names<'a>(&'a self, prefix: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        self.with_prefix(prefix).map(|entry| self.name(entry))
+    }
+
+    fn with_prefix<'a>(&'a self, prefix: &'a str) -> impl Iterator<Item = &'a Entry> + 'a {
+        let start = self.entries.partition_point(|e| self.name(e) < prefix);
+        self.entries[start..]
+            .iter()
+            .take_while(move |entry| self.name(entry).starts_with(prefix))
+    }
+
     /// The bytes of `name` (`/`-separated, from the root); `None` when this
     /// doesn't hold it (read it from the folder).
     pub fn read(&self, name: &str) -> Option<io::Result<Vec<u8>>> {
@@ -80,11 +109,10 @@ impl PreparedFiles {
     }
     /// At most the first `max` bytes of `name`, as [`PreparedFiles::read`].
     pub fn read_head(&self, name: &str, max: u64) -> Option<io::Result<Vec<u8>>> {
-        let i = self
-            .entries
-            .binary_search_by(|e| self.name(e).cmp(name))
-            .ok()?;
-        let (offset, len) = self.entries[i].data;
+        let (offset, len) = self.entry(name)?.data;
+        if offset == LOOSE {
+            return None;
+        }
         let mut bytes = vec![0; len.min(max) as usize];
         Some(read_at(&self.file, &mut bytes, offset).map(|()| bytes))
     }
@@ -96,13 +124,10 @@ impl PreparedFiles {
             return None;
         }
         let prefix = format!("{dir}/");
-        let start = self
-            .entries
-            .partition_point(|e| self.name(e) < prefix.as_str());
-        let names: Vec<&str> = self.entries[start..]
-            .iter()
-            .map(|e| self.name(e))
-            .take_while(|n| n.starts_with(&prefix))
+        let names: Vec<&str> = self
+            .with_prefix(&prefix)
+            .filter(|entry| entry.data.0 != LOOSE)
+            .map(|entry| self.name(entry))
             .collect();
         (!names.is_empty()).then_some(names)
     }
@@ -114,6 +139,7 @@ impl PreparedFiles {
         }
         let mut file = File::open(&path)?;
         let size = file.metadata()?.len();
+        let data_end = size.saturating_sub(DIGEST_SIZE);
         let mut header = [0; HEADER];
         file.read_exact(&mut header)?;
         let u32_at = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
@@ -124,8 +150,16 @@ impl PreparedFiles {
         let (count, root_len, source_len, pool_len) =
             (u32_at(12) as u64, u64_at(16), u64_at(24), u64_at(32));
         let index_len = count * ENTRY as u64;
-        let index_end = HEADER as u64 + pad(root_len) + pad(source_len) + index_len + pad(pool_len);
-        if index_end > size {
+        let Some(index_end) = [root_len, source_len, pool_len]
+            .into_iter()
+            .try_fold(HEADER as u64 + index_len, |end, len| {
+                end.checked_add(len.checked_next_multiple_of(8)?)
+            })
+        else {
+            return Ok(None);
+        };
+        // Check bounds before allocating; no legitimate index approaches this size.
+        if index_end > data_end || index_end > 64 << 20 || u64_at(40) != generation_stamp(root)? {
             return Ok(None);
         }
         let mut index = vec![0; (index_end - HEADER as u64) as usize];
@@ -158,28 +192,62 @@ impl PreparedFiles {
                 }
             })
             .collect();
+        let mut digest = [0; DIGEST_SIZE as usize];
+        read_at(&file, &mut digest, data_end)?;
+        let mut fingerprint = DefaultHasher::new();
+        // Derived caches must follow the *opened* bundle, not loose assets or a new file at
+        // its pathname. Even a rebuilt export with identical names and sizes can differ.
+        header.hash(&mut fingerprint);
+        index.hash(&mut fingerprint);
+        digest.hash(&mut fingerprint);
         let files = Self {
             file,
             names: names.into(),
             entries,
+            fingerprint: fingerprint.finish(),
         };
         // Every name in the pool, in strict order; every file's bytes inside the file.
         let mut last: Option<&str> = None;
         for e in files.entries.iter() {
             let (at, len) = (e.name.0 as usize, e.name.1 as usize);
             let name = files.names.get(at..at + len);
-            let in_file = e
-                .data
-                .0
-                .checked_add(e.data.1)
-                .is_some_and(|end| end <= size);
-            if name.is_none_or(|n| last.is_some_and(|l| l >= n)) || !in_file {
+            let in_file = e.data.0 == LOOSE
+                || (e.data.0 >= index_end
+                    && e.data.0.checked_add(e.data.1).is_some_and(|end| end <= data_end));
+            if name.is_none_or(|n| {
+                !holds_folder(n)
+                    || holds_file(n) == (e.data.0 == LOOSE)
+                    || n.contains(['\\', ':', '\0'])
+                    || n.split('/').any(|part| matches!(part, "" | "." | ".."))
+                    || last.is_some_and(|l| l >= n)
+            }) || !in_file
+            {
                 return Ok(None);
             }
             last = name;
         }
         Ok(Some(files))
     }
+}
+
+/// Replaced by a full preparation and retired by repair commands while their writes are in
+/// flight. Switch caching requires this stamp; other targets also support older exports.
+fn generation_stamp(root: &Path) -> io::Result<u64> {
+    let mut stamp = DefaultHasher::new();
+    let source = fs::metadata(root.join(SOURCE))?;
+    source.modified()?.hash(&mut stamp);
+    let path = root.join(PREPARATION);
+    match fs::File::open(&path) {
+        Ok(file) => {
+            fs::metadata(path)?.modified()?.hash(&mut stamp);
+            let mut bytes = Vec::new();
+            file.take(4096).read_to_end(&mut bytes)?;
+            bytes.hash(&mut stamp);
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !cfg!(target_os = "horizon") => {}
+        Err(error) => return Err(error),
+    }
+    Ok(stamp.finish())
 }
 
 /// `root`'s file, opened once per process; `None` when it has no usable one.
@@ -273,10 +341,28 @@ pub fn write(root: &Path) -> io::Result<()> {
     write_with_readers(root, 1)
 }
 
+/// Write with a maximum output size (for example, the available bytes less a save reserve).
+/// Sample the budget after removing interrupted builds. A failure does not replace an existing bundle.
+pub fn write_with_budget(root: &Path, budget: impl FnOnce() -> u64) -> io::Result<()> {
+    write_bundle(root, 1, budget)
+}
+
 /// [`write`], reading the folders' files on `readers` threads: a virus scanner
 /// delays each file's first open, and scans several at once when several are
 /// asked for. The threads run at normal priority: not for a game being played.
 pub fn write_with_readers(root: &Path, readers: usize) -> io::Result<()> {
+    write_bundle(root, readers, || u64::MAX)
+}
+
+fn write_bundle(root: &Path, readers: usize, budget: impl FnOnce() -> u64) -> io::Result<()> {
+    // The Switch has one title process, but startup and a split guest may both request a
+    // bundle. libnx gives them the same PID and can't replace a destination with rename.
+    #[cfg(target_os = "horizon")]
+    let _writer = {
+        static WRITER: Mutex<()> = Mutex::new(());
+        WRITER.lock().unwrap_or_else(PoisonError::into_inner)
+    };
+    let stamp = generation_stamp(root)?;
     let source = fs::read(root.join(SOURCE))?;
     let canonical = fs::canonicalize(root)?;
     let root_bytes = canonical.as_os_str().as_encoded_bytes();
@@ -293,8 +379,19 @@ pub fn write_with_readers(root: &Path, readers: usize) -> io::Result<()> {
         + pad(pool_len as u64);
     let tmp = root.join(format!("{FILE_NAME}.{}.tmp", std::process::id()));
     remove_abandoned(root);
+    let budget = budget();
+    let size = files
+        .iter()
+        .filter(|(name, _, _)| holds_file(name))
+        .try_fold(data_start + DIGEST_SIZE, |total, (_, _, len)| total.checked_add(*len));
+    if size.is_none_or(|size| size > budget) {
+        return Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            "not enough free space for the prepared resource bundle",
+        ));
+    }
     let result = (|| {
-        let mut out = BufWriter::new(File::create(&tmp)?);
+        let mut out = BufWriter::with_capacity(128 << 10, File::create(&tmp)?);
         out.write_all(&MAGIC)?;
         out.write_all(&VERSION.to_le_bytes())?;
         out.write_all(
@@ -305,34 +402,65 @@ pub fn write_with_readers(root: &Path, readers: usize) -> io::Result<()> {
         for len in [root_bytes.len(), source.len(), pool_len] {
             out.write_all(&(len as u64).to_le_bytes())?;
         }
+        out.write_all(&stamp.to_le_bytes())?;
         write_padded(&mut out, root_bytes)?;
         write_padded(&mut out, &source)?;
         let (mut name_at, mut data_at) = (0u32, data_start);
         for (name, _, len) in &files {
             out.write_all(&name_at.to_le_bytes())?;
             out.write_all(&(name.len() as u32).to_le_bytes())?;
-            out.write_all(&data_at.to_le_bytes())?;
+            let packed = holds_file(name);
+            out.write_all(&if packed { data_at } else { LOOSE }.to_le_bytes())?;
             out.write_all(&len.to_le_bytes())?;
             name_at += name.len() as u32;
-            data_at += len;
-        }
-        write_padded(
-            &mut out,
-            files
-                .iter()
-                .flat_map(|(n, _, _)| n.bytes())
-                .collect::<Vec<_>>()
-                .as_slice(),
-        )?;
-        for batch in files.chunks(READ_BATCH) {
-            for bytes in read_listed(batch, readers)? {
-                out.write_all(&bytes)?;
+            if packed {
+                data_at += len;
             }
         }
+        for (name, _, _) in &files {
+            out.write_all(name.as_bytes())?;
+        }
+        out.write_all(&[0; 8][..pad(pool_len as u64) as usize - pool_len])?;
+        let mut digest = DefaultHasher::new();
+        if readers <= 1 {
+            for file in files.iter().filter(|(name, _, _)| holds_file(name)) {
+                let bytes = read_listed_file(file)?;
+                digest.write(&bytes);
+                out.write_all(&bytes)?;
+            }
+        } else {
+            for batch in files.chunks(READ_BATCH) {
+                let packed: Vec<_> = batch
+                    .iter()
+                    .filter(|(name, _, _)| holds_file(name))
+                    .collect();
+                for bytes in read_listed(&packed, readers)? {
+                    digest.write(&bytes);
+                    out.write_all(&bytes)?;
+                }
+            }
+        }
+        out.write_all(&digest.finish().to_le_bytes())?;
         out.into_inner()
             .map_err(io::IntoInnerError::into_error)?
             .sync_all()?;
-        fs::rename(&tmp, root.join(FILE_NAME))
+        if generation_stamp(root)? != stamp || fs::read(root.join(SOURCE))? != source {
+            return Err(io::Error::other("prepared resources changed during bundle build"));
+        }
+        let path = root.join(FILE_NAME);
+        #[cfg(target_os = "horizon")]
+        if path.exists() {
+            // Retire only an unusable derived bundle, and only after the replacement is
+            // complete. This also avoids libnx's backup-and-replace rename path.
+            match PreparedFiles::open(root) {
+                Ok(Some(_)) => return fs::remove_file(&tmp),
+                Ok(None) => {}
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {}
+                Err(error) => return Err(error),
+            }
+            fs::remove_file(&path)?;
+        }
+        fs::rename(&tmp, path)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -344,9 +472,9 @@ pub fn write_with_readers(root: &Path, readers: usize) -> io::Result<()> {
 const READ_BATCH: usize = 512;
 
 /// `files`' bytes in their order, read on `readers` threads.
-fn read_listed(files: &[(String, PathBuf, u64)], readers: usize) -> io::Result<Vec<Vec<u8>>> {
+fn read_listed(files: &[&(String, PathBuf, u64)], readers: usize) -> io::Result<Vec<Vec<u8>>> {
     if readers <= 1 {
-        return files.iter().map(read_listed_file).collect();
+        return files.iter().map(|file| read_listed_file(file)).collect();
     }
     let next = AtomicUsize::new(0);
     std::thread::scope(|scope| {
@@ -421,7 +549,7 @@ fn walk(dir: &Path, name: &str, out: &mut Vec<(String, PathBuf, u64)>) -> io::Re
         let meta = fs::metadata(&path)?;
         if meta.is_dir() {
             walk(&path, &child, out)?;
-        } else if holds_file(&child) {
+        } else if meta.is_file() {
             out.push((child, path, meta.len()));
         }
     }
@@ -476,6 +604,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         for (name, bytes) in [
             (SOURCE, &b"{\"client_sha256\":\"a\"}"[..]),
+            (PREPARATION, b"{\"output_version\":1,\"generation\":\"first\"}"),
             ("data/minecraft/recipe/stick.json", b"{\"stick\":1}"),
             ("data/minecraft/recipe/brewing/awkward.json", b"{}"),
             ("data/minecraft/tags/item/logs.json", b"[1,2,3]"),
@@ -511,6 +640,55 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    #[test]
+    fn an_over_budget_bundle_cleans_up_without_replacing_working_resources() {
+        let root = root("budget");
+        write(&root).unwrap();
+        let working = fs::read(root.join(FILE_NAME)).unwrap();
+        let abandoned = root.join(format!("{FILE_NAME}.1.tmp"));
+        fs::write(&abandoned, b"interrupted").unwrap();
+        assert_eq!(
+            write_with_budget(&root, || {
+                assert!(!abandoned.exists(), "reclaim temporary space before sampling");
+                1
+            })
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::StorageFull
+        );
+        assert!(!abandoned.exists());
+        assert_eq!(fs::read(root.join(FILE_NAME)).unwrap(), working);
+        assert_eq!(fs::read(root.join("facts.json")).unwrap(), b"{}");
+        assert!(PreparedFiles::open(&root).unwrap().is_some());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_new_preparation_generation_invalidates_even_same_size_nested_assets() {
+        let root = root("generation");
+        let texture = "assets/minecraft/textures/block/stone.png";
+        write(&root).unwrap();
+        let first = PreparedFiles::open(&root).unwrap().unwrap();
+        fs::remove_file(root.join(PREPARATION)).unwrap();
+        assert!(PreparedFiles::open(&root).ok().flatten().is_none());
+        fs::write(root.join(texture), b"\x89PNGxxx").unwrap();
+        fs::write(
+            root.join(PREPARATION),
+            b"{\"output_version\":1,\"generation\":\"other\"}",
+        )
+        .unwrap();
+        assert!(PreparedFiles::open(&root).unwrap().is_none());
+        // Switch cannot remove a file in use. Keep the identity rather than the open handle.
+        let fingerprint = first.fingerprint(texture);
+        drop(first);
+        write(&root).unwrap();
+        let rebuilt = PreparedFiles::open(&root).unwrap().unwrap();
+        assert_ne!(rebuilt.fingerprint(texture), fingerprint);
+        assert_eq!(rebuilt.read(texture).unwrap().unwrap(), b"\x89PNGxxx");
+        drop(rebuilt);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     /// Several readers write the same file as one, past a batch's worth of files.
     #[test]
     fn readers_write_the_file_one_reader_writes() {
@@ -531,7 +709,8 @@ mod tests {
     fn a_reader_error_stops_the_write() {
         let root = root("reader-error");
         let gone = root.join("gone");
-        let listed = [("gone".to_owned(), gone, 1)];
+        let missing = ("gone".to_owned(), gone, 1);
+        let listed = [&missing];
         assert!(read_listed(&listed, 1).is_err());
         assert!(read_listed(&listed, 4).is_err());
         fs::remove_dir_all(&root).unwrap();
@@ -559,6 +738,10 @@ mod tests {
             files
                 .read("assets/minecraft/sounds/ambient/cave1.ogg")
                 .is_none()
+        );
+        assert_eq!(
+            files.names("assets/minecraft/sounds/").collect::<Vec<_>>(),
+            ["assets/minecraft/sounds/ambient/cave1.ogg"]
         );
         assert!(files.read("facts.json").is_none());
         assert!(files.read("worldgen/biomes.json").is_none());

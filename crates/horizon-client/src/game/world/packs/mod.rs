@@ -28,6 +28,18 @@ pub fn cache_dir() -> PathBuf {
         .unwrap_or_default()
         .join(".horizon-cache/resourcepacks")
 }
+
+fn derived_cache(has_server_packs: bool) -> PathBuf {
+    let cache = cache_dir();
+    // Rejoining the same server should not have to decode its sprites again merely
+    // because leaving just reloaded vanilla. Keep one bounded slot for the remote
+    // stack; the sprite cache still checks the complete winning textures.
+    if cfg!(any(target_os = "horizon", test)) && has_server_packs {
+        cache.join("server")
+    } else {
+        cache
+    }
+}
 pub fn packs_dir() -> PathBuf {
     std::env::current_dir()
         .unwrap_or_default()
@@ -67,7 +79,7 @@ pub fn startup_root(
     let source = packs::resources(base.source().clone(), &enabled)?;
     Ok(horizon_assets::resource_source::ResourceRoot::new(
         base.prepared().to_path_buf(),
-        cache_dir(),
+        derived_cache(!server.is_empty()),
         source,
     )
     .with_data(base.data().clone(), base.data_changes().clone()))
@@ -358,6 +370,21 @@ impl Game<'_> {
     /// progress meanwhile, and the overlay takes no input (`LoadingOverlay`),
     /// so what is held is released (`KeyMapping.releaseAll`).
     pub(super) fn spawn_pack_reload(&mut self, kind: ReloadKind) -> std::io::Result<()> {
+        self.spawn_pack_reload_inner(kind, self.server_packs.active_paths.clone())
+    }
+
+    pub(super) fn spawn_server_pack_reload(
+        &mut self,
+        load: Vec<(u128, PathBuf)>,
+    ) -> std::io::Result<()> {
+        self.spawn_pack_reload_inner(ReloadKind::Server, load)
+    }
+
+    fn spawn_pack_reload_inner(
+        &mut self,
+        kind: ReloadKind,
+        load: Vec<(u128, PathBuf)>,
+    ) -> std::io::Result<()> {
         self.keys.clear();
         self.physical_keys.clear();
         self.left = false;
@@ -399,10 +426,7 @@ impl Game<'_> {
         self.mods.selected = content.chain(code).collect();
         self.mods.refused = Default::default();
         let mod_sources = self.mods.clone();
-        let (selected, server) = (
-            self.settings.resource_packs.clone(),
-            self.server_packs.active.clone(),
-        );
+        let selected = self.settings.resource_packs.clone();
         let (assets, res, context) = (
             self.pack.assets.clone(),
             self.res.clone(),
@@ -417,7 +441,9 @@ impl Game<'_> {
         let texture_atlases = super::client_reload::collect_texture_atlases();
         super::mods::register_fluid_models(self.options.execution_role);
         let stage = move |progress: &crate::game::Progress| {
-            stage_pack(
+            let started = Instant::now();
+            let server = open_server_packs(&load).map_err(|error| error.to_string())?;
+            let mut staged = stage_pack(
                 &vanilla,
                 &selected,
                 &server,
@@ -432,7 +458,19 @@ impl Game<'_> {
                 japanese,
                 progress,
             )
-            .map_err(|e| e.to_string())
+            .map_err(|error| error.to_string())?;
+            let count = server.len();
+            staged.server = Some(ServerStack {
+                paths: load,
+                packs: server,
+            });
+            if kind == ReloadKind::Server {
+                log::info!(
+                    "Horizon: staged server resource stack ({count} pack(s)) in {} ms",
+                    started.elapsed().as_millis()
+                );
+            }
+            Ok(staged)
         };
         #[cfg(test)]
         let stage = mod_api::testing::inherit_mods(stage);
@@ -469,6 +507,7 @@ impl Game<'_> {
     pub(super) fn apply_staged_pack(&mut self, staged: StagedPack) -> horizon_client::Result<()> {
         let StagedPack {
             root,
+            server,
             client_applies,
             gui,
             pack,
@@ -550,6 +589,10 @@ impl Game<'_> {
         self.options.resources = root.clone();
         self.falling_vertices.get_mut().clear();
         self.pack = pack;
+        if let Some(server) = server {
+            self.server_packs.active_paths = server.paths;
+            self.server_packs.active = server.packs;
+        }
         let skip = self
             .settings
             .extras
@@ -669,6 +712,34 @@ impl Game<'_> {
     }
 }
 
+struct ServerStack {
+    paths: Vec<(u128, PathBuf)>,
+    packs: Vec<Pack>,
+}
+
+/// Open each archive once on the staging worker. On Switch, a bounded read-ahead
+/// replaces thousands of small SD requests when reading a typical downloaded ZIP.
+fn open_server_packs(load: &[(u128, PathBuf)]) -> horizon_client::Result<Vec<Pack>> {
+    use horizon_assets::{resource_source::ResourceSource, zip::Zip};
+    let mut budget = if cfg!(target_os = "horizon") { 24 << 20 } else { 0 };
+    let initial_budget = budget;
+    let packs = load
+        .iter()
+        .map(|(id, path)| {
+            let archive = Zip::open_with_read_ahead(path, &mut budget)?;
+            packs::server_pack(*id, path, ResourceSource::opened_archive(archive))
+                .ok_or_else(|| format!("invalid resource pack metadata in {}", path.display()).into())
+        })
+        .collect::<horizon_client::Result<_>>()?;
+    if initial_budget != budget {
+        log::debug!(
+            "Horizon: buffered {} server ZIP bytes",
+            initial_budget - budget
+        );
+    }
+    Ok(packs)
+}
+
 /// The CPU half of a pack reload (`PackReload` runs it on a worker;
 /// `apply_staged_pack` does the GPU half and the swap): the overlay
 /// root, the models and sprites, the menu bundle, the pack's tables and its
@@ -764,6 +835,7 @@ pub(super) fn stage_pack(
     progress.set(3);
     Ok(StagedPack {
         root,
+        server: None,
         client_applies,
         gui,
         pack,
@@ -783,6 +855,7 @@ pub(super) fn stage_pack(
 /// it on the render thread).
 pub(super) struct StagedPack {
     pub root: PathBuf,
+    server: Option<ServerStack>,
     pub waypoint_styles: horizon_client::locator_bar::WaypointStyles,
     pub armor_stand_assets: super::armor_stands::ArmorStandAssets,
     pub frame_models: [super::frames::FrameModel; 4],
@@ -929,6 +1002,49 @@ pub(super) fn reload_files(
 mod tests {
     use super::*;
     use std::{sync::mpsc, time::Duration};
+
+    #[test]
+    fn a_server_stack_has_its_own_sprite_cache_slot() {
+        assert_eq!(derived_cache(false), cache_dir());
+        assert_eq!(derived_cache(true), cache_dir().join("server"));
+    }
+
+    #[test]
+    fn server_stack_reopens_the_current_zip_without_flattening_its_overrides() {
+        use horizon_assets::resource_source::ResourceSource;
+        use std::{fs, io::Write};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("download");
+        let name = "assets/server/textures/example.png";
+        let write_zip = |path: &Path, bytes: &[u8]| {
+            let mut archive = zip::ZipWriter::new(fs::File::create(path).unwrap());
+            archive
+                .start_file("pack.mcmeta", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            archive
+                .write_all(br#"{"pack":{"description":"test","pack_format":97}}"#)
+                .unwrap();
+            archive
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(bytes).unwrap();
+            archive.finish().unwrap();
+        };
+        write_zip(&path, b"original");
+        let load = [(7, path.clone())];
+        let first = open_server_packs(&load).unwrap();
+        let base = ResourceSource::default();
+        let original = packs::resources(base.clone(), &first).unwrap();
+        assert_eq!(original.read(name).unwrap(), b"original");
+        // These tiny ZIPs fit in the retained directory tail, so the first source stays valid.
+        write_zip(&path, b"replaced");
+        let next = open_server_packs(&load).unwrap();
+        let replaced = packs::resources(base, &next).unwrap();
+        assert_eq!(replaced.read(name).unwrap(), b"replaced");
+        assert_eq!(original.read(name).unwrap(), b"original");
+        fs::write(path, b"not a resource pack").unwrap();
+        assert!(open_server_packs(&load).is_err());
+    }
 
     #[test]
     #[ignore = "daily"]

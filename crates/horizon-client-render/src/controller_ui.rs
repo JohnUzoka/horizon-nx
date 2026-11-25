@@ -131,6 +131,7 @@ fn choice_description(opt: Opt, pad: &PadSettings) -> Option<&'static str> {
             GlyphStyle::Xbox => "Always shows Xbox buttons.",
             GlyphStyle::PlayStation => "Always shows PlayStation buttons.",
             GlyphStyle::Nintendo => "Always shows Nintendo buttons.",
+            GlyphStyle::Off => "Hides button glyphs without changing the controls.",
         },
         Opt::PadNintendoButtons => {
             if pad.nintendo_letters {
@@ -145,6 +146,7 @@ fn choice_description(opt: Opt, pad: &PadSettings) -> Option<&'static str> {
             }
             gamepad::TextKeyboard::Horizon => "Always opens Horizon's keyboard.",
             gamepad::TextKeyboard::Steam => "Always opens Steam's keyboard.",
+            gamepad::TextKeyboard::System => "Opens the Switch system keyboard.",
         },
         Opt::PadLightbar => match pad.lightbar {
             gamepad::Lightbar::Health => {
@@ -373,6 +375,10 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                     "Feedback",
                     vec![
                         option(Opt::PadVibration, "Rumble when something happens to you."),
+                        option(
+                            Opt::PadVibrationStrength,
+                            "horizon.options.vibration_strength.about",
+                        ),
                         switch(
                             Switch::BlockVibration,
                             "A tick when you break a block, as in Bedrock.",
@@ -426,6 +432,7 @@ fn glyphs_name(style: GlyphStyle) -> String {
         GlyphStyle::Xbox => "horizon.options.glyphs.xbox",
         GlyphStyle::PlayStation => "horizon.options.glyphs.playstation",
         GlyphStyle::Nintendo => "horizon.options.glyphs.nintendo",
+        GlyphStyle::Off => "options.off",
     })
 }
 
@@ -781,6 +788,7 @@ mod tests {
             Opt::PadGameplayGuide,
             Opt::PadCraftOnServers,
             Opt::PadVibration,
+            Opt::PadVibrationStrength,
             Opt::PadPlayInBackground,
             Opt::PadAdaptiveTriggers,
             Opt::PadLightbar,
@@ -1118,6 +1126,25 @@ mod tests {
         assert!((s.controller.move_deadzone - deadzone - 0.01).abs() < 0.001);
     }
 
+    #[test]
+    fn vibration_strength_slider_changes_only_the_current_profile() {
+        let mut settings = Settings::default();
+        let other = settings.controller.clone();
+        let mut device = ui(Page::Device);
+        let strength = Item::Option(Opt::PadVibrationStrength);
+        assert_eq!(strength.slider(&settings), Some(1.0));
+        device.set_focus(Some(Target::Row(strength)));
+        key(&mut device, &mut settings, K::Enter);
+        key(&mut device, &mut settings, K::ArrowLeft);
+        assert!(settings.controller.vibration_strength < 1.0);
+        assert!(settings.controller.vibration, "the master switch is separate");
+        assert_eq!(other.vibration_strength, 1.0);
+        assert_eq!(
+            PadSettings::parse(&settings.controller.serialize()),
+            settings.controller
+        );
+    }
+
     /// Left and Right step a choice both ways, as `<` `>` show (#12332).
     #[test]
     fn left_and_right_step_a_choice_both_ways() {
@@ -1185,9 +1212,9 @@ mod tests {
         let context = Context::default();
         for (opt, choices) in [
             (Opt::PadGameplayGuide, 3),
-            (Opt::PadGlyphs, 4),
+            (Opt::PadGlyphs, GlyphStyle::ALL.len()),
             (Opt::PadNintendoButtons, 2),
-            (Opt::PadKeyboard, 3),
+            (Opt::PadKeyboard, gamepad::TextKeyboard::CHOICES.len()),
             (Opt::PadLightbar, 3),
             (Opt::PadRadialMode, 2),
             (Opt::PadRadialStick, 3),

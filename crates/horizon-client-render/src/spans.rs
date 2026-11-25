@@ -472,7 +472,7 @@ pub mod timeline {
 /// a step costs one relaxed load.
 pub mod startup {
     use std::{
-        io::Write as _,
+        io::{BufWriter, Write as _},
         sync::{
             Mutex, OnceLock,
             atomic::{AtomicBool, AtomicU32, Ordering},
@@ -481,7 +481,7 @@ pub mod startup {
     };
 
     static ON: AtomicBool = AtomicBool::new(false);
-    static SINK: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+    static SINK: OnceLock<Option<Mutex<BufWriter<std::fs::File>>>> = OnceLock::new();
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
     static NEXT_THREAD: AtomicU32 = AtomicU32::new(1);
     thread_local! {
@@ -495,7 +495,9 @@ pub mod startup {
         ORIGIN.get_or_init(|| origin);
         let sink = SINK.get_or_init(|| {
             let path = std::env::var_os("HORIZON_STARTUP_TRACE")?;
-            std::fs::File::create(&path).ok().map(Mutex::new)
+            std::fs::File::create(&path)
+                .ok()
+                .map(|file| Mutex::new(BufWriter::new(file)))
         });
         ON.store(sink.is_some(), Ordering::Relaxed);
     }
@@ -512,10 +514,13 @@ pub mod startup {
         })
     }
 
-    fn write(event: std::fmt::Arguments) {
+    fn write(event: std::fmt::Arguments<'_>, flush: bool) {
         let Some(Some(sink)) = SINK.get() else {
             return;
         };
+        let mut file = sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tid = THREAD.with(|id| {
             if id.get() == 0 {
                 id.set(NEXT_THREAD.fetch_add(1, Ordering::Relaxed));
@@ -523,7 +528,6 @@ pub mod startup {
                     .name()
                     .unwrap_or("unnamed")
                     .replace(['"', '\\'], "_");
-                let mut file = sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let _ = writeln!(
                     file,
                     r#"{{"ph":"M","name":"thread_name","pid":1,"tid":{},"args":{{"name":"{name}"}}}}"#,
@@ -532,10 +536,10 @@ pub mod startup {
             }
             id.get()
         });
-        let mut file = sink
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _ = writeln!(file, r#"{{"pid":1,"tid":{tid},{event}}}"#);
+        if flush {
+            let _ = file.flush();
+        }
     }
 
     /// A step running until it is dropped.
@@ -553,12 +557,15 @@ pub mod startup {
                 return;
             }
             let end = Instant::now();
-            write(format_args!(
-                r#""ph":"X","name":"{}","ts":{},"dur":{}"#,
-                self.name,
-                micros(self.started),
-                end.saturating_duration_since(self.started).as_micros()
-            ));
+            write(
+                format_args!(
+                    r#""ph":"X","name":"{}","ts":{},"dur":{}"#,
+                    self.name,
+                    micros(self.started),
+                    end.saturating_duration_since(self.started).as_micros()
+                ),
+                true,
+            );
         }
     }
 
@@ -585,10 +592,13 @@ pub mod startup {
     #[inline]
     pub fn mark(name: &'static str) {
         if on() {
-            write(format_args!(
-                r#""ph":"i","s":"g","name":"{name}","ts":{}"#,
-                micros(Instant::now())
-            ));
+            write(
+                format_args!(
+                    r#""ph":"i","s":"g","name":"{name}","ts":{}"#,
+                    micros(Instant::now())
+                ),
+                true,
+            );
         }
     }
 
@@ -625,15 +635,30 @@ pub mod startup {
         if !on() {
             return;
         }
-        let args: Vec<String> = values
-            .iter()
-            .map(|(k, v)| format!(r#""{k}":{v}"#))
-            .collect();
-        write(format_args!(
-            r#""ph":"C","name":"{name}","ts":{},"args":{{{}}}"#,
-            micros(Instant::now()),
-            args.join(",")
-        ));
+        // On Switch, every fragment written to the file is an SD service call.
+        // Batch these per-frame samples; milestones still flush the trace immediately.
+        write(
+            format_args!(
+                r#""ph":"C","name":"{name}","ts":{},"args":{{{}}}"#,
+                micros(Instant::now()),
+                CounterValues(values)
+            ),
+            !cfg!(target_os = "horizon"),
+        );
+    }
+
+    struct CounterValues<'a>(&'a [(&'static str, usize)]);
+
+    impl std::fmt::Display for CounterValues<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            for (i, (name, value)) in self.0.iter().enumerate() {
+                if i != 0 {
+                    f.write_str(",")?;
+                }
+                write!(f, r#""{name}":{value}"#)?;
+            }
+            Ok(())
+        }
     }
 
     /// Called each frame in a world: marks `world.view_full` the first frame

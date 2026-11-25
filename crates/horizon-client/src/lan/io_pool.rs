@@ -379,8 +379,8 @@ struct Adopted {
     timeout: Duration,
 }
 
-/// Serve a connection from now on, on its outbox's thread: `timeout` is how
-/// long it may read nothing, or have a write wait.
+/// Serve a connection from now on, on its outbox's thread. `timeout` bounds
+/// inactivity on TCP and stalled writes while closing a connection.
 pub(super) fn adopt(
     socket: Socket,
     (reader, writer): (ConnReader, ConnWriter),
@@ -844,13 +844,18 @@ impl Conn {
                 return;
             }
         }
-        if self
-            .stalled
-            .is_some_and(|t| now.duration_since(t) > self.timeout)
+        // Both ends of a memory pipe stop together when the process is suspended.
+        // Elapsed time alone says nothing about that peer; EOF and explicit
+        // closes still end the connection.
+        let network = matches!(self.io, Io::Tcp(_));
+        if (network || self.draining)
+            && self
+                .stalled
+                .is_some_and(|t| now.duration_since(t) > self.timeout)
         {
             return self.end(now, "Disconnected");
         }
-        if !self.left && now.duration_since(self.last_read) > self.timeout {
+        if network && !self.left && now.duration_since(self.last_read) > self.timeout {
             return self.end(now, horizon_protocol::Error::timed_out().to_string());
         }
         if !self.draining
@@ -1068,13 +1073,16 @@ mod tests {
     }
 
     #[test]
-    fn a_silent_client_times_out() {
-        let (a, b) = Pipe::pair();
-        let mut client = Connection::local(a);
-        let served = serve(Connection::local(b), quiet, Duration::from_millis(300));
+    fn a_silent_tcp_client_times_out() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let peer = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut client = Connection::from_stream(peer).unwrap();
+        let server = Connection::from_stream(listener.accept().unwrap().0).unwrap();
+        let served = serve(server, quiet, Duration::from_millis(300));
         assert_eq!(served.next(), Seen::Left("Timed out".into()));
         assert_eq!(served.next(), Seen::Closed);
-        assert!(client.recv().is_err());
+        assert!(client.recv().unwrap_err().is_end_of_stream());
     }
 
     /// A client that reads nothing holds its disconnect unwritten; a close

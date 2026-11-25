@@ -467,6 +467,15 @@ impl Loading {
         if self.gui.is_none() || self.menu.win.is_some() {
             return;
         }
+        #[cfg(target_os = "horizon")]
+        if self.menu.pads.menu.osk.is_some() {
+            for (button, down) in edges {
+                if down {
+                    self.title_keyboard_button(button);
+                }
+            }
+            return;
+        }
         // A world on its way: B cancels it, as Escape does.
         if self.menu.pending.is_some() {
             if edges
@@ -614,13 +623,17 @@ impl Loading {
         }
     }
 
-    /// A on a text field (on a Switch): its keyboard, starting from the field's
-    /// text, which what comes back replaces, as in the game's menus. Elsewhere
-    /// the field takes focus for a real keyboard.
+    /// Open the selected Switch keyboard for the focused field. Elsewhere the
+    /// field takes focus for a physical keyboard.
     fn title_keyboard(&mut self) {
         #[cfg(target_os = "horizon")]
         {
             use horizon_client::clipboard::EditShortcut::SelectAll;
+            if !gamepad::switch_keyboard(self.settings.controller.keyboard) {
+                self.menu.pads.menu.osk = Some(horizon_client::osk::Keyboard::new(false, false));
+                self.menu.nav.repeat = None;
+                return;
+            }
             if self.menu.options_open {
                 if let Some(text) = horizon_nx::software_keyboard("")
                     && let Some(gui) = &self.gui
@@ -643,6 +656,43 @@ impl Loading {
                 title.backspace();
             } else {
                 title.type_text(&text);
+            }
+            self.save_menu_address();
+        }
+    }
+
+    #[cfg(target_os = "horizon")]
+    fn title_keyboard_button(&mut self, button: Button) {
+        use horizon_client::osk::Output;
+        let Some(out) = self.menu.pads.menu.osk.as_mut().and_then(|osk| osk.button(button)) else {
+            return;
+        };
+        if matches!(out, Output::Close | Output::Done | Output::Enter) {
+            self.menu.pads.menu.osk = None;
+        }
+        if self.menu.options_open {
+            let Some(gui) = &self.gui else { return };
+            match out {
+                Output::Text(text) => self.menu.options.type_text(&gui.atlas, &text),
+                Output::Backspace | Output::Done | Output::Enter => {
+                    let key = if out == Output::Backspace {
+                        KeyCode::Backspace
+                    } else {
+                        KeyCode::Enter
+                    };
+                    let events = self.menu.options.key(&mut self.settings, &gui.atlas, key, None);
+                    self.menu_option_events(events);
+                }
+                _ => {}
+            }
+        } else if let Some(title) = &mut self.menu.title {
+            match out {
+                Output::Text(text) => title.type_text(&text),
+                Output::Backspace => title.backspace(),
+                Output::Done | Output::Enter => {
+                    title.confirm_edit();
+                }
+                _ => return,
             }
             self.save_menu_address();
         }
@@ -910,6 +960,8 @@ impl Loading {
     }
     /// The startup menu's Browse mods, as `Game::drive_mod_browser`.
     fn drive_menu_mod_browser(&mut self) {
+        use horizon_client::mod_browser::ProjectKind;
+
         let menu = &mut self.menu;
         let (installed, changed) = menu.mod_jobs.poll(
             &mut menu.options.mod_browser,
@@ -919,8 +971,10 @@ impl Loading {
         if changed {
             menu.options.layout_changed();
         }
-        if installed {
-            self.settings.save(&Game::options_path());
+        match installed {
+            Some(ProjectKind::Mod) => self.settings.save(&Game::options_path()),
+            Some(ProjectKind::ResourcePack) => self.refresh_menu_pack_infos(),
+            None => {}
         }
     }
     pub(super) fn apply_menu_settings(&mut self) {
@@ -1004,13 +1058,18 @@ impl Loading {
         self.menu.options.languages = horizon_client::lang::available(&[
             &horizon_assets::resource_source::ResourceSource::directory(self.menu.root.clone()),
         ]);
-        let additional = self.options.as_ref().map_or_else(Vec::new, |options| {
-            super::pack_finders::discover(mod_api::PackType::ClientResources, &options.mods)
-        });
-        self.menu.options.pack_infos = packs::pack_infos(&self.vanilla_root, &[], &additional);
+        self.refresh_menu_pack_infos();
         self.menu.options.pack_selection = self.settings.resource_packs.clone();
         self.menu.options.pack_screen = None;
         self.menu.options_open = true;
+    }
+
+    fn refresh_menu_pack_infos(&mut self) {
+        let additional = self.options.as_ref().map_or_else(Vec::new, |options| {
+            super::pack_finders::discover(mod_api::PackType::ClientResources, &options.mods)
+        });
+        let infos = packs::pack_infos(&self.vanilla_root, &[], &additional);
+        self.menu.options.update_pack_infos(infos);
     }
 
     fn menu_option_events(&mut self, events: Vec<Event>) {
@@ -1022,6 +1081,8 @@ impl Loading {
                     self.save_menu_settings();
                     self.settings.keys.sync_action_bindings();
                     self.apply_menu_settings();
+                    #[cfg(target_os = "horizon")]
+                    Game::apply_switch_clock_settings(&self.settings);
                 }
                 Event::SliderDrag => {
                     self.apply_menu_settings();
@@ -1580,7 +1641,9 @@ impl Loading {
                 }
                 self.apply_menu_settings();
             }
-            WindowEvent::RedrawRequested => self.draw(),
+            WindowEvent::RedrawRequested => {
+                self.draw();
+            }
             WindowEvent::ModifiersChanged(modifiers) => self.menu.modifiers = modifiers.state(),
             // `PackSelectionScreen.onFilesDrop`: a pack dropped on the window
             // joins the Create New World screen's data packs.
@@ -1804,8 +1867,33 @@ impl Loading {
                 title.focused_button = None;
             }
         }
-        if self.menu.pending.is_some() {
-            horizon_client::ui_theme::draw_loading_overlay(
+        if cfg!(target_os = "horizon")
+            && matches!(&self.menu.pending, Some(PendingWorldEntry::Local { .. }))
+        {
+            let progress = match &self.loaded {
+                Some(Ok(loaded)) => loaded
+                    .rest_loader
+                    .as_ref()
+                    .map_or(1.0, |loader| loader.progress.fraction()),
+                _ => self.progress.fraction(),
+            };
+            widgets::begin_screen(|| screen_info::level_loading(Some(progress), &screen_info::tr));
+            horizon_client::level_loading::draw_local_world(
+                batch,
+                &gui.atlas,
+                "horizon.loading.resources",
+                Some(progress),
+            );
+        } else if self.menu.pending.is_some() {
+            #[cfg(target_os = "horizon")]
+            horizon_client::level_loading::draw_progress(
+                batch,
+                &gui.atlas,
+                self.progress.line(),
+                self.progress.fraction(),
+            );
+            #[cfg(not(target_os = "horizon"))]
+            horizon_client::level_loading::draw_loading_overlay(
                 batch,
                 &gui.atlas,
                 self.progress.line(),
@@ -1882,6 +1970,17 @@ impl Loading {
             && self.menu.win.is_none()
         {
             key_focus::draw_outline(&gui.atlas, batch, focus);
+        }
+        #[cfg(target_os = "horizon")]
+        if self.menu.pending.is_none() && let Some(keyboard) = &self.menu.pads.menu.osk {
+            let top = self.menu.nav.focus.is_some_and(|f| f.center().1 > batch.height / 2.0);
+            let glyphs = horizon_client::pad_glyph::Glyphs::of(
+                &self.settings.controller,
+                self.menu.pads.style,
+            );
+            let mut ui = horizon_client::ui_theme::Ui::new(&gui.atlas, batch, self.menu.cursor);
+            keyboard.draw(&mut ui, top, glyphs);
+            ui.finish();
         }
         // No ClientHost exists while resources load. Toast candidates are
         // admitted on handoff to Game, before their first animation or sound.

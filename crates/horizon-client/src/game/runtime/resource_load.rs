@@ -913,15 +913,30 @@ pub(super) fn load_resources(
 /// the next starts read them from one file (arismoko/horizon#1961).
 pub(super) fn write_prepared_files(root: PathBuf) {
     use horizon_core::prepared_files;
-    if prepared_files::open(&root).is_some() || !root.join("horizon-resources.json").is_file() {
+    if std::env::var_os("HORIZON_NO_DATA_FILE").is_some() {
         return;
     }
     let spawned = horizon_guest_stack::builder()
         .name("Prepared data file".into())
         .spawn(move || {
             horizon_threads::idle_current();
+            if prepared_files::open(&root).is_some() {
+                #[cfg(target_os = "horizon")]
+                log::info!("Horizon: using indexed prepared resources in {}", root.display());
+                return;
+            }
+            if !root.join("horizon-resources.json").is_file() {
+                return;
+            }
             let started = Instant::now();
-            match prepared_files::write(&root) {
+            #[cfg(target_os = "horizon")]
+            let result = prepared_files::write_with_budget(&root, || {
+                // Leave room for world writes even while building the optional cache.
+                horizon_client::save::estimate_disk_space(&root).saturating_sub(128 << 20)
+            });
+            #[cfg(not(target_os = "horizon"))]
+            let result = prepared_files::write(&root);
+            match result {
                 Ok(()) => log::info!(
                     "Horizon: wrote {} in {} ms",
                     prepared_files::FILE_NAME,

@@ -1006,7 +1006,7 @@ fn the_look_packs_tone_curve_builds_in_the_renderer() {
             Vec::new(),
             &report.manifest,
             &[],
-            format,
+            (format, None),
             &frame,
             tonemap,
         );

@@ -1,16 +1,20 @@
-//! Direct readiness regressions: no pool thread, sweep, tick or timer can help.
+//! Drive the play I/O pool directly, without relying on a pool thread or real time.
 use super::*;
 use horizon_protocol::connection::Connection;
 use std::sync::mpsc;
 
 const PIPE_CAPACITY: usize = 64 * 1024;
-struct Quiet;
+#[derive(Default)]
+struct Quiet {
+    allow_sweep: bool,
+}
 impl Session for Quiet {
     fn packet(&mut self, _: i32, _: Vec<u8>) -> Verdict {
         panic!("no peer input expected")
     }
     fn tick(&mut self, _: Instant) -> Option<Vec<u8>> {
-        panic!("test must not sweep")
+        assert!(self.allow_sweep, "test must not sweep");
+        None
     }
     fn left(&mut self, reason: String) {
         panic!("unexpected disconnect: {reason}")
@@ -31,7 +35,13 @@ fn outbox(worker: Arc<Worker>) -> Arc<Outbox> {
     Arc::get_mut(&mut outbox).unwrap().worker = worker;
     outbox
 }
-fn register(server: Connection, poll: &Poll, worker: &Arc<Worker>, outbox: Arc<Outbox>) -> Conn {
+fn register(
+    server: Connection,
+    poll: &Poll,
+    worker: &Arc<Worker>,
+    outbox: Arc<Outbox>,
+    session: Quiet,
+) -> Conn {
     let (socket, reader, writer) = server.detach();
     Conn::register(
         Adopted {
@@ -39,7 +49,7 @@ fn register(server: Connection, poll: &Poll, worker: &Arc<Worker>, outbox: Arc<O
             reader,
             writer,
             outbox,
-            session: Box::new(Quiet),
+            session: Box::new(session),
             timeout: Duration::from_secs(30),
         },
         poll.registry(),
@@ -76,7 +86,13 @@ fn memory_server_resumes_only_from_capacity_readiness() {
     let outbox = outbox(worker.clone());
     let (server, mut peer) = Pipe::pair();
     peer.set_nonblocking(true);
-    let mut conn = register(Connection::local(server), &poll, &worker, outbox.clone());
+    let mut conn = register(
+        Connection::local(server),
+        &poll,
+        &worker,
+        outbox.clone(),
+        Quiet::default(),
+    );
     // Discard registration's initially-writable callback before filling the pipe.
     worker.inbox.lock().unwrap().read.clear();
     let body = vec![0x37; 2 * PIPE_CAPACITY];
@@ -116,6 +132,40 @@ fn memory_server_resumes_only_from_capacity_readiness() {
     expected.extend(body);
     assert_eq!(received, expected);
 }
+
+#[test]
+fn memory_play_survives_idle_and_backpressured_suspension() {
+    let poll = Poll::new().unwrap();
+    let worker = worker(&poll);
+    let outbox = outbox(worker.clone());
+    let (server, mut peer) = Pipe::pair();
+    peer.set_nonblocking(true);
+    let mut conn = register(
+        Connection::local(server),
+        &poll,
+        &worker,
+        outbox.clone(),
+        Quiet { allow_sweep: true },
+    );
+
+    // The first I/O worker sweep can run before either peer has produced new input.
+    let suspension = Duration::from_secs(3600);
+    let resumed = conn.last_read + suspension;
+    conn.sweep(resumed);
+
+    // Also suspend with a full pipe and the tail of a frame still to write.
+    queue(&outbox, vec![0x37; PIPE_CAPACITY]);
+    conn.serve(resumed);
+    let resumed_again = resumed + suspension;
+    conn.sweep(resumed_again);
+    let received = drain(&mut peer);
+    assert_eq!(received.len(), PIPE_CAPACITY);
+    assert_eq!(&received[..8], &(PIPE_CAPACITY as u64).to_le_bytes());
+    assert!(received[8..].iter().all(|&byte| byte == 0x37));
+    conn.memory_ready(resumed_again);
+    assert_eq!(drain(&mut peer), [0x37; 8]);
+}
+
 #[test]
 fn blocking_client_writer_resumes_when_server_drains() {
     let (mut client, mut server) = Pipe::pair();
@@ -184,7 +234,7 @@ fn tcp_server_resumes_only_from_writable_readiness() {
     }
     socket.set_nonblocking(false).unwrap();
     let server = Connection::from_stream(socket).unwrap();
-    let mut conn = register(server, &poll, &worker, outbox.clone());
+    let mut conn = register(server, &poll, &worker, outbox.clone(), Quiet::default());
     let body = vec![0x23; 1 << 20];
     queue(&outbox, body.clone());
     conn.serve(Instant::now()); // Sole initial publication drive, reader held.

@@ -10,7 +10,8 @@ use horizon_core::{
 use std::collections::HashMap;
 
 const WAY_BELOW_MIN_Y: i32 = -32512;
-const FLOWING_UPDATE_SIMILARITY: f64 = 1.0 - 44.0 / 25.0;
+const ZERO_SIMILARITY_GAP: i32 = 25;
+const FLOWING_UPDATE_GAP: i32 = 44;
 const SURFACE_OFFSETS: [[i32; 2]; 13] = [
     [0, 0],
     [-2, -1],
@@ -696,10 +697,12 @@ impl<P: FluidPicker, F: PositionalRandom, B: AquiferBlockStates> NoiseBasedAquif
         indices: [usize; 4],
     ) -> Result<Option<BlockStateId>, AquiferError> {
         let a = self.status(context, indices[0])?;
-        let s01 = similarity(distances[0], distances[1]);
+        // Compare the signed, wrapping distance gaps directly. Similarity is
+        // strictly decreasing over i32 gaps and is only needed for pressure.
+        let gap01 = distances[1].wrapping_sub(distances[0]);
         let candidate = a.at(y, self.blocks.air());
-        if s01 <= 0. {
-            self.schedule = if s01 >= FLOWING_UPDATE_SIMILARITY {
+        if gap01 >= ZERO_SIMILARITY_GAP {
+            self.schedule = if gap01 <= FLOWING_UPDATE_GAP {
                 a != self.status(context, indices[1])?
             } else {
                 false
@@ -718,36 +721,41 @@ impl<P: FluidPicker, F: PositionalRandom, B: AquiferBlockStates> NoiseBasedAquif
         }
         let mut memo = f64::NAN;
         let b = self.status(context, indices[1])?;
+        let s01 = similarity(gap01);
         if density + s01 * self.pressure(context, [x, y, z], &mut memo, a, b)? > 0. {
             self.schedule = false;
             return Ok(None);
         }
         let c = self.status(context, indices[2])?;
-        let s02 = similarity(distances[0], distances[2]);
-        if s02 > 0.
-            && density + s01 * s02 * self.pressure(context, [x, y, z], &mut memo, a, c)? > 0.
+        let gap02 = distances[2].wrapping_sub(distances[0]);
+        if gap02 < ZERO_SIMILARITY_GAP
+            && density
+                + s01 * similarity(gap02) * self.pressure(context, [x, y, z], &mut memo, a, c)?
+                > 0.
         {
             self.schedule = false;
             return Ok(None);
         }
-        let s12 = similarity(distances[1], distances[2]);
-        if s12 > 0.
-            && density + s01 * s12 * self.pressure(context, [x, y, z], &mut memo, b, c)? > 0.
+        let gap12 = distances[2].wrapping_sub(distances[1]);
+        if gap12 < ZERO_SIMILARITY_GAP
+            && density
+                + s01 * similarity(gap12) * self.pressure(context, [x, y, z], &mut memo, b, c)?
+                > 0.
         {
             self.schedule = false;
             return Ok(None);
         }
         self.schedule = a != b
-            || (s12 >= FLOWING_UPDATE_SIMILARITY && b != c)
-            || (s02 >= FLOWING_UPDATE_SIMILARITY && a != c)
-            || (s02 >= FLOWING_UPDATE_SIMILARITY
-                && similarity(distances[0], distances[3]) >= FLOWING_UPDATE_SIMILARITY
+            || (gap12 <= FLOWING_UPDATE_GAP && b != c)
+            || (gap02 <= FLOWING_UPDATE_GAP && a != c)
+            || (gap02 <= FLOWING_UPDATE_GAP
+                && distances[3].wrapping_sub(distances[0]) <= FLOWING_UPDATE_GAP
                 && a != self.status(context, indices[3])?);
         Ok(Some(candidate))
     }
 }
-fn similarity(a: i32, b: i32) -> f64 {
-    1. - b.wrapping_sub(a) as f64 / 25.
+fn similarity(gap: i32) -> f64 {
+    1. - f64::from(gap) / f64::from(ZERO_SIMILARITY_GAP)
 }
 
 #[cfg(test)]

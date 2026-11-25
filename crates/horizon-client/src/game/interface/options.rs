@@ -368,6 +368,15 @@ impl Game<'_> {
         let events = self.ui.options.bind_mouse(&mut self.settings, button);
         self.handle_option_events(events)
     }
+
+    #[cfg(target_os = "horizon")]
+    pub(super) fn apply_switch_clock_settings(settings: &horizon_client::settings::Settings) {
+        horizon_nx::clocks::set_preferences(
+            settings.file.bool("horizonSwitchCpuHigh"),
+            settings.file.bool("horizonSwitchGpuHigh"),
+            settings.file.bool("horizonSwitchMemoryHigh"),
+        );
+    }
     pub(super) fn handle_option_events(&mut self, events: Vec<Event>) -> Result<()> {
         for e in events {
             match e {
@@ -377,6 +386,10 @@ impl Game<'_> {
                     self.settings.save(&Self::options_path());
                     self.settings.keys.sync_action_bindings();
                     self.apply_settings();
+                    #[cfg(target_os = "horizon")]
+                    if !self.options.split_guest {
+                        Self::apply_switch_clock_settings(&self.settings);
+                    }
                     self.switch_mods();
                     self.sync_native_switches();
                     self.sync_pregen_option();

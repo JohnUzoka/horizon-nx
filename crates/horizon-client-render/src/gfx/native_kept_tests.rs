@@ -611,7 +611,7 @@ impl Chain {
             passes,
             &report.manifest,
             &[],
-            format,
+            (format, None),
             frame,
             tonemap,
         )
@@ -1487,7 +1487,15 @@ fn a_reload_never_holds_two_stores() {
             .filter(|s| s.kind == StageKind::Post)
             .collect();
         let format = wgpu::TextureFormat::Rgba8Unorm;
-        super::super::NativePost::new(&device, stages, &report.manifest, &[], format, &frame, None)
+        super::super::NativePost::new(
+            &device,
+            stages,
+            &report.manifest,
+            &[],
+            (format, None),
+            &frame,
+            None,
+        )
     };
     let post = |resources: &str, colour: &str| build(resources, colour).unwrap();
     let delta = |from: [usize; 2]| count().map(|c| [c[0] - from[0], c[1] - from[1]]);
