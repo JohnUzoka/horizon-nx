@@ -123,10 +123,14 @@ fn sample_nearest(uv: vec2<f32>, layer: u32, pixel: vec2<f32>, du: vec2<f32>, dv
     offset = (offset - 0.5) * pixel / max(texel_screen, vec2(1e-12)) + 0.5;
     offset = clamp(offset, vec2(0.0), vec2(1.0));
     let at = (center + offset) * pixel;
-    if tiled || (terrain_ab(1u) && u32(globals.filtering.x) != 2u) {
-        // An anisotropic sampler lays its taps along those gradients, past the sprite's edge,
-        // where the clamped sampler reads that edge texel again: long streaks on the far tiles.
-        // Asking for the level the gradients give takes the one tap an anisotropy of 1 would.
+    if tiled || (u32(globals.filtering.x) != 2u && !terrain_ab(1u)) {
+        // The level the gradients give, asked for: the one tap an anisotropy of 1 takes. A
+        // sampler without anisotropy (no or RGSS filtering) reads the very texels it would at
+        // the gradients, and a GPU samples at a level much faster than at gradients (the
+        // Switch's GM20B: 3 ms of the forest benchmark's heavy canopy frames). An anisotropic
+        // one lays its taps along the gradients, past the sprite's edge on a distant tile's face,
+        // where the clamped sampler reads that edge texel again: long streaks, so tiles take the
+        // level under it too.
         let level = max(length(du), length(dv)) / min(pixel.x, pixel.y);
         return sprite_level(at, layer, max(0.0, log2(level)));
     }

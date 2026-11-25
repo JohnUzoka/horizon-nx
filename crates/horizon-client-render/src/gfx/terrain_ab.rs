@@ -4,31 +4,46 @@
 //! flight. Every `WINDOW` the log gets one line per mask: frames, median and mean GPU ms.
 //!
 //! Mask bits (terrain.wgsl's `terrain_ab`, `globals.filtering.w`):
-//! - 1: `sample_nearest` takes an explicit level instead of the UV's gradients;
+//! - 1: `sample_nearest` at the UV's gradients (`textureSampleGrad`), not at their level;
 //! - 2: no `sample_nearest` (measurement only: the sprite at the UV, one level);
-//! - 4: two solid passes, the opaque quads through `fs_opaque` first (`split_solid`);
+//! - 4: solid terrain in one pass where it draws in two (`split_solid_terrain`), or the
+//!   other way round;
 //! - 8: no emission, HDR or fog after the cutout (measurement only);
-//! - 16: Build 40's sprite sampling: a nearest sampler (the frame's terrain group swapped for
-//!   `alt_group`) and the sprite at the UV's own gradients, no `sample_nearest`;
+//! - 16: Build 40's sprite sampling: a nearest sampler and the sprite at the UV's own
+//!   gradients, no `sample_nearest`;
 //! - 32: `fs_solid`'s opaque quads untextured, their vertex colour alone (measurement only);
-//! - 64: the section vertex shaders' position, UV, layer and colour alone (measurement only).
+//! - 64: the section vertex shaders' position, UV, layer and colour alone (measurement only);
+//! - 128: with 16, the nearest sampler's mip filter linear (texels nearest, levels blended);
+//!   alone, the usual sampler's mip filter nearest (`sample_nearest` on one level).
+//!   Bits 16 and 128 swap the frame's terrain group for one with that sampler (`groups`).
 use std::time::{Duration, Instant};
 
 const BLOCK: u32 = 4;
 const WINDOW: Duration = Duration::from_secs(2);
-pub const TEX_LEVEL: u32 = 1;
 pub const SPLIT: u32 = 4;
 pub const NEAREST: u32 = 16;
+pub const MIP_FLIP: u32 = 128;
+
+/// The sampler variant of a mask: 0 the usual one, 1 Build 40's nearest, 2 nearest with a
+/// linear mip filter, 3 the usual one with a nearest mip filter.
+pub fn sampler_variant(mask: u32) -> usize {
+    match (mask & NEAREST != 0, mask & MIP_FLIP != 0) {
+        (false, false) => 0,
+        (true, false) => 1,
+        (true, true) => 2,
+        (false, true) => 3,
+    }
+}
 
 pub struct TerrainAb {
     masks: Vec<u32>,
     frame: u32,
     window_start: Instant,
     times: Vec<(u32, f32)>,
-    /// The terrain group with the nearest sampler, while `Renderer::group` holds the usual one
-    /// (swapped while `swapped`); `None` until a frame asks for it and after a rebuild.
-    pub alt_group: Option<wgpu::BindGroup>,
-    pub swapped: bool,
+    /// The terrain groups of the sampler variants (`sampler_variant`) not in
+    /// `Renderer::group`, which holds variant `current`'s; built when a frame first asks.
+    pub groups: [Option<wgpu::BindGroup>; 4],
+    pub current: usize,
 }
 
 impl TerrainAb {
@@ -47,11 +62,11 @@ impl TerrainAb {
             frame: 0,
             window_start: Instant::now(),
             times: Vec::new(),
-            alt_group: None,
-            swapped: false,
+            groups: [None, None, None, None],
+            current: 0,
         })
     }
-    /// Whether any mask asks for two solid passes, which needs meshes grouped by part.
+    /// Whether any mask toggles the two solid passes, which need meshes grouped by part.
     pub fn splits(&self) -> bool {
         self.masks.iter().any(|m| m & SPLIT != 0)
     }
