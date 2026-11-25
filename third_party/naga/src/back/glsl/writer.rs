@@ -1972,7 +1972,14 @@ impl<'a, W: Write> Writer<'a, W> {
                                                 true,
                                             ),
                                         };
+                                        let mask = matches!(
+                                            member.binding,
+                                            Some(crate::Binding::BuiltIn(crate::BuiltIn::SampleMask))
+                                        );
                                         write!(self.out, "{varying_name} = ")?;
+                                        if mask {
+                                            write!(self.out, "int(")?;
+                                        }
 
                                         if let Some(struct_name) = temp_struct_name {
                                             write!(self.out, "{struct_name}")?;
@@ -1981,12 +1988,13 @@ impl<'a, W: Write> Writer<'a, W> {
                                         }
 
                                         // Write field name
-                                        writeln!(
+                                        write!(
                                             self.out,
-                                            ".{};",
+                                            ".{}",
                                             &self.names
                                                 [&NameKey::StructMember(result.ty, index as u32)]
                                         )?;
+                                        writeln!(self.out, "{};", if mask { ")" } else { "" })?;
                                         write!(self.out, "{level}")?;
                                     }
                                 }
@@ -1999,9 +2007,13 @@ impl<'a, W: Write> Writer<'a, W> {
                                             true,
                                         ),
                                     };
-                                    write!(self.out, "{name} = ")?;
+                                    let mask = matches!(
+                                        result.binding,
+                                        Some(crate::Binding::BuiltIn(crate::BuiltIn::SampleMask))
+                                    );
+                                    write!(self.out, "{name} = {}", if mask { "int(" } else { "" })?;
                                     self.write_expr(value, ctx)?;
-                                    writeln!(self.out, ";")?;
+                                    writeln!(self.out, "{};", if mask { ")" } else { "" })?;
                                     write!(self.out, "{level}")?;
                                 }
                             }

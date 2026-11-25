@@ -111,11 +111,13 @@ pub(in crate::back::glsl) const fn glsl_built_in(
         Bi::Barycentric { perspective: true } => "gl_BaryCoordEXT",
         Bi::Barycentric { perspective: false } => "gl_BaryCoordNoPerspEXT",
         Bi::SampleIndex => "gl_SampleID",
+        // bevy-horizon: GLSL's masks are `int[]`; WGSL's is one `u32` (the writer converts what
+        // it stores in `gl_SampleMask`).
         Bi::SampleMask => {
             if options.output {
-                "gl_SampleMask"
+                "gl_SampleMask[0]"
             } else {
-                "gl_SampleMaskIn"
+                "uint(gl_SampleMaskIn[0])"
             }
         }
         // compute
