@@ -570,8 +570,8 @@ pub struct InstanceError {
 }
 
 impl InstanceError {
-    #[allow(dead_code, reason = "may be unused on some platforms")]
-    pub(crate) fn new(message: String) -> Self {
+    // bevy-horizon: public so crates/wgpu_deko3d, an out-of-tree backend, can refuse a surface.
+    pub fn new(message: String) -> Self {
         Self {
             message,
             source: None,
@@ -2406,6 +2406,13 @@ impl ShouldBeNonZeroExt for Option<NonZeroU64> {
             Some(non_zero) => non_zero.get(),
             None => 0,
         }
+    }
+}
+
+// bevy-horizon: crates/wgpu_deko3d, an out-of-tree backend, reads the buffer through this.
+impl<'a, B: DynBuffer + ?Sized> BufferBinding<'a, B> {
+    pub fn buffer(&self) -> &'a B {
+        self.buffer
     }
 }
 
