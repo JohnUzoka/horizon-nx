@@ -12,8 +12,8 @@
 #   HX_PATCHES       the workshop's crate patches and horizon-patches.toml
 #                    (default ~/workshop/horizon-port/patches)
 #   HX_NVK_LIB       vulkan: NVK's libvulkan_bh.a (default ~/bevy-horizon/nvk/lib)
-#   HX_DEKO3D_LIB    deko3d: libuam.a from bevy-horizon's scripts/build_uam.sh, and its patched
-#                    libdeko3d.a/libdeko3dd.a, which wgpu_deko3d links ahead of devkitPro's
+#   HX_DEKO3D_LIB    deko3d: what bevy-horizon's scripts/build_uam.sh leaves: libuam.a and the
+#                    patched libdeko3d_bh.a/libdeko3dd_bh.a that wgpu_deko3d links
 #                    (default ~/bevy-horizon/deko3d/lib)
 # Other settings:
 #   HX_IMAGE         toolchain image (default bevy-horizon-toolchain:pre-curl, the v0.2.1 build's)
