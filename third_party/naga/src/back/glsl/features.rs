@@ -546,12 +546,16 @@ impl<W> Writer<'_, W> {
                         }
                     }
                 }
-                Expression::ImageSample { image, level, offset, .. } => {
+                Expression::ImageSample { image, level, offset, depth_ref, gather, .. } => {
+                    // bevy-horizon: a depth texture sampled for its value is a plain sampler.
+                    let depth_value = depth_ref.is_none()
+                        && matches!(expressions[image], Expression::GlobalVariable(global) if self.depth_values.contains(&global));
                     if let TypeInner::Image {
                         dim,
                         arrayed,
                         class: ImageClass::Depth { .. },
                     } = *info[image].ty.inner_with(&module.types) {
+                      if !depth_value {
                         let lod = matches!(level, SampleLevel::Zero | SampleLevel::Exact(_));
                         let bias = matches!(level, SampleLevel::Bias(_));
                         let auto = matches!(level, SampleLevel::Auto);
@@ -580,11 +584,16 @@ impl<W> Writer<'_, W> {
                         // float textureLodOffset(sampler2DArrayShadow sampler, vec4 P, float lod, ivec2 offset)
                         // float textureLod(samplerCubeShadow sampler, vec4 P, float lod)
                         // float textureLod(samplerCubeArrayShadow sampler, vec4 P, float compare, float lod)
-                        ext_used |= (cube || array2d) && lod && !prefer_grad_workaround;
+                        // bevy-horizon: except level-0 comparisons on samplerCubeArrayShadow, which
+                        // the writer turns into core `texture` (see `cube_array_shadow_zero`).
+                        let cube_array_zero = cube && arrayed && level == SampleLevel::Zero && gather.is_none()
+                            && !self.options.writer_flags.contains(WriterFlags::TEXTURE_SHADOW_LOD);
+                        ext_used |= (cube || array2d) && lod && !prefer_grad_workaround && !cube_array_zero;
 
                         if ext_used {
                             features.request(Features::TEXTURE_SHADOW_LOD);
                         }
+                      }
                     }
                 }
                 Expression::SubgroupBallotResult |

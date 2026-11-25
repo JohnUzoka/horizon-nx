@@ -112,6 +112,11 @@ The shared interpolation defaults also compile with `glsl-in` alone, without nee
 SPIR-V or WGSL frontend to enable them.
 The HLSL backend's texture-sampling offset cast preserves the offset's scalar or vector width,
 including `int` for 1D and `int3` for 3D textures instead of always using `int2`.
+The GLSL backend declares a depth texture that no sample in the module compares against as a
+plain `sampler2D*` rather than `*Shadow`, so loads, gathers and ordinary sampling read its depth from
+`.x` (modules passing depth textures to functions keep the upstream behaviour); level-zero
+comparisons on `samplerCubeArrayShadow` use core `texture` instead of `textureLod`, so
+`GL_EXT_texture_shadow_lod` is only requested when a call really needs it.
 
 ## DirectX Shader Compiler
 

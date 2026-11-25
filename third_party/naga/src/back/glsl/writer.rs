@@ -45,6 +45,10 @@ pub struct Writer<'a, W> {
     varying: crate::FastHashMap<String, VaryingLocation>,
     /// Number of user-defined clip planes. Only non-zero for vertex shaders.
     clip_distance_count: u32,
+    /// bevy-horizon: depth textures that no `ImageSample` compares against. GLSL declares them
+    /// as plain samplers (`sampler2D`, not `sampler2DShadow`) so they can be loaded, gathered and
+    /// sampled for their values; the depth is the `.x` of what those return.
+    pub(in crate::back::glsl) depth_values: crate::FastHashSet<Handle<crate::GlobalVariable>>,
 }
 
 impl<'a, W: Write> Writer<'a, W> {
@@ -114,12 +118,57 @@ impl<'a, W: Write> Writer<'a, W> {
             continue_ctx: back::continue_forward::ContinueCtx::default(),
             varying: Default::default(),
             clip_distance_count: 0,
+            depth_values: Self::find_depth_values(module),
         };
 
         // Find all features required to print this module
         this.collect_required_features()?;
 
         Ok(this)
+    }
+
+    /// bevy-horizon: the depth textures [`Writer::depth_values`] holds. Conservatively none when a
+    /// function takes a depth texture argument, or compares one it can't trace to a global, since
+    /// GLSL would then need the argument's and the global's sampler types to agree.
+    fn find_depth_values(module: &crate::Module) -> crate::FastHashSet<Handle<crate::GlobalVariable>> {
+        let mut compared = crate::FastHashSet::default();
+        let functions = module.functions.iter().map(|(_, f)| f).chain(module.entry_points.iter().map(|ep| &ep.function));
+        for function in functions {
+            let depth_argument = function.arguments.iter().any(|arg| {
+                matches!(module.types[arg.ty].inner, TypeInner::Image { class: crate::ImageClass::Depth { .. }, .. })
+            });
+            if depth_argument {
+                return crate::FastHashSet::default();
+            }
+            for (_, expr) in function.expressions.iter() {
+                if let crate::Expression::ImageSample { image, depth_ref: Some(_), .. } = *expr {
+                    match function.expressions[image] {
+                        crate::Expression::GlobalVariable(global) => {
+                            compared.insert(global);
+                        }
+                        _ => return crate::FastHashSet::default(),
+                    }
+                }
+            }
+        }
+        module
+            .global_variables
+            .iter()
+            .filter(|&(handle, global)| {
+                matches!(module.types[global.ty].inner, TypeInner::Image { class: crate::ImageClass::Depth { multi: false }, .. })
+                    && !compared.contains(&handle)
+            })
+            .map(|(handle, _)| handle)
+            .collect()
+    }
+
+    /// bevy-horizon: whether `image` is one of [`Writer::depth_values`].
+    pub(in crate::back::glsl) fn is_depth_value(
+        &self,
+        image: Handle<crate::Expression>,
+        expressions: &crate::Arena<crate::Expression>,
+    ) -> bool {
+        matches!(expressions[image], crate::Expression::GlobalVariable(global) if self.depth_values.contains(&global))
     }
 
     /// Writes the [`Module`](crate::Module) as glsl to the output
@@ -384,7 +433,8 @@ impl<'a, W: Write> Writer<'a, W> {
                     //
                     // This is way we need the leading space because `write_image_type` doesn't add
                     // any spaces at the beginning or end
-                    self.write_image_type(dim, arrayed, class)?;
+                    let shadow = !self.depth_values.contains(&handle);
+                    self.write_image_type(dim, arrayed, class, shadow)?;
 
                     // Finally write the name and end the global with a `;`
                     // The leading space is important
@@ -573,6 +623,8 @@ impl<'a, W: Write> Writer<'a, W> {
         dim: crate::ImageDimension,
         arrayed: bool,
         class: crate::ImageClass,
+        // bevy-horizon: false for `depth_values`, which GLSL samples as plain samplers.
+        shadow: bool,
     ) -> BackendResult {
         // glsl images consist of four parts the scalar prefix, the image "type", the dimensions
         // and modifiers
@@ -596,7 +648,7 @@ impl<'a, W: Write> Writer<'a, W> {
             Ic::Sampled { kind, multi: true } => ("sampler", S { kind, width: 4 }, "MS", ""),
             Ic::Sampled { kind, multi: false } => ("sampler", S { kind, width: 4 }, "", ""),
             Ic::Depth { multi: true } => ("sampler", float, "MS", ""),
-            Ic::Depth { multi: false } => ("sampler", float, "", "Shadow"),
+            Ic::Depth { multi: false } => ("sampler", float, "", if shadow { "Shadow" } else { "" }),
             Ic::Storage { format, .. } => ("image", format.into(), "", ""),
             Ic::External => unimplemented!(),
         };
@@ -1287,7 +1339,7 @@ impl<'a, W: Write> Writer<'a, W> {
                     //
                     // This is way we need the leading space because `write_image_type` doesn't add
                     // any spaces at the beginning or end
-                    this.write_image_type(dim, arrayed, class)?;
+                    this.write_image_type(dim, arrayed, class, true)?;
                 }
                 TypeInner::Pointer { base, .. } => {
                     // write parameter qualifiers
@@ -1629,11 +1681,14 @@ impl<'a, W: Write> Writer<'a, W> {
                         ..
                     } = ctx.expressions[handle]
                     {
-                        if let TypeInner::Image {
-                            class: crate::ImageClass::Sampled { .. },
-                            ..
-                        } = *ctx.resolve_type(image, &self.module.types)
-                        {
+                        let sampled = match *ctx.resolve_type(image, &self.module.types) {
+                            TypeInner::Image { class: crate::ImageClass::Sampled { .. }, .. } => true,
+                            TypeInner::Image { class: crate::ImageClass::Depth { .. }, .. } => {
+                                self.is_depth_value(image, ctx.expressions)
+                            }
+                            _ => false,
+                        };
+                        if sampled {
                             if let proc::BoundsCheckPolicy::Restrict = self.policies.image_load {
                                 write!(self.out, "{level}")?;
                                 self.write_clamped_lod(ctx, handle, image, level_expr)?
@@ -2555,6 +2610,21 @@ impl<'a, W: Write> Writer<'a, W> {
                     } => (dim, class, arrayed),
                     _ => unreachable!(),
                 };
+                // bevy-horizon: a depth texture sampled for its value (no comparison) is a plain
+                // sampler in GLSL; the depth is the `.x` of the result.
+                let depth_value = matches!(class, crate::ImageClass::Depth { .. })
+                    && depth_ref.is_none()
+                    && self.is_depth_value(image, ctx.expressions);
+                // bevy-horizon: level-0 comparisons on `samplerCubeArrayShadow` need
+                // GL_EXT_texture_shadow_lod for `textureLod`, and `textureGrad` doesn't exist for
+                // it. Core GLSL's implicit-LOD `texture` takes the base level outside fragment
+                // shaders, and in them too for single-level shadow maps.
+                let cube_array_shadow_zero = dim == crate::ImageDimension::Cube
+                    && arrayed
+                    && depth_ref.is_some()
+                    && gather.is_none()
+                    && level == crate::SampleLevel::Zero
+                    && !self.features.contains(Features::TEXTURE_SHADOW_LOD);
                 let mut err = None;
                 if dim == crate::ImageDimension::Cube {
                     if offset.is_some() {
@@ -2581,12 +2651,14 @@ impl<'a, W: Write> Writer<'a, W> {
                     || (dim == crate::ImageDimension::D2 && arrayed))
                     && level == crate::SampleLevel::Zero
                     && matches!(class, crate::ImageClass::Depth { .. })
+                    && !depth_value
                     && !self.features.contains(Features::TEXTURE_SHADOW_LOD);
 
                 // Write the function to be used depending on the sample level
                 let fun_name = match level {
                     crate::SampleLevel::Zero if gather.is_some() => "textureGather",
                     crate::SampleLevel::Zero if workaround_lod_with_grad => "textureGrad",
+                    crate::SampleLevel::Zero if cube_array_shadow_zero => "texture",
                     crate::SampleLevel::Auto | crate::SampleLevel::Bias(_) => "texture",
                     crate::SampleLevel::Zero | crate::SampleLevel::Exact(_) => "textureLod",
                     crate::SampleLevel::Gradient { .. } => "textureGrad",
@@ -2660,7 +2732,7 @@ impl<'a, W: Write> Writer<'a, W> {
                                 _ => 2,
                             };
                             write!(self.out, ", vec{vec_dim}(0.0), vec{vec_dim}(0.0)")?;
-                        } else if gather.is_none() {
+                        } else if gather.is_none() && !cube_array_shadow_zero {
                             write!(self.out, ", 0.0")?;
                         }
                     }
@@ -2713,7 +2785,10 @@ impl<'a, W: Write> Writer<'a, W> {
                 }
 
                 // End the function
-                write!(self.out, ")")?
+                write!(self.out, ")")?;
+                if depth_value && gather.is_none() {
+                    write!(self.out, ".x")?;
+                }
             }
             Expression::ImageLoad {
                 image,
@@ -4084,6 +4159,17 @@ impl<'a, W: Write> Writer<'a, W> {
             _ => unreachable!(),
         };
 
+        // bevy-horizon: depth textures load as plain samplers (multisampled ones always are);
+        // the depth is the `.x` of the texel.
+        let depth_value = match class {
+            crate::ImageClass::Depth { multi: true } => true,
+            crate::ImageClass::Depth { multi: false } => self.is_depth_value(image, ctx.expressions),
+            _ => false,
+        };
+        if depth_value {
+            write!(self.out, "(")?;
+        }
+
         // Get the name of the function to be used for the load operation
         // and the policy to be used with it.
         let (fun_name, policy) = match class {
@@ -4106,9 +4192,11 @@ impl<'a, W: Write> Writer<'a, W> {
                 ("imageLoad", policy)
             }
             // TODO: Is there even a function for this?
-            crate::ImageClass::Depth { multi: _ } => {
+            crate::ImageClass::Depth { .. } if depth_value => ("texelFetch", self.policies.image_load),
+            crate::ImageClass::Depth { .. } => {
                 return Err(Error::Custom(
-                    "WGSL `textureLoad` from depth textures is not supported in GLSL".to_string(),
+                    "WGSL `textureLoad` from a depth texture also used for comparisons is not supported in GLSL"
+                        .to_string(),
                 ))
             }
             crate::ImageClass::External => unimplemented!(),
@@ -4304,8 +4392,9 @@ impl<'a, W: Write> Writer<'a, W> {
             // Get the kind of the output value.
             let kind = match class {
                 // Only sampled images can reach here since storage images
-                // don't need bounds checks and depth images aren't implemented
+                // don't need bounds checks, and depth images load as float samplers
                 crate::ImageClass::Sampled { kind, .. } => kind,
+                crate::ImageClass::Depth { .. } => crate::ScalarKind::Float,
                 _ => unreachable!(),
             };
 
@@ -4322,6 +4411,10 @@ impl<'a, W: Write> Writer<'a, W> {
             write!(self.out, ")")?;
             // Close the parentheses surrounding our ternary
             write!(self.out, ")")?;
+        }
+
+        if depth_value {
+            write!(self.out, ").x")?;
         }
 
         Ok(())
