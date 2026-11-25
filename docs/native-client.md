@@ -32,6 +32,9 @@ the matching prepared `resources/`. Netloader deploys an NRO; it does not provid
 controller input. Use the same save copy, camera, settings, shader selection, clocks and
 handheld/docked mode when comparing builds.
 
+Building the NRO with either GPU driver (Vulkan on NVK, or deko3d) and what differs on deko3d:
+[Switch builds and renderers](switch.md).
+
 The in-game Microsoft sign-in needs a Minecraft-services-approved Azure public client ID,
 `HORIZON_MSA_CLIENT_ID`, supplied at build time or in `env.txt` before launch. Do not put a
 client secret, account token, or device code in that file.
