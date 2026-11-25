@@ -2045,6 +2045,7 @@ dependencies = [
  "unicode-bidi",
  "ureq",
  "wgpu",
+ "wgpu_deko3d",
  "winit",
  "zip",
  "zune-jpeg",
@@ -6693,6 +6694,18 @@ dependencies = [
  "raw-window-handle",
  "static_assertions",
  "web-sys",
+]
+
+[[package]]
+name = "wgpu_deko3d"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "naga",
+ "raw-window-handle",
+ "wgpu",
+ "wgpu-hal",
+ "wgpu-types",
 ]
 
 [[package]]

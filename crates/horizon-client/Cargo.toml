@@ -184,6 +184,10 @@ windows-segment-heap = []
 # Switch: horizon-nx's allocator (caches in front of newlib's malloc, and the top-down region) as
 # the global allocator instead of mimalloc.
 nx-allocator = ["horizon-nx/top_down_alloc"]
+# Switch: draw through deko3d, the console's own GPU API (third_party/wgpu_deko3d), instead of
+# Vulkan and NVK (`horizon-nx/vulkan`). Exclusive with `horizon-nx/vulkan` and `nx-allocator`,
+# which takes NVK's top-down region (horizon-nx's `deko3d`).
+deko3d = ["horizon-client-render/deko3d", "horizon-nx/deko3d"]
 
 [[test]]
 name = "it"

@@ -41,6 +41,7 @@ alloc-count = ["horizon-client/alloc-count"]
 windows-mimalloc = ["horizon-client/windows-mimalloc"]
 windows-segment-heap = ["horizon-client/windows-segment-heap"]
 nx-allocator = ["horizon-client/nx-allocator"]
+deko3d = ["horizon-client/deko3d"]
 
 [build-dependencies]
 winresource = "0.1"

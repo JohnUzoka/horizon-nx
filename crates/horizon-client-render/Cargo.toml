@@ -77,6 +77,12 @@ wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
 
+[target.'cfg(target_os = "horizon")'.dependencies]
+# The Switch's renderer with the `deko3d` feature: a wgpu-hal backend on deko3d, the console's own
+# GPU API, in place of Vulkan and NVK (gfx/device.rs `open_backend`). bevy-horizon's
+# crates/wgpu_deko3d, copied by its scripts/vendor_deko3d.sh.
+wgpu_deko3d = { path = "../../third_party/wgpu_deko3d", optional = true }
+
 [features]
 # Sound output: horizon-client's `audio` feature.
 audio = ["dep:cpal"]
@@ -84,6 +90,8 @@ audio = ["dep:cpal"]
 test-support = []
 # The `scene_replay` example's allocator counts allocations (horizon-threads' `alloc-count`).
 alloc-count = ["horizon-threads/alloc-count"]
+# Switch: draw through deko3d (third_party/wgpu_deko3d) instead of Vulkan; horizon-client's `deko3d`.
+deko3d = ["dep:wgpu_deko3d"]
 
 [lints]
 workspace = true

@@ -13,6 +13,14 @@
 //! for the 8 MiB stack upstream gives it. `flush_logs` and `process_applet_messages` are for the
 //! game loop (Phase 2); `software_keyboard` shows the system keyboard for text entry.
 
+// One GPU driver per NRO: deko3d (the `deko3d` feature) draws without NVK, and NVK's
+// `libvulkan_bh.a` would only add its size and its own GPU memory region.
+#[cfg(all(target_os = "horizon", feature = "vulkan", feature = "deko3d"))]
+compile_error!(
+    "horizon-nx's `deko3d` and `vulkan` features each pick the Switch's GPU driver: enable one \
+     (`nx-allocator` turns on `vulkan`, for NVK's top-down region)"
+);
+
 pub mod compat;
 pub mod lifecycle;
 pub mod logging;

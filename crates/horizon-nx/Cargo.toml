@@ -16,6 +16,10 @@ vulkan = []
 # Rust's blocks of 256 KiB and up go in NVK's top-down heap region (allocator.rs).
 # Sets the `#[global_allocator]`, so a game with its own can't use it.
 top_down_alloc = ["vulkan"]
+# The game draws through deko3d (horizon-client's `deko3d`, third_party/wgpu_deko3d), which links
+# deko3d and UAM itself: NVK stays out, and `vulkan` (with `top_down_alloc`) is refused alongside
+# it (lib.rs). wgpu's Vulkan backend still links against compat's null vkGetInstanceProcAddr.
+deko3d = []
 
 [dependencies]
 log = "0.4"

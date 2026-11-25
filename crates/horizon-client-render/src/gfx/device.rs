@@ -84,7 +84,9 @@ impl wgpu::rwh::HasDisplayHandle for WindowDisplay {
 /// OpenGL. Each is tried when the one before has no surface, adapter or device. A native
 /// crash in the driver can't be caught in the game; the launcher switches the setting to
 /// DirectX 12 after one at the renderer's start on Vulkan (#746) or, on Windows, OpenGL
-/// (#18291). macOS has Metal only.
+/// (#18291). macOS has Metal only. A Switch build with the `deko3d` feature has deko3d only
+/// (third_party/wgpu_deko3d), which wgpu reports as `Noop`: a backend it doesn't know of,
+/// whose instance `open_backend` takes from the crate.
 pub(crate) fn backend_order(
     api: GraphicsApi,
     os: &str,
@@ -92,6 +94,9 @@ pub(crate) fn backend_order(
     wgpu_backend: bool,
 ) -> Vec<wgpu::Backends> {
     use wgpu::Backends;
+    if cfg!(all(target_os = "horizon", feature = "deko3d")) {
+        return vec![Backends::NOOP];
+    }
     if os == "macos" || wgpu_backend {
         return vec![Backends::default()];
     }
@@ -112,6 +117,7 @@ fn backends_name(backends: wgpu::Backends) -> &'static str {
         wgpu::Backends::VULKAN => "Vulkan",
         wgpu::Backends::DX12 => "DirectX 12",
         wgpu::Backends::GL => "OpenGL",
+        wgpu::Backends::NOOP if cfg!(feature = "deko3d") => "deko3d",
         _ => "graphics",
     }
 }
@@ -559,6 +565,11 @@ async fn open_backend(
             dx12_compiler,
         ))
     };
+    // deko3d's instance comes made from its crate, with the console's GPU as its one adapter:
+    // wgpu has no descriptor for a backend it doesn't know of.
+    #[cfg(all(target_os = "horizon", feature = "deko3d"))]
+    let instance = wgpu_deko3d::instance();
+    #[cfg(not(all(target_os = "horizon", feature = "deko3d")))]
     let instance = open(wgpu::Dx12Compiler::Fxc);
     let (surface, adapter) = match surface_and_adapter(&instance, window, offscreen).await {
         Ok(found) => found,
