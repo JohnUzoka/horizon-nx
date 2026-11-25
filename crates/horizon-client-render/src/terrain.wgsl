@@ -107,6 +107,10 @@ fn sprite_level(uv: vec2<f32>, layer: u32, lod: f32) -> vec4<f32> {
         default: { return textureSampleLevel(sprites_7, sprite_sampler, uv, l, lod); }
     }
 }
+// HORIZON_TERRAIN_AB (gfx.rs's `TerrainAb`): this frame's variant bits, 0 outside an A/B run.
+fn terrain_ab(bit: u32) -> bool {
+    return (u32(globals.filtering.w) & bit) != 0u;
+}
 // texture_sampling.glsl's sampleNearest: the sprite's texels stay square pixels, blending only
 // across the one screen pixel where two meet, so a linear (and anisotropic) sampler keeps them crisp.
 // `tiled`: a distant tile's face takes its sprite again per block, so its gradients span many
@@ -119,7 +123,7 @@ fn sample_nearest(uv: vec2<f32>, layer: u32, pixel: vec2<f32>, du: vec2<f32>, dv
     offset = (offset - 0.5) * pixel / max(texel_screen, vec2(1e-12)) + 0.5;
     offset = clamp(offset, vec2(0.0), vec2(1.0));
     let at = (center + offset) * pixel;
-    if tiled {
+    if tiled || (terrain_ab(1u) && u32(globals.filtering.x) != 2u) {
         // An anisotropic sampler lays its taps along those gradients, past the sprite's edge,
         // where the clamped sampler reads that edge texel again: long streaks on the far tiles.
         // Asking for the level the gradients give takes the one tap an anisotropy of 1 would.
@@ -185,6 +189,10 @@ fn sprite(tiled: vec2<f32>, layer: u32) -> vec4<f32> {
 fn sprite_at(tiled: vec2<f32>, layer: u32, du: vec2<f32>, dv: vec2<f32>) -> vec4<f32> {
     // terrain.fsh's two sampling paths: sampleRGSS for RGSS, sampleNearest otherwise.
     let uv = tile_uv(tiled);
+    if terrain_ab(2u) {
+        let level = max(length(du), length(dv)) * globals.filtering.y;
+        return sprite_level(uv, layer, max(0.0, log2(level)));
+    }
     // The wrap shifts a face's UVs by whole blocks, so half of one tells a tile's face from a
     // block's (whose UVs stay inside its sprite).
     let tiled_face = any(tiled - uv >= vec2(0.5));
@@ -642,6 +650,18 @@ fn corner_inputs(c: ArenaCorner) -> CornerInputs {
 }
 fn corner_vertex(c: ArenaCorner, origin: vec4<f32>) -> TerrainOut {
     let i = corner_inputs(c);
+    if terrain_ab(64u) {
+        // Measurement only: the position, UV and layer, with none of the lighting, fog,
+        // fade or emission work.
+        var out: TerrainOut;
+        out.clip = globals.view_proj * vec4(i.position + origin.xyz, 1.0);
+        out.uv = terrain_uv(i.uv, uv_step(i.layer, origin.w));
+        out.layer = i.layer;
+        out.color = i.color;
+        out.visibility = 1.0;
+        out.emissive_layer = 0xffffffffu;
+        return out;
+    }
     return terrain_vertex(i.position, terrain_uv(i.uv, uv_step(i.layer, origin.w)), i.layer,
         i.color, i.light, origin.xyz, origin.w);
 }
@@ -730,6 +750,10 @@ fn apply_fog(color: vec4<f32>, spherical: f32, cylindrical: f32) -> vec4<f32> {
 }
 @fragment fn fs_solid(wire: TerrainWire) -> @location(0) vec4<f32> {
     let in = from_wire(wire);
+    // Measurement only: opaque quads (no fade, no cutout) take their vertex colour alone.
+    if terrain_ab(32u) && opaque_quad(in.layer, select(1.0, -1.0, in.fade != 0u)) {
+        return vec4(in.color.rgb, 1.0);
+    }
     return solid_color(in);
 }
 // Shader alpha-to-coverage leaves colour alpha available for HDR's light codes.
@@ -759,6 +783,7 @@ struct TerrainMsaa {
     let texel = sprite(in.uv, in.layer & 0x7fffu);
     var color = texel * in.color;
     color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
+    if terrain_ab(8u) { return vec4(color.rgb, 1.0); }
     return solid_finish(in, texel, color);
 }
 // The water mirror (gfx.rs's reflection pass): what lies below the water plane
@@ -772,6 +797,7 @@ fn solid_color(in: TerrainOut) -> vec4<f32> {
     let s = solid_uncut(in);
     // Bit 15 of the layer marks opaque leaves (forceOpaque): no alpha cutout.
     if s.color.a < 0.5 && (in.layer & 0x8000u) == 0u { discard; }
+    if terrain_ab(8u) { return vec4(s.color.rgb, 1.0); }
     return solid_finish(in, s.texel, s.color);
 }
 // A solid pixel's sprite texel and colour before its cutout, which `solid_color` discards

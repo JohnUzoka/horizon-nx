@@ -572,6 +572,7 @@ mod off_page;
 use off_page::move_off_page;
 pub mod submit;
 mod sunrise_fan;
+mod terrain_ab;
 mod timing;
 pub mod translucency;
 pub(crate) mod upload;
@@ -1524,6 +1525,8 @@ pub struct Renderer {
     /// (see `startup_step`).
     first_frame: FirstFrame,
     gpu_timer: Option<timing::GpuTimer>,
+    /// `HORIZON_TERRAIN_AB`'s in-run variants of solid terrain (`terrain_ab`).
+    terrain_ab: Option<terrain_ab::TerrainAb>,
     /// GPU frame times (ms) read back since the caller last drained them.
     pub gpu_times: Vec<f32>,
     /// The last lightmap written, RGBA rows of sky level by block level
@@ -4318,7 +4321,11 @@ impl Renderer {
         let flat_wanted = flat::wanted(&adapter, &device);
         // Metal draws solid terrain in two passes (`split_solid`): meshes put all
         // their opaque quads first, so each pass draws its part in a run or two.
-        crate::mesher::group_parts(adapter.get_info().backend == wgpu::Backend::Metal);
+        let terrain_ab = terrain_ab::TerrainAb::from_env();
+        crate::mesher::group_parts(
+            adapter.get_info().backend == wgpu::Backend::Metal
+                || terrain_ab.as_ref().is_some_and(|ab| ab.splits()),
+        );
         // Readable as storage where flat draws run: a shader pack's terrain program reads them.
         let arena = arena::Arena::new(
             &device,
@@ -4600,6 +4607,7 @@ impl Renderer {
                 FirstFrame::Drawn
             },
             gpu_timer,
+            terrain_ab,
             gpu_times: Vec::new(),
             lightmap_pixels: [0; 16 * 16 * 4],
             last_wait: std::time::Duration::ZERO,
@@ -7678,6 +7686,8 @@ impl Renderer {
         debug_assert_eq!(output.encoding, self.hdr.as_ref().map(|hdr| hdr.output));
         // Its steps as spans (HORIZON_SPIKES): each lap names the step that just ended.
         let mut laps = crate::spans::laps();
+        // This frame's `HORIZON_TERRAIN_AB` variant bits (terrain.wgsl's `terrain_ab`).
+        let ab = self.terrain_ab.as_mut().map_or(0, |a| a.next_frame());
         let landing = Instant::now();
         self.land_frame();
         // Waiting for the previous frame (offscreen: at most two on the GPU), not work.
@@ -8130,7 +8140,7 @@ impl Renderer {
                 } else {
                     0.0
                 },
-                0.0,
+                ab as f32,
             ],
             hdr_light: [
                 0.0,
@@ -8676,7 +8686,8 @@ impl Renderer {
         // ones (`Part`), each solid pass drawing its own: `[..opaque_draws]`,
         // then the rest; phase 2 likewise. A fading list's quads all draw in the
         // cutout pass.
-        let split_solid = self.info.backend == wgpu::Backend::Metal && !msaa_on;
+        let ab_split = ab & terrain_ab::SPLIT != 0 && !gpu_frame;
+        let split_solid = (self.info.backend == wgpu::Backend::Metal || ab_split) && !msaa_on;
         let parts = |fading: bool| -> &'static [(u8, Quads)] {
             match (split_solid, fading) {
                 (false, _) => &[(0, Quads::All)],
@@ -9982,6 +9993,8 @@ impl Renderer {
             ..Default::default()
         });
         if let Some(timer) = &mut self.gpu_timer {
+            timer.tag = ab;
+            timer.tagging = self.terrain_ab.is_some();
             timer.begin(&mut encoder);
         }
         // The frame's statistics (`show_stats`): a CPU frame's at once; a GPU frame's when the
@@ -10337,7 +10350,7 @@ impl Renderer {
         // Two solid passes only where a discard costs the GPU its hidden surface
         // removal: Apple's tiled GPUs, behind Metal. Elsewhere the second pass
         // would double the solid draw calls and vertex work for nothing.
-        let split_solid = self.info.backend == wgpu::Backend::Metal && !msaa_on;
+        let split_solid = (self.info.backend == wgpu::Backend::Metal || ab_split) && !msaa_on;
         let translucent_pipeline = material.map_or(&self.translucent, |m| m.translucent);
         let pack_flat = material.and_then(|m| m.flat);
         let pack_flat_msaa = material
@@ -11987,6 +12000,9 @@ impl Renderer {
         if let Some(timer) = &mut self.gpu_timer {
             timer.submitted(&self.queue);
             timer.collect(&self.device, &mut self.gpu_times);
+            if let Some(ab) = &mut self.terrain_ab {
+                ab.collect(&mut timer.tagged);
+            }
         }
         self.pack_timing_submitted();
         if let Some(timer) = &mut self.own_timing {
