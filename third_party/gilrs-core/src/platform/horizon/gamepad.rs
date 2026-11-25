@@ -13,14 +13,22 @@
 //! is East; Y is West; X is North), and the vendor id is Nintendo's, so a game that picks glyphs
 //! by vendor shows Nintendo's letters. The sticks run -32767..=32767 with up positive. No SDL
 //! mapping applies (the UUID is nil), so gilrs maps these native codes one to one.
+//!
+//! libnx's pad API only reads the npad's latest state, so a game that reads once a frame misses a
+//! press shorter than its frame (a 90 ms tap at 8 fps, every tap during a long frame). A thread
+//! of its own samples the npads every `SAMPLE_PERIOD` instead and queues each change, stamped
+//! when it was seen; the game drains the queue whenever it reads. A full queue (nobody reading)
+//! holds the sampler back, so the changes meanwhile fold into one as before.
 
 use super::FfDevice;
 use crate::{AxisInfo, Event, EventType, PlatformError, PowerInfo};
 use uuid::Uuid;
 
-use std::collections::VecDeque;
 use std::fmt::{Display, Formatter, Result as FmtResult};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
+use std::sync::Arc;
+use std::time::Duration;
 
 /// libnx `HidAnalogStickState`.
 #[repr(C)]
@@ -143,108 +151,173 @@ const STICK: AxisInfo = AxisInfo {
     deadzone: None,
 };
 
-#[derive(Debug)]
-struct Slot {
+/// How often the sampler reads the npads: well under the shortest press a person makes.
+const SAMPLE_PERIOD: Duration = Duration::from_millis(4);
+/// Samples queued before the sampler waits for a read.
+const QUEUE: usize = 256;
+
+/// One npad as the sampler last read it.
+struct Npad {
     pad: PadState,
     buttons: u64,
     axes: [i32; 4],
-    gamepad: Gamepad,
+    connected: bool,
+}
+
+/// What the sampler sends: a gamepad's identity as it connects or goes, then each event.
+enum Sample {
+    Identity {
+        id: usize,
+        connected: bool,
+        style_set: u32,
+    },
+    Event(Event),
 }
 
 #[derive(Debug)]
 pub struct Gilrs {
-    slots: [Slot; NPAD_IDS.len()],
-    events: VecDeque<Event>,
+    gamepads: [Gamepad; NPAD_IDS.len()],
+    samples: Receiver<Sample>,
+    /// Tells the sampler to stop once this is dropped.
+    stop: Arc<AtomicBool>,
 }
 
 impl Gilrs {
     pub(crate) fn new() -> Result<Self, PlatformError> {
         // SAFETY: libnx accepts one to eight players and the standard style set.
         unsafe { padConfigureInput(PLAYERS, STYLE_SET_STANDARD) };
-        let slots = NPAD_IDS.map(|npad_id| {
+        let npads = NPAD_IDS.map(|npad_id| {
             let mut pad = PadState::default();
             // SAFETY: each bit corresponds to a valid libnx npad id; libnx fills the struct.
             unsafe { padInitializeWithMask(&mut pad, 1 << npad_id) };
-            Slot {
+            Npad {
                 pad,
                 buttons: 0,
                 axes: [0; 4],
-                gamepad: Gamepad::new(npad_id),
+                connected: false,
             }
         });
+        let (sender, samples) = mpsc::sync_channel(QUEUE);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        std::thread::Builder::new()
+            .name("npad sampler".into())
+            .stack_size(64 << 10)
+            .spawn(move || sample(npads, &sender, &stopped))
+            .map_err(|e| PlatformError::Other(Box::new(e)))?;
         Ok(Gilrs {
-            slots,
-            events: VecDeque::new(),
+            gamepads: NPAD_IDS.map(Gamepad::new),
+            samples,
+            stop,
         })
     }
 
     pub(crate) fn next_event(&mut self) -> Option<Event> {
-        if self.events.is_empty() {
-            self.poll();
+        loop {
+            match self.samples.try_recv() {
+                Ok(sample) => {
+                    if let Some(event) = self.take(sample) {
+                        return Some(event);
+                    }
+                }
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return None,
+            }
         }
-        self.events.pop_front()
     }
 
     pub(crate) fn next_event_blocking(&mut self, timeout: Option<Duration>) -> Option<Event> {
-        let deadline = timeout.map(|timeout| Instant::now() + timeout);
         loop {
-            if let Some(event) = self.next_event() {
+            let sample = match timeout {
+                Some(timeout) => match self.samples.recv_timeout(timeout) {
+                    Ok(sample) => sample,
+                    Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return None,
+                },
+                None => self.samples.recv().ok()?,
+            };
+            if let Some(event) = self.take(sample) {
                 return Some(event);
             }
-            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                return None;
+        }
+    }
+
+    /// Applies an identity change; the event, if `sample` is one.
+    fn take(&mut self, sample: Sample) -> Option<Event> {
+        match sample {
+            Sample::Identity {
+                id,
+                connected,
+                style_set,
+            } => {
+                self.gamepads[id].update(style_set, connected);
+                None
             }
-            std::thread::sleep(Duration::from_millis(4));
+            Sample::Event(event) => Some(event),
         }
     }
 
     pub fn gamepad(&self, id: usize) -> Option<&Gamepad> {
-        self.slots.get(id).map(|slot| &slot.gamepad)
+        self.gamepads.get(id)
     }
 
     /// Returns index greater than index of last connected gamepad.
     pub fn last_gamepad_hint(&self) -> usize {
-        self.slots.len()
-    }
-
-    /// Reads each slot and queues what changed since the last read.
-    fn poll(&mut self) {
-        for (id, slot) in self.slots.iter_mut().enumerate() {
-            slot.poll(id, &mut self.events);
-        }
+        self.gamepads.len()
     }
 }
 
-impl Slot {
-    fn poll(&mut self, id: usize, events: &mut VecDeque<Event>) {
+impl Drop for Gilrs {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The sampler thread: reads every npad each `SAMPLE_PERIOD` until its `Gilrs` is gone.
+fn sample(mut npads: [Npad; NPAD_IDS.len()], sender: &SyncSender<Sample>, stop: &AtomicBool) {
+    while !stop.load(Ordering::Relaxed) {
+        for (id, npad) in npads.iter_mut().enumerate() {
+            if npad.poll(id, sender).is_err() {
+                return;
+            }
+        }
+        std::thread::sleep(SAMPLE_PERIOD);
+    }
+}
+
+impl Npad {
+    /// Reads the npad and sends what changed since the last read; `Err` once nobody listens.
+    fn poll(&mut self, id: usize, sender: &SyncSender<Sample>) -> Result<(), mpsc::SendError<Sample>> {
         // SAFETY: `self.pad` was set up by padInitializeWithMask; padUpdate only writes it.
         unsafe { padUpdate(&mut self.pad) };
+        let send = |event| sender.send(Sample::Event(Event::new(id, event)));
         let connected = self.pad.attributes & ATTRIBUTE_IS_CONNECTED != 0;
-        if connected != self.gamepad.connected {
-            self.gamepad.update(&self.pad, connected);
-            let event = if connected {
-                EventType::Connected
+        if connected != self.connected {
+            self.connected = connected;
+            sender.send(Sample::Identity {
+                id,
+                connected,
+                style_set: self.pad.style_set,
+            })?;
+            if connected {
+                send(EventType::Connected)?;
             } else {
                 self.buttons = 0;
                 self.axes = [0; 4];
-                EventType::Disconnected
-            };
-            events.push_back(Event::new(id, event));
+                send(EventType::Disconnected)?;
+            }
         }
         if !connected {
-            return;
+            return Ok(());
         }
         let buttons = self.pad.buttons_cur;
         let changed = buttons ^ self.buttons;
         for (bit, code) in BUTTONS {
             if changed & bit != 0 {
                 let code = crate::EvCode(code);
-                let event = if buttons & bit != 0 {
+                send(if buttons & bit != 0 {
                     EventType::ButtonPressed(code)
                 } else {
                     EventType::ButtonReleased(code)
-                };
-                events.push_back(Event::new(id, event));
+                })?;
             }
         }
         self.buttons = buttons;
@@ -253,10 +326,11 @@ impl Slot {
         for (i, value) in axes.into_iter().enumerate() {
             if value != self.axes[i] {
                 let code = crate::EvCode(AXIS_CODES[i]);
-                events.push_back(Event::new(id, EventType::AxisValueChanged(value, code)));
+                send(EventType::AxisValueChanged(value, code))?;
             }
         }
         self.axes = axes;
+        Ok(())
     }
 }
 
@@ -279,9 +353,8 @@ impl Gamepad {
     }
 
     /// Takes the controller's name and product from the style libnx reports.
-    fn update(&mut self, pad: &PadState, connected: bool) {
+    fn update(&mut self, style: u32, connected: bool) {
         self.connected = connected;
-        let style = pad.style_set;
         (self.name, self.product) = if style & STYLE_FULL_KEY != 0 {
             ("Nintendo Switch Pro Controller", Some(PRO_CONTROLLER))
         } else if style & (STYLE_HANDHELD | STYLE_JOY_DUAL) != 0 {

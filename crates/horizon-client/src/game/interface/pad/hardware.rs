@@ -327,6 +327,10 @@ impl Pads {
         };
         let active = self.devices.active;
         self.peaks = [[0.0; 2]; 2];
+        // The buttons each pad pressed between the reads. A press and its release both in the
+        // queue (a tap shorter than a frame, or any tap during a long one) end up released, so
+        // the read reports such a button down once and the next read lets it go.
+        let mut presses: Vec<(gilrs::GamepadId, gilrs::Button)> = Vec::new();
         while let Some(gilrs::Event { id, event, .. }) = gilrs.next_event() {
             use gilrs::EventType as E;
             // The furthest each stick of the active pad leant between the events, which a read
@@ -369,7 +373,10 @@ impl Pads {
                     // the pad afresh: `pad_output_frame` starts a new link while this pad plays.
                     self.devices.xbox_output = None;
                 }
-                E::ButtonPressed(..) => self.devices.active = Some(id),
+                E::ButtonPressed(button, _) => {
+                    self.devices.active = Some(id);
+                    presses.push((id, button));
+                }
                 E::AxisChanged(axis, value, _)
                     if axis_takes_over(axis, value, z_is_a_stick(&gilrs.gamepad(id))) =>
                 {
@@ -408,7 +415,17 @@ impl Pads {
             .active
             .and_then(|id| xbox_target(gilrs, id))
             .unwrap_or(xbox::Target::ANY);
-        state_of(&pad)
+        let mut state = state_of(&pad);
+        let crossed = face_buttons::crossed(&pad);
+        for button in Button::ALL {
+            let named = face_buttons::named(gilrs_button(button), crossed);
+            if !matches!(button, Button::LeftTrigger | Button::RightTrigger)
+                && presses.contains(&(pad.id(), named))
+            {
+                state.set(button, true);
+            }
+        }
+        state
     }
 }
 
