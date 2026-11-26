@@ -594,10 +594,14 @@ pub struct Audio {
     /// Opening the output again after it failed to (`Reopen`).
     #[cfg(feature = "audio")]
     reopen: Reopen,
-    /// The look at the output devices running on its own thread, until a tick
-    /// takes its answer: listing them can take 100 ms (#11490).
+    /// The look at the output devices running on the prober's thread, until a
+    /// tick takes its answer: listing them can take 100 ms (#11490).
     #[cfg(feature = "audio")]
     device_probe: Option<PendingProbe>,
+    /// The thread that looks at the output devices, once a second while the
+    /// output plays: one for the output's life, not one per look.
+    #[cfg(feature = "audio")]
+    device_prober: Option<std::sync::mpsc::Sender<ProbeJob>>,
 }
 /// What one look at the output devices found: the system default, the
 /// fingerprint, and the device list when those say it may have changed.
@@ -609,6 +613,26 @@ struct DeviceProbe {
 }
 #[cfg(feature = "audio")]
 type PendingProbe = Arc<Mutex<Option<DeviceProbe>>>;
+/// A look for the prober: the default device and fingerprint last seen, and
+/// where its answer goes.
+#[cfg(feature = "audio")]
+type ProbeJob = (Option<String>, Option<String>, PendingProbe);
+/// Starts the thread that answers `ProbeJob`s until its sender is dropped.
+#[cfg(feature = "audio")]
+fn start_prober() -> std::io::Result<std::sync::mpsc::Sender<ProbeJob>> {
+    let (jobs, receive) = std::sync::mpsc::channel::<ProbeJob>();
+    std::thread::Builder::new()
+        .name("audio-devices".into())
+        .spawn(move || {
+            for (default_seen, cards_seen, out) in receive {
+                let probe = probe_devices(default_seen, cards_seen);
+                if let Ok(mut found) = out.lock() {
+                    *found = Some(probe);
+                }
+            }
+        })?;
+    Ok(jobs)
+}
 /// Looks at the output devices as `should_change_device` did on the render
 /// thread: the device list only when the default or the fingerprint moved.
 #[cfg(feature = "audio")]
@@ -1851,6 +1875,8 @@ impl Audio {
             reopen: Reopen::default(),
             #[cfg(feature = "audio")]
             device_probe: None,
+            #[cfg(feature = "audio")]
+            device_prober: None,
         }
     }
     #[cfg(not(feature = "audio"))]
@@ -2023,6 +2049,8 @@ impl Audio {
             reopen: Reopen::default(),
             #[cfg(feature = "audio")]
             device_probe: None,
+            #[cfg(feature = "audio")]
+            device_prober: None,
         }
     }
     /// Sync the volume options, refreshing the categories that changed
@@ -2087,18 +2115,19 @@ impl Audio {
         }
         self.device_ticks = 0;
         let pending = PendingProbe::default();
-        let out = Arc::clone(&pending);
-        let seen = (self.default_seen.clone(), self.cards_seen.clone());
-        let started = std::thread::Builder::new()
-            .name("audio-devices".into())
-            .spawn(move || {
-                let probe = probe_devices(seen.0, seen.1);
-                if let Ok(mut found) = out.lock() {
-                    *found = Some(probe);
+        let job = (self.default_seen.clone(), self.cards_seen.clone(), Arc::clone(&pending));
+        let prober = match self.device_prober.take() {
+            Some(prober) => Ok(prober),
+            None => start_prober(),
+        };
+        match prober {
+            // A send fails only if the prober's thread has gone; the next look starts another.
+            Ok(prober) => {
+                if prober.send(job).is_ok() {
+                    self.device_probe = Some(pending);
+                    self.device_prober = Some(prober);
                 }
-            });
-        match started {
-            Ok(_) => self.device_probe = Some(pending),
+            }
             Err(e) => log::warn!("Horizon: could not look at the audio devices: {e}"),
         }
         false

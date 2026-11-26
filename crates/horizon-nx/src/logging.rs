@@ -699,6 +699,16 @@ pub(crate) fn write_log(data: &[u8]) -> bool {
     unsafe { ffi::write(fd, data.as_ptr().cast(), data.len()) >= 0 }
 }
 
+/// Queues `data` for the log writer, or writes it here as `write_log` does when there is no
+/// writer or no room: for lines written on the way to something else, such as a thread's
+/// creation, which mustn't wait for the SD card (a write can take hundreds of ms).
+#[cfg(target_os = "horizon")]
+pub(crate) fn queue_log(data: &[u8]) {
+    if !enqueue(data) {
+        write_log(data);
+    }
+}
+
 /// Writes one formatted line to `log.txt` without allocating, for code that runs at exit or
 /// after a failure. Text past 255 bytes is cut off.
 #[cfg(target_os = "horizon")]

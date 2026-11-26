@@ -330,18 +330,15 @@ pub fn known_blocks_only(blocks: PalettedContainer) -> PalettedContainer {
     PalettedContainer::from_values(ours, &values)
 }
 
-/// Frees `columns` (`count` of them) on a short-lived thread of its own
-/// when there are many: a teleport or a dimension change drops a few
-/// thousand columns at once, and freeing their sections took the frame
-/// 15-20 ms. A few are freed here.
+/// Frees `columns` (`count` of them) on the freeing thread when there are
+/// many: a teleport or a dimension change drops a few thousand columns at
+/// once, and freeing their sections took the frame 15-20 ms. A few are
+/// freed here.
 pub fn free_columns<T: Send + 'static>(columns: T, count: usize) {
     if count < 64 {
         return;
     }
-    // Should the thread not start, the closure drops `columns` here.
-    let _ = std::thread::Builder::new()
-        .name("Chunk freeing".into())
-        .spawn(move || drop(columns));
+    crate::freeing::drop_later(columns);
 }
 
 /// Sizes the block states' global palette for a registry of `states`.

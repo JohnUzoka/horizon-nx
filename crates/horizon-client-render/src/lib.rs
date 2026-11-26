@@ -53,6 +53,7 @@ pub mod fast_hash;
 pub mod fluid_render;
 pub mod fog;
 pub mod font;
+pub mod freeing;
 pub mod fusion;
 pub mod gfx;
 pub mod graphics;
