@@ -514,9 +514,14 @@ fn translucent_split(batching: bool, flat_draws: bool, terrain: bool, shadow: bo
     batching && !(flat_draws && (terrain || shadow))
 }
 
-/// The compact layout of solid quads, unless `HORIZON_PACKED_QUADS=0` (A/B checks).
+/// Prefer the wide layout on Switch: compact terrain trades VRAM for vertex decoding on Tegra.
+/// `HORIZON_PACKED_QUADS=0` or `1` overrides the platform default for A/B checks.
 fn packed_wanted() -> bool {
-    std::env::var("HORIZON_PACKED_QUADS").as_deref() != Ok("0")
+    match std::env::var("HORIZON_PACKED_QUADS").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => !cfg!(target_os = "horizon"),
+    }
 }
 
 /// Whether solid terrain draws in two passes (`split_solid`): the opaque quads first through
@@ -2606,6 +2611,7 @@ impl Renderer {
             Some(renderer) => {
                 describe_adapter(&renderer.adapter);
                 check_layers(&renderer.adapter, layers)?;
+                let mut configured = None;
                 Opened {
                     surface: if offscreen {
                         None
@@ -2616,7 +2622,24 @@ impl Renderer {
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .take();
                         Some(match spare {
-                            Some(surface) => surface,
+                            Some(surface) => {
+                                // Keep the last presented frame on Switch while the new
+                                // renderer builds. Reconfiguring would retire the swapchain.
+                                let size = window.inner_size();
+                                if cfg!(target_os = "horizon")
+                                    && !renderer.surface_unconfigured
+                                    && renderer.hdr.is_none()
+                                    && size.width == renderer.config.width
+                                    && size.height == renderer.config.height
+                                {
+                                    configured = Some((
+                                        renderer.config.clone(),
+                                        surface.get_capabilities(&renderer.adapter),
+                                    ));
+                                    log::info!("Horizon renderer: kept the Switch swapchain");
+                                }
+                                surface
+                            }
                             None => renderer.instance.create_surface(window.clone())?,
                         })
                     },
@@ -2625,7 +2648,7 @@ impl Renderer {
                     device: renderer.device.clone(),
                     queue: renderer.queue.clone(),
                     device_lost: renderer.device_lost.clone(),
-                    configured: None,
+                    configured,
                 }
             }
             None => {
@@ -7190,6 +7213,9 @@ impl Renderer {
             sprite_views: &self.sprite_views,
             format: self.output.frame.format,
             linear: self.output.frame.linear_light,
+            sdr_output: (cfg!(target_os = "horizon")
+                && self.output.frame.overlay_format != self.output.frame.format)
+                .then_some(self.output.frame.overlay_format),
             msaa: self.msaa.built(),
             sprite_tags: &sprite_tags,
             sprite_materials: &sprite_materials,
@@ -7199,7 +7225,7 @@ impl Renderer {
             pbr: self.pbr_maps.as_ref().and_then(|arrays| arrays.first()),
             looks: self.looks_layout.as_ref().filter(|_| terrain_looks),
         };
-        let metadata = native_pack::Metadata::of(&report);
+        let mut metadata = native_pack::Metadata::of(&report);
         let (pack, labels) = native_pack::NativePack::new(
             &self.device,
             &self.queue,
@@ -7208,6 +7234,7 @@ impl Renderer {
             &constants,
             lights,
         )?;
+        metadata.sdr_format = pack.post.sdr_format();
         if let Some(refused) = self.replace_executor(Some(Box::new(pack))) {
             return Err(refused);
         }
@@ -7903,6 +7930,16 @@ impl Renderer {
         if self.suspended {
             return self.refuse(NotDrawn::Suspended);
         }
+        // SDR overlays can draw on the same 8-bit target as the pack's output. Keep the float
+        // path for native world hooks, screenshots and HDR, which have their own target rules.
+        let direct_sdr = self.pack_metadata.as_ref().is_some_and(|pack| {
+            pack.sdr_format == Some(self.output.frame.overlay_format)
+                && !frame.title
+                && self.hdr.is_none()
+                && !native_render::world_drawn_hooked()
+                && !native_render::world_views_hooked()
+                && self.screenshot.is_none()
+        });
         // A window frame without the room for a target it draws into is skipped before it takes
         // a swapchain image, and tried again on the next (#13624). A scaled screenshot's frame
         // is under its own scopes (`checks`), which take it again at half the size.
@@ -7940,6 +7977,7 @@ impl Renderer {
             };
             let (format, screenshot) = (self.output.frame.format, self.screenshot.is_some());
             if self.hdr.is_none()
+                && !direct_sdr
                 && let Some(image) = image
                 && !self.readback.ready(&self.device, image, format, screenshot)
             {
@@ -8081,27 +8119,6 @@ impl Renderer {
         // once.
         let backstop = checks.is_none().then(|| GpuChecks::push(&self.device));
         let size = [self.config.width, self.config.height];
-        let target_texture = match (&surface_frame, &mut self.hdr) {
-            (_, Some(hdr)) => hdr.frame(&self.device, size),
-            _ if let Some((real, _)) = &fg_frames => real.clone(),
-            // A screenshot of a swapchain without COPY_SRC (OpenGL), and a float frame
-            // with HDR off, draw into a texture of their own, then onto the swapchain or
-            // the offscreen target.
-            (f, None) => {
-                let image = match f {
-                    Some(f) => f.texture.clone(),
-                    None => self.offscreen.clone().ok_or("no offscreen target")?,
-                };
-                self.readback
-                    .target(
-                        &self.device,
-                        &image,
-                        self.output.frame.format,
-                        self.screenshot.is_some(),
-                    )
-                    .unwrap_or(image)
-            }
-        };
         // The section copies staged since the last frame, in a command buffer of their own
         // submitted before the frame's: a frame given up (`abandon_frame`) still submits them.
         let mut copies = self.take_section_copies();
@@ -10147,8 +10164,29 @@ impl Renderer {
             };
             section_draw_calls = mesh_calls + translucent_calls;
         }
+        // A native pack always asks for a scaled world, even at 100%. If it couldn't be
+        // allocated, the world draws in its normal format and the 8-bit finish still runs.
+        let direct_sdr = direct_sdr && native_post && !pack_post && scaled.is_some() && !fg;
+        let target_format = if direct_sdr {
+            self.output.frame.overlay_format
+        } else {
+            self.output.frame.format
+        };
+        let target_texture = match (&surface_frame, &mut self.hdr) {
+            (_, Some(hdr)) => hdr.frame(&self.device, size),
+            _ if let Some((real, _)) = &fg_frames => real.clone(),
+            (f, None) => {
+                let image = match f {
+                    Some(f) => f.texture.clone(),
+                    None => self.offscreen.clone().ok_or("no offscreen target")?,
+                };
+                self.readback
+                    .target(&self.device, &image, target_format, self.screenshot.is_some())
+                    .unwrap_or(image)
+            }
+        };
         let view_target = target_texture.create_view(&wgpu::TextureViewDescriptor {
-            format: Some(self.output.frame.format),
+            format: Some(target_format),
             ..Default::default()
         });
         if let Some(timer) = &mut self.gpu_timer {
@@ -11925,7 +11963,7 @@ impl Renderer {
         }
         // A 0.2 pack in SDR: its picture finishes on 8 bits before the hand, the camera overlays
         // and the HUD draw over it (`overlay_format`).
-        let finished = (self.output.frame.overlay_format != self.output.frame.format)
+        let finished = (self.output.frame.overlay_format != target_format)
             .then(|| {
                 let image = surface_frame.as_ref().map(|f| &f.texture);
                 image.or(self.offscreen.as_ref())
@@ -11944,7 +11982,7 @@ impl Renderer {
                 });
                 (texture, view, self.output.frame.overlay_format)
             }
-            None => (target_texture, view_target, self.output.frame.format),
+            None => (target_texture, view_target, target_format),
         };
         let overlay = Overlay {
             hand_quads: hand_quads * u32::from(!pack_draws_hand && !hand_in_world),

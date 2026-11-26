@@ -1,5 +1,6 @@
 //! The game-owned, side-effect-free startup validation boundary.
 use super::*;
+use horizon_client::device_path;
 
 impl Options {
     /// The complete game-owned command-line boundary, before leases or native hooks.
@@ -12,9 +13,9 @@ impl Options {
         };
         // Paths given on the command line stay relative to where the game was started.
         if o.game_dir.is_some() {
-            o.control = o.control.map(std::path::absolute).transpose()?;
-            o.resources = std::path::absolute(&o.resources)?;
-            o.report = o.report.map(std::path::absolute).transpose()?;
+            o.control = o.control.map(device_path::absolute).transpose()?;
+            o.resources = device_path::absolute(&o.resources)?;
+            o.report = o.report.map(device_path::absolute).transpose()?;
         }
         // Refused here, before the account's file is used up or anything loads.
         if let Some(path) = &o.control {

@@ -11,12 +11,31 @@ use std::path::Path;
 pub const STAMP: &str = "horizon-prepare.json";
 
 pub(crate) fn write_stamp(resources: &Path) -> Result<(), String> {
+    write_version_stamp(resources, i64::from(OUTPUT_VERSION))
+}
+
+pub(crate) fn written_version(resources: &Path) -> Option<i64> {
+    read_json(&resources.join(STAMP))
+        .ok()?
+        .get("output_version")?
+        .as_i64()
+}
+
+pub(crate) fn write_version_stamp(resources: &Path, output_version: i64) -> Result<(), String> {
+    let generation = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .to_string();
     write_json(
         &resources.join(STAMP),
-        &Value::Object(vec![(
-            "output_version".into(),
-            Value::Int(OUTPUT_VERSION.to_string()),
-        )]),
+        &Value::Object(vec![
+            (
+                "output_version".into(),
+                Value::Int(output_version.to_string()),
+            ),
+            ("generation".into(), Value::Str(generation)),
+        ]),
     )
 }
 

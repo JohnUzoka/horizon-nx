@@ -1811,6 +1811,7 @@ dependencies = [
  "flate2",
  "fs4",
  "gilrs",
+ "gilrs-core",
  "glam",
  "horizon-anticheat",
  "horizon-assets",

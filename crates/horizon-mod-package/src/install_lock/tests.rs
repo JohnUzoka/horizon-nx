@@ -1,7 +1,10 @@
 use super::*;
+#[cfg(not(target_os = "horizon"))]
 use std::process::{Command, Stdio};
 use std::sync::mpsc::channel;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_os = "horizon"))]
+use std::time::Instant;
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -51,6 +54,7 @@ fn different_homes_do_not_block_each_other() {
     fs::remove_dir_all(other).unwrap();
 }
 
+#[cfg(not(target_os = "horizon"))]
 #[test]
 fn filesystem_errors_refuse_mutation_and_release_the_reservation() {
     let home = scratch("error");
@@ -62,6 +66,16 @@ fn filesystem_errors_refuse_mutation_and_release_the_reservation() {
     fs::remove_dir_all(home).unwrap();
 }
 
+#[cfg(target_os = "horizon")]
+#[test]
+fn acquisition_does_not_use_the_os_lock_file() {
+    let home = scratch("switch");
+    fs::create_dir(home.join(".mod-browser.lock")).unwrap();
+    drop(lock_home(&home).unwrap());
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[cfg(not(target_os = "horizon"))]
 /// Invoked in a separate process by the transaction test below.
 #[test]
 fn process_probe() {
@@ -86,6 +100,7 @@ fn process_probe() {
     fs::rename(home.join("manifest.part"), path).unwrap();
 }
 
+#[cfg(not(target_os = "horizon"))]
 #[test]
 #[ignore = "daily"]
 fn processes_serialize_the_entire_manifest_transaction() {
@@ -135,7 +150,7 @@ fn processes_serialize_the_entire_manifest_transaction() {
     fs::remove_dir_all(home).unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "horizon")))]
 #[test]
 fn symlinked_homes_share_the_reentrant_lock() {
     let root = scratch("symlink");

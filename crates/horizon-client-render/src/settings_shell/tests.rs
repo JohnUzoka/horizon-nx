@@ -533,7 +533,9 @@ fn a_click_on_a_greyed_row_does_nothing_and_done_leaves() {
             .is_empty()
     );
     assert!(shell.screen.pressed.is_empty());
-    let [x, y, w, h] = Columns::of(SIZE.0, SIZE.1).button(0);
+    let cols = Columns::of(SIZE.0, SIZE.1);
+    let [x, y, w, h] = cols.button(0);
+    assert_eq!(x, cols.side_x);
     let at = (x + w / 2.0, y + h / 2.0);
     assert_eq!(
         shell.click(&mut s, at, SIZE, false, false, false),

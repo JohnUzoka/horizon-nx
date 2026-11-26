@@ -151,6 +151,21 @@ prohibited without explicit written permission from Rinth, Inc." (`packages/asse
 [terms](https://modrinth.com/legal/terms) ask for prior written permission to use its marks. Results name their source
 in text ("from Modrinth") until Rinth, Inc. agrees. CurseForge support, and so its logo, is coming soon.
 
+## Browse Mods in the game
+
+From the title screen, open **Options > Mods > Browse Mods**. The **Mods** and **Resource Packs**
+tabs show Horizon registry releases for this game version. The game checks each download against
+the same index as the launcher and records it in the same `mod-browser.json`. A content mod is
+enabled after installation; mods that add registry entries or change world generation can require
+a restart. A resource pack goes into `resourcepacks/` and remains off until you select it under
+**Options > Resource Packs**.
+
+Nintendo Switch can't run native or WebAssembly code mods. If a file advertised as a content mod
+turns out to contain code, the browser explains why it can't install the file and remembers that
+download's SHA-256. The same file won't be offered again on Switch, but a new release with different
+bytes can appear. The game serializes browser writes on Switch without filesystem locks; on desktop
+it also locks out other processes that install to the same game folder.
+
 ## Installing, updating, removing
 
 `mod-browser.json` beside `options.txt` lists every file the browser installed: its source, project, version, file

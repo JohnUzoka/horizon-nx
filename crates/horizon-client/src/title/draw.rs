@@ -157,11 +157,12 @@ impl Title {
                 let version = format!("Horizon {} (Rust)", horizon_core::VANILLA_VERSION);
                 #[cfg(target_os = "horizon")]
                 let version = {
-                    let build = match crate::switch_update::current_build() {
-                        0 => lang::get_or("horizon.update.dev_build", "Switch dev build"),
-                        build => translate("horizon.update.build", "Switch build %s", &[&build]),
+                    use crate::switch_update::{Version, current_version};
+                    let release = match current_version() {
+                        Version::DEVELOPMENT => lang::get_or("horizon.update.dev_build", "Switch dev build"),
+                        release => translate("horizon.update.version", "Switch %s", &[&release]),
                     };
-                    format!("Horizon {} (Rust), {build}", horizon_core::VANILLA_VERSION)
+                    format!("Horizon {} (Rust), {release}", horizon_core::VANILLA_VERSION)
                 };
                 batch.text(atlas, &version, 2.0, h - 10.0, u32::MAX, true);
                 // A nightly names its build in the top-left corner, the one spot no button reaches at any GUI
@@ -405,10 +406,10 @@ impl Title {
                     centered(atlas, batch, line, top + 17.0 + i as f32 * 9.0, u32::MAX);
                 }
             }
-            Mode::ConfirmUpdate { build } => {
+            Mode::ConfirmUpdate { version } => {
                 crate::ui::menu_background(batch, atlas, 0.0, 0.0, w, h, false);
                 phases(crate::screen_draw::RenderPhase::Background, batch);
-                let (title, message) = update_question(*build);
+                let (title, message) = update_question(*version);
                 let lines = wrapped(atlas, &message, w - 50.0);
                 self.message_lines.set(lines.len());
                 let top = confirm_top(h, lines.len());

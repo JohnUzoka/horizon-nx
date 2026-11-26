@@ -156,7 +156,9 @@ pub fn start<G>(
             Argument::Value(name, value) if name == "--player-dir" => Some(value),
             _ => None,
         }) {
-            logging::set_player_dir(std::path::absolute(dir).unwrap_or_else(|_| dir.into()));
+            logging::set_player_dir(
+                horizon_client::device_path::absolute(dir).unwrap_or_else(|_| dir.into()),
+            );
         }
         (launch.context.home.clone(), "client", "Render thread")
     };

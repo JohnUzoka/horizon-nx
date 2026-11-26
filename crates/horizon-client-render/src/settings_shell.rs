@@ -2479,7 +2479,14 @@ impl<S: Screen + Default> Hosted for Shell<S> {
             let room = match declared {
                 Some(declared) => {
                     crate::widgets::declare_action(declared, rect, true);
-                    crate::widgets::action_glyph_room()
+                    let glyph = crate::widgets::action_glyph_room();
+                    // Center short labels in the whole button. Only shift a long
+                    // translation when centering it would overlap the left glyph.
+                    if atlas.font.width_text(&label) + 2.0 * (glyph + 2.0) <= rect[2] {
+                        0.0
+                    } else {
+                        glyph
+                    }
                 }
                 None => 0.0,
             };

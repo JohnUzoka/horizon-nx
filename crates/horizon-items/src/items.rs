@@ -665,6 +665,13 @@ pub fn load_tags(
         .map(|(k, v)| (k, v.into_iter().collect()))
         .collect())
 }
+
+fn tag_membership(ordered: &HashMap<String, Vec<String>>) -> HashMap<String, HashSet<String>> {
+    ordered
+        .iter()
+        .map(|(tag, members)| (tag.clone(), members.iter().cloned().collect()))
+        .collect()
+}
 /// The fluid tags of `root` and `overlay` (`data/<ns>/tags/fluid`): each tag
 /// id to the fluids it names, in the sources' order. What a recipe load puts
 /// into its context, for the fluid ingredients' `#tags`.
@@ -840,7 +847,7 @@ impl Items {
                 block_for_item.entry(item).or_insert(state);
             }
         }
-        let mut items = Self::load_with(root, &block_for_item, overlay, defaults)?;
+        let mut items = Self::load_with(root, &block_for_item, overlay, defaults, true)?;
         items.block_items = Arc::new(
             facts
                 .states
@@ -872,21 +879,25 @@ impl Items {
     /// Every item's defaults, tags and block-to-item identities, without
     /// placement state ids (for headless tools that never place blocks).
     pub fn catalog(root: &Path, overlay: &PackOverlay, defaults: &ItemDefaults) -> Result<Self> {
-        let mut items = Self::load_with(root, &HashMap::new(), overlay, defaults)?;
+        let mut items = Self::load_with(root, &HashMap::new(), overlay, defaults, true)?;
         items.block_items = Arc::new(ingredient_defaults::block_items(root)?);
         ingredient_defaults::load_component_damage_registry(root, overlay, &mut items)?;
         Ok(items)
     }
-    /// Build a standalone catalog against the owning world's already loaded
-    /// damage registry. Reloading recipes must not decode new damage definitions.
-    pub fn catalog_with_damage_registry(
+    /// Item and component data for recipe synchronization, without loot or music
+    /// resources. Component validation uses the owning world's damage registry.
+    /// Read block-to-item identities only when the cohort uses block-tag ingredients.
+    pub fn recipe_catalog(
         root: &Path,
         overlay: &PackOverlay,
         defaults: &ItemDefaults,
         damage: horizon_client_core::registries::RegistryIds,
+        needs_block_items: bool,
     ) -> Result<Self> {
-        let mut items = Self::load_with(root, &HashMap::new(), overlay, defaults)?;
-        items.block_items = Arc::new(ingredient_defaults::block_items(root)?);
+        let mut items = Self::load_with(root, &HashMap::new(), overlay, defaults, false)?;
+        if needs_block_items {
+            items.block_items = Arc::new(ingredient_defaults::block_items(root)?);
+        }
         Arc::make_mut(&mut items.component_registry)
             .by_registry
             .insert("minecraft:damage_type".into(), damage);
@@ -897,6 +908,7 @@ impl Items {
         block_for_item: &HashMap<&str, BlockStateId>,
         overlay: &PackOverlay,
         defaults: &ItemDefaults,
+        gameplay_resources: bool,
     ) -> Result<Self> {
         let entity_tags = load_tags(root, "entity_type", overlay)?;
         let by_item = |name: &str| -> Result<HashMap<String, String>> {
@@ -1124,16 +1136,25 @@ impl Items {
             }
             order.push(id);
         }
-        // Every loot table, keyed by its id (blocks/stone, entities/sheep/white,
-        // gameplay/chicken_lay, shearing/sheep/red...), of every namespace
-        // (content mods' tables, docs/modpacks.md), with the packs' over the
-        // game's own: one map with the loot data of the same root and packs.
-        let loot = horizon_world::loot::shared_tables(root, overlay)?;
-        let predicates = horizon_world::loot::load_predicates(root, overlay)?;
+        let (loot, predicates, songs, instruments) = if gameplay_resources {
+            // Share loot with the world's other consumers. Recipe sync is not
+            // one of them: even a cache hit has to walk the files for its key.
+            (
+                horizon_world::loot::shared_tables(root, overlay)?,
+                Arc::new(horizon_world::loot::load_predicates(root, overlay)?),
+                load_songs(root, overlay),
+                load_instruments(root, overlay),
+            )
+        } else {
+            Default::default()
+        };
         let registry_order = registry_order(root, &order);
         let enchantments = Arc::new(crate::enchant::Enchantments::load_with(
             root, overlay, defaults,
         )?);
+        let block_tag_order = load_tag_lists(root, "block", overlay)?;
+        let item_tag_order = load_tag_lists(root, "item", overlay)?;
+        let fluid_tag_order = load_tag_lists(root, "fluid", overlay)?;
         Ok(Self {
             items,
             block_items: Default::default(),
@@ -1146,16 +1167,16 @@ impl Items {
             mob_visibility,
             order,
             registry_order,
-            block_tags: load_tags(root, "block", overlay)?,
-            item_tags: load_tags(root, "item", overlay)?,
-            fluid_tags: load_tags(root, "fluid", overlay)?,
-            item_tag_order: load_tag_lists(root, "item", overlay)?,
-            block_tag_order: load_tag_lists(root, "block", overlay)?,
-            fluid_tag_order: load_tag_lists(root, "fluid", overlay)?,
+            block_tags: tag_membership(&block_tag_order),
+            item_tags: tag_membership(&item_tag_order),
+            fluid_tags: tag_membership(&fluid_tag_order),
+            item_tag_order,
+            block_tag_order,
+            fluid_tag_order,
             loot,
-            predicates: Arc::new(predicates),
-            songs: load_songs(root, overlay),
-            instruments: load_instruments(root, overlay),
+            predicates,
+            songs,
+            instruments,
             enchantments,
         })
     }
@@ -1244,10 +1265,7 @@ impl Items {
             TagRegistry::Item => (&mut self.item_tags, &mut self.item_tag_order),
             TagRegistry::Fluid => (&mut self.fluid_tags, &mut self.fluid_tag_order),
         };
-        *sets = tags
-            .iter()
-            .map(|(tag, members)| (tag.clone(), members.iter().cloned().collect()))
-            .collect();
+        *sets = tag_membership(&tags);
         *order = tags;
     }
     /// Whether `block` is in the block tag `tag` (`minecraft:fire`, no `#`).

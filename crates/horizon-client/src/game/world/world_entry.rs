@@ -2,6 +2,15 @@
 //! resources' background load, and the world's own content tables.
 use super::*;
 
+/// The local load's presentation outlives the protocol tracker only until
+/// the first scene is renderable. A new world gets its own clock.
+#[cfg(target_os = "horizon")]
+pub(super) struct SwitchWorldEntry {
+    pub(super) opened_at: Instant,
+    pub(super) joined_at: Option<Instant>,
+    pub(super) waiting_for_scene: bool,
+}
+
 impl Game<'_> {
     /// The server's data-pack enchantments, or the local world's registry.
     pub(super) fn item_enchantments(&self) -> &Arc<horizon_client::enchant::Enchantments> {
@@ -26,7 +35,15 @@ impl Game<'_> {
             self.drop_world_entry(entry);
             return Err(error);
         }
-        if self.rest_loader.is_none() {
+        if self.rest_loader.is_none()
+            && !(cfg!(target_os = "horizon")
+                && matches!(&entry, PendingWorldEntry::Local { .. })
+                && (self.pack_reload.is_some() || self.pending_pack_reload))
+        {
+            #[cfg(target_os = "horizon")]
+            if matches!(&entry, PendingWorldEntry::Local { .. }) {
+                log::info!("Horizon: Switch local world: rest worker not blocking entry");
+            }
             return Ok(Some(entry));
         }
         self.perf.world_opening();
@@ -45,7 +62,7 @@ impl Game<'_> {
         }
         self.displace_pending_replay(mod_api::ReplayError::WorldBusy);
         self.pending_entry = Some(entry);
-        log::info!("Horizon: world entry waiting for world resources");
+        log::info!("Horizon: world entry waiting for resources");
         Ok(None)
     }
 
@@ -78,6 +95,12 @@ impl Game<'_> {
         );
         if std::mem::take(&mut self.pending_pack_reload) {
             self.reload_packs();
+        }
+        if cfg!(target_os = "horizon")
+            && matches!(&self.pending_entry, Some(PendingWorldEntry::Local { .. }))
+            && self.pack_reload.is_some()
+        {
+            return Ok(());
         }
         match self.pending_entry.take() {
             Some(PendingWorldEntry::Local {
@@ -217,6 +240,10 @@ impl Game<'_> {
                 .take()
                 .ok_or("missing world loader")?
                 .finish()?;
+            #[cfg(target_os = "horizon")]
+            if matches!(&self.pending_entry, Some(PendingWorldEntry::Local { .. })) {
+                log::info!("Horizon: Switch local world: rest worker finished for the queued entry");
+            }
         }
         Ok(())
     }

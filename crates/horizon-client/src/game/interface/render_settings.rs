@@ -19,24 +19,23 @@ impl<F: PartialEq> FrameAttempt<F> {
 }
 
 impl Game<'_> {
-    pub(super) fn renderer_for(
+    fn renderer_for(
         &self,
         window: Arc<Window>,
-        pack: &PackResources,
-        gui: &UiResources,
+        shape: shader_packs::PickedPack,
     ) -> Result<Renderer> {
         build_renderer(
             window,
             self.options.offscreen,
-            pack,
-            gui,
+            &self.pack,
+            &self.gui,
             self.renderer.as_ref(),
             None,
             self.settings.horizon.effective_api(),
             self.settings.horizon.translucent_batching,
             self.settings.vsync,
             &self.settings.horizon,
-            shader_packs::picked_pack_shape(&self.settings),
+            shape,
             self.renderer
                 .as_ref()
                 .map(|r| r.display_reading())
@@ -68,7 +67,8 @@ impl Game<'_> {
             .as_mut()
             .is_some_and(Renderer::take_msaa_rebuild)
         {
-            if let Err(e) = self.rebuild_renderer() {
+            let shape = shader_packs::picked_pack_shape(&self.settings);
+            if let Err(e) = self.rebuild_renderer(shape) {
                 log::warn!("Horizon: the renderer for 4x MSAA could not be made: {e}");
             }
             return;
@@ -80,7 +80,8 @@ impl Game<'_> {
             .as_mut()
             .is_some_and(Renderer::take_terrain_rebuild)
         {
-            if let Err(e) = self.rebuild_renderer() {
+            let shape = shader_packs::picked_pack_shape(&self.settings);
+            if let Err(e) = self.rebuild_renderer(shape) {
                 log::warn!("Horizon: the terrain's pipelines could not be made again: {e}");
             }
             return;
@@ -105,7 +106,7 @@ impl Game<'_> {
         {
             return;
         }
-        if let Err(e) = self.rebuild_renderer() {
+        if let Err(e) = self.rebuild_renderer(shape) {
             log::warn!("Horizon: the renderer for the new frame could not be made: {e}");
         }
     }
@@ -113,7 +114,7 @@ impl Game<'_> {
     /// The renderer made again on the same device from the resources loaded, keeping the
     /// pipelines that come out the same and the world the old one holds (`Renderer::take_world`):
     /// only what draws in the frame is made again, and no section is meshed again.
-    fn rebuild_renderer(&mut self) -> Result<()> {
+    fn rebuild_renderer(&mut self, shape: shader_packs::PickedPack) -> Result<()> {
         let Some(window) = self.window.clone() else {
             return Ok(());
         };
@@ -121,7 +122,7 @@ impl Game<'_> {
         if let Some(renderer) = &mut self.renderer {
             renderer.release_surface();
         }
-        let mut renderer = match self.renderer_for(window, &self.pack, &self.gui) {
+        let mut renderer = match self.renderer_for(window, shape) {
             Ok(renderer) => renderer,
             Err(error) => {
                 if let Some(renderer) = &mut self.renderer {
@@ -132,7 +133,13 @@ impl Game<'_> {
         };
         let mut world_kept = false;
         if let Some(old) = &mut self.renderer {
-            renderer.resize(old.config.width, old.config.height);
+            // Construction already configured the surface and depth for this size.
+            if renderer.suspended
+                || (renderer.config.width, renderer.config.height)
+                    != (old.config.width, old.config.height)
+            {
+                renderer.resize(old.config.width, old.config.height);
+            }
             renderer.screenshot = old.screenshot.take();
             renderer.screenshot_result = old.screenshot_result.take();
             world_kept = renderer.take_world(old);
@@ -265,7 +272,7 @@ impl Game<'_> {
     }
 
     pub(super) fn new_renderer(&self, window: Arc<Window>) -> Result<Renderer> {
-        self.renderer_for(window, &self.pack, &self.gui)
+        self.renderer_for(window, shader_packs::picked_pack_shape(&self.settings))
     }
 
     /// A renderer made again from the resources loaded takes over: what named the old one's

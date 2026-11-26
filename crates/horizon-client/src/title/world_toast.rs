@@ -32,25 +32,25 @@ impl WorldToast {
             Self::Update(event) => {
                 use crate::switch_update::Event;
                 let (title, message) = match event {
-                    Event::Available { build } => (
+                    Event::Available { version } => (
                         lang::get_or("horizon.update.available", "Update available"),
                         translate(
                             "horizon.update.available.message",
-                            "Horizon build %s: Update on the title screen",
-                            &[build],
+                            "Horizon %s: Update on the title screen",
+                            &[version],
                         ),
                     ),
-                    Event::Installed { build } => (
-                        translate("horizon.update.installed", "Build %s installed", &[build]),
+                    Event::Installed { version } => (
+                        translate("horizon.update.installed", "Horizon %s installed", &[version]),
                         lang::get_or("horizon.update.installed.message", "Quit Horizon to start it"),
                     ),
                     Event::Failed { reason } => (
                         lang::get_or("horizon.update.failed", "Update failed"),
                         (*reason).to_owned(),
                     ),
-                    Event::Updated { build } => (
+                    Event::Updated { version } => (
                         lang::get_or("horizon.update.updated", "Horizon updated"),
-                        translate("horizon.update.updated.message", "Now on build %s", &[build]),
+                        translate("horizon.update.updated.message", "Now on %s", &[version]),
                     ),
                 };
                 (Text::literal(title), Text::literal(message))

@@ -174,6 +174,27 @@ fn fullscreen_pass(
     pass.draw(0..3, 0..1);
 }
 
+const DEFAULT_TONEMAP_COLOR: &str =
+    "select(min(horizon_sanitize(out), vec3<f32>(frame.headroom)), horizon_sanitize(out), frame.hdr == 1u)";
+
+/// Fold the default tonemap into the last post pass. Both draw at the window's size, so the
+/// tonemap would only sample this pass at pixel centers before clipping and encoding it.
+fn direct_post_source(source: &str) -> String {
+    let (vertex, _) = StageKind::Post
+        .entries()
+        .split_once("@fragment")
+        .expect("post fragment entry");
+    format!(
+        "{source}{vertex}
+@fragment fn horizon_fs_post(in: HorizonPostOut) -> @location(0) vec4<f32> {{
+    let color = textureSampleLevel(previous, linear_sampler, in.uv, 0.0);
+    let out = post(PostInput(in.uv, in.position.xy, color, depth_at(in.uv))).rgb;
+    return vec4<f32>(horizon_encode({DEFAULT_TONEMAP_COLOR}), 1.0);
+}}
+"
+    )
+}
+
 /// The tonemap stage's entries as the renderer draws them: the check's, with the result
 /// encoded into the frame's gamma, where the camera overlays and the HUD draw on it. A pack's
 /// `[tonemap]` is held to `frame.headroom`. Horizon's own (`default`) is a clip at white in
@@ -181,7 +202,7 @@ fn fullscreen_pass(
 /// one HDR without a pack uses.
 fn tonemap_entries(default: bool) -> String {
     let held = if default {
-        "select(min(horizon_sanitize(out), vec3<f32>(frame.headroom)), horizon_sanitize(out), frame.hdr == 1u)"
+        DEFAULT_TONEMAP_COLOR
     } else {
         "min(horizon_sanitize(out), vec3<f32>(frame.headroom))"
     };
@@ -231,10 +252,13 @@ struct Display {
     decoder: Decoder,
     /// The pack's `[tonemap]` label, `None` for Horizon's.
     label: Option<String>,
-    tonemap: wgpu::RenderPipeline,
+    /// `None` when the last post pass includes the default tonemap and draws to the screen.
+    tonemap: Option<wgpu::RenderPipeline>,
+    /// The fused final pass built for an SDR overlay target instead of the float frame.
+    sdr: Option<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
     /// `scene_color` at the world's size, or without a chain at the size of what it decodes
-    /// (`WorldPost::display`); `picture` at the window's (none without a chain: the tonemap
-    /// reads `scene_color`).
+    /// (`WorldPost::display`). `picture` is at the window's size, only for a separate tonemap
+    /// after the post chain.
     scene: Option<([u32; 2], wgpu::TextureView)>,
     picture: Option<([u32; 2], wgpu::TextureView)>,
 }
@@ -1044,18 +1068,17 @@ fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-/// A post pass's pipeline from its checked `module`, with the option values `constants`, drawing
-/// a target of `format`.
-fn post_pipeline(
+/// A post pass's pipelines from its checked module and option constants, sharing one shader
+/// module when the pass can also draw straight into the SDR overlay.
+fn post_pipelines(
     device: &wgpu::Device,
     label: &str,
     layout: &wgpu::PipelineLayout,
     module: naga::Module,
     constants: &[(String, f64)],
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
+    (format, sdr): (wgpu::TextureFormat, Option<wgpu::TextureFormat>),
+) -> (wgpu::RenderPipeline, Option<wgpu::RenderPipeline>) {
     let present = present_constants(&module, constants);
-    let present: Vec<(&str, f64)> = present.iter().map(|(id, v)| (*id, *v)).collect();
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(&super::dx12_compiler::module_label(label)),
         source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
@@ -1064,31 +1087,34 @@ fn post_pipeline(
         constants: &present,
         ..Default::default()
     };
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(label),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: &module,
-            entry_point: Some("horizon_vs_post"),
-            compilation_options: options.clone(),
-            buffers: &[],
-        },
-        primitive: Default::default(),
-        depth_stencil: None,
-        multisample: Default::default(),
-        fragment: Some(wgpu::FragmentState {
-            module: &module,
-            entry_point: Some("horizon_fs_post"),
-            compilation_options: options,
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        multiview_mask: None,
-        cache: None,
-    })
+    let make = |format| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("horizon_vs_post"),
+                compilation_options: options.clone(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("horizon_fs_post"),
+                compilation_options: options.clone(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
+    };
+    (make(format), sdr.map(make))
 }
 
 impl NativePost {
@@ -1101,7 +1127,7 @@ impl NativePost {
         stages: Vec<CheckedStage>,
         manifest: &horizon_shader_api::Manifest,
         constants: &[(String, f64)],
-        format: wgpu::TextureFormat,
+        (format, sdr): (wgpu::TextureFormat, Option<wgpu::TextureFormat>),
         frame: &NativeFrame,
         tonemap: Option<&CheckedStage>,
     ) -> Result<Self, String> {
@@ -1127,6 +1153,13 @@ impl NativePost {
                 texture_entry(horizon_shader_api::stages::POST_TARGET_BINDING + j, float)
             }));
         let (stages, kept) = kept::chain(device, manifest, stages, &entries, constants)?;
+        // Tegra pays for every full-screen pass. A simple chain can finish straight on the
+        // frame; packs with compute work, ray variants or a custom tonemap keep their passes.
+        let direct = (cfg!(target_os = "horizon") || sdr.is_some())
+            && !stages.is_empty()
+            && tonemap.is_none()
+            && kept.is_none()
+            && manifest.ray_tracing.is_none();
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Native shader pack post"),
             entries: &entries,
@@ -1139,47 +1172,65 @@ impl NativePost {
             ..Default::default()
         });
         let mut passes = Vec::with_capacity(stages.len());
+        let mut direct_sdr = None;
         for (i, stage) in stages.into_iter().enumerate() {
-            let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
-            let target = kept::target(&kept, plan[i].writes);
+            let fused = direct && plan[i].writes == Writes::Picture;
+            let (module, target) = if fused {
+                let source = direct_post_source(&stage.source);
+                let module = naga::front::wgsl::parse_str(&source)
+                    .map_err(|e| format!("{}: {}", stage.file, e.emit_to_string(&source)))?;
+                (module, format)
+            } else {
+                (stage.module, kept::target(&kept, plan[i].writes))
+            };
             let layout = kept::pass(&kept, Some(i)).map_or(&pipeline_layout, |p| &p.pipeline);
             let label = &stage.label;
-            let pipeline = post_pipeline(device, label, layout, stage.module, constants, target);
+            let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+            let sdr = sdr.filter(|&sdr| fused && sdr != format);
+            let (pipeline, overlay) =
+                post_pipelines(device, label, layout, module, constants, (target, sdr));
             let internal = pollster::block_on(internal.pop());
             if let Some(e) = internal.or(pollster::block_on(validation.pop())) {
                 return Err(format!("{}: {e}", stage.file));
             }
+            direct_sdr = direct_sdr.or(sdr.zip(overlay));
             passes.push((stage.label, pipeline));
         }
-        let source = tonemap.map_or_else(
-            || StageKind::Tonemap.prelude() + DEFAULT_TONEMAP,
-            |s| s.source.clone(),
-        ) + &tonemap_entries(tonemap.is_none());
-        let file = tonemap.map_or("<tonemap>", |s| s.file.as_str());
-        let module = naga::front::wgsl::parse_str(&source)
-            .map_err(|e| format!("{file}: {}", e.emit_to_string(&source)))?;
-        let present = present_constants(&module, constants);
-        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Tonemap"),
-            source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
-        });
-        let stages = (
-            Some(&pipeline_layout),
-            "horizon_vs_tonemap",
-            "horizon_fs_tonemap",
-        );
-        let pipeline = fullscreen_pipeline(device, "Tonemap", &module, stages, format, &present);
-        let internal = pollster::block_on(internal.pop());
-        if let Some(e) = internal.or(pollster::block_on(validation.pop())) {
-            return Err(format!("{file}: {e}"));
-        }
+        let pipeline = if direct {
+            None
+        } else {
+            let source = tonemap.map_or_else(
+                || StageKind::Tonemap.prelude() + DEFAULT_TONEMAP,
+                |s| s.source.clone(),
+            ) + &tonemap_entries(tonemap.is_none());
+            let file = tonemap.map_or("<tonemap>", |s| s.file.as_str());
+            let module = naga::front::wgsl::parse_str(&source)
+                .map_err(|e| format!("{file}: {}", e.emit_to_string(&source)))?;
+            let present = present_constants(&module, constants);
+            let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Tonemap"),
+                source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
+            });
+            let stages = (
+                Some(&pipeline_layout),
+                "horizon_vs_tonemap",
+                "horizon_fs_tonemap",
+            );
+            let pipeline = fullscreen_pipeline(device, "Tonemap", &module, stages, format, &present);
+            let internal = pollster::block_on(internal.pop());
+            if let Some(e) = internal.or(pollster::block_on(validation.pop())) {
+                return Err(format!("{file}: {e}"));
+            }
+            Some(pipeline)
+        };
         let display = Display {
             decoder: frame.decoder.clone(),
             label: tonemap.map(|s| s.label.clone()),
             tonemap: pipeline,
+            sdr: direct_sdr,
             scene: None,
             picture: None,
         };
@@ -1218,6 +1269,10 @@ impl NativePost {
             display,
             upscalable: tonemap_lets_taa_upscale(tonemap),
         })
+    }
+
+    pub(super) fn sdr_format(&self) -> Option<wgpu::TextureFormat> {
+        self.display.sdr.as_ref().map(|(format, _)| *format)
     }
 
     /// Whether the pack has a `[tonemap]` of its own, which replaces Horizon's tone curve.
@@ -1273,7 +1328,7 @@ impl NativePost {
             ));
             self.groups = None;
         }
-        if chain && d.picture.as_ref().is_none_or(|p| p.0 != window) {
+        if chain && d.tonemap.is_some() && d.picture.as_ref().is_none_or(|p| p.0 != window) {
             d.picture = Some((
                 window,
                 intermediate(device, "Shader API 0.2 picture", window),
@@ -1452,9 +1507,11 @@ impl NativePost {
                 };
                 group(previous, Some(i), parity)
             }));
-            // The tonemap's, last: the chain's picture, else the decoded world.
-            let picture = self.display.picture.as_ref().map_or(scene, |p| &p.1);
-            groups.push(group(picture, None, parity));
+            // The display group is last: the tonemap's, or the final post pass's if fused.
+            if self.display.tonemap.is_some() {
+                let picture = self.display.picture.as_ref().map_or(scene, |p| &p.1);
+                groups.push(group(picture, None, parity));
+            }
         }
         self.groups = Some(((world.0.clone(), world.1.clone(), world.2.clone()), groups));
         self.traced = generation;
@@ -1573,8 +1630,19 @@ impl NativePost {
             d.decoder
                 .run(device, encoder, resolved.unwrap_or(world), scene);
         }
-        let label = d.label.as_deref().unwrap_or("Tonemap");
-        fullscreen_pass(encoder, label, screen, &d.tonemap, (GROUP, group), timing);
+        let (label, pipeline) = match &d.tonemap {
+            Some(pipeline) => (d.label.as_deref().unwrap_or("Tonemap"), pipeline),
+            None => {
+                let (label, pipeline) = self.passes.last().expect("fused final post pass");
+                let pipeline = d
+                    .sdr
+                    .as_ref()
+                    .filter(|(format, _)| *format == screen.texture().format().remove_srgb_suffix())
+                    .map_or(pipeline, |(_, overlay)| overlay);
+                (label.as_str(), pipeline)
+            }
+        };
+        fullscreen_pass(encoder, label, screen, pipeline, (GROUP, group), timing);
     }
 }
 
@@ -1875,6 +1943,27 @@ mod tests {
 
     const SDR: DisplayValues = DisplayValues::SDR;
 
+    #[test]
+    fn golden_hours_grade_can_encode_directly_for_display() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../horizon-shader-api/packs/golden_hour");
+        let report = check(&Pack::read(&root).unwrap()).unwrap();
+        let grade = report
+            .stages
+            .iter()
+            .find(|s| s.file == "post/grade.wgsl")
+            .unwrap();
+        let source = direct_post_source(&grade.source);
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::default(),
+        )
+        .validate(&module)
+        .unwrap();
+    }
+
     /// `light_direction` is the sun by day and the moon by night, as the same frame's
     /// `sun_direction` and `moon_direction` have them, also for a pack without a shadow map; a
     /// pack with `[shadow]` gets the shadow camera's light as before, to the bit.
@@ -2092,7 +2181,7 @@ api = \"0.2\"
             report.stages,
             &report.manifest,
             &[],
-            format,
+            (format, None),
             &frame,
             None,
         )
@@ -2197,6 +2286,15 @@ api = \"0.2\"
     /// keep it) times an option, the second halves it and writes the depth as blue.
     #[test]
     fn passes_chain_through_half_float_targets_with_options_and_depth() {
+        passes_preserve_light_options_and_depth(false);
+    }
+
+    #[test]
+    fn a_fused_chain_writes_the_sdr_overlay_format() {
+        passes_preserve_light_options_and_depth(true);
+    }
+
+    fn passes_preserve_light_options_and_depth(direct_sdr: bool) {
         let _gpu = crate::gfx::test_gpu::lock();
         let Some((device, queue)) = device(true) else {
             return;
@@ -2211,18 +2309,21 @@ api = \"0.2\"
             .into();
         let report = check(&Pack::from_files(files).unwrap()).unwrap();
         let format = wgpu::TextureFormat::Rgba8Unorm;
+        let output = if direct_sdr { INTERMEDIATE } else { format };
+        let sdr = direct_sdr.then_some(format);
         let frame = sdr_frame(&device, &queue);
         let mut post = NativePost::new(
             &device,
             report.stages,
             &report.manifest,
             &[("gain".into(), 1.0)],
-            format,
+            (output, sdr),
             &frame,
             None,
         )
         .unwrap();
         assert_eq!(post.labels(), ["a.wgsl", "b.wgsl"]);
+        assert_eq!(post.sdr_format(), sdr);
 
         let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
         let color = texture(&device, format, usage).create_view(&Default::default());
@@ -2332,7 +2433,7 @@ api = \"0.2\"
             report.stages,
             &report.manifest,
             &[],
-            format,
+            (format, None),
             &frame,
             None,
         )
@@ -2670,7 +2771,7 @@ api = \"0.2\"
                 passes,
                 &report.manifest,
                 &[],
-                format,
+                (format, None),
                 &frame,
                 tonemap,
             )
@@ -2773,7 +2874,7 @@ api = \"0.2\"
             Vec::new(),
             &report.manifest,
             &[],
-            format,
+            (format, None),
             &frame,
             tonemap,
         )
@@ -3274,7 +3375,7 @@ api = \"0.2\"
                 Vec::new(),
                 &report.manifest,
                 &[],
-                format,
+                (format, None),
                 &frame,
                 tonemap,
             )

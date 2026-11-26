@@ -130,7 +130,7 @@ fn gui_glint_matches_pinned_vanilla_atlas_input() {
         ("test:item/enchanted_book", 19, 33, 16, 16),
         ("missingno", 37, 33, 16, 16),
     ] {
-        let r = renderer.glint_atlas.lock().unwrap()[name];
+        let r = renderer.glint_atlas.lock().unwrap().sprites[name];
         assert_eq!(
             [r.u0, r.v0, r.u1, r.v1],
             [x, y, x + w, y + h].map(|n| n as f32 / 64.0)

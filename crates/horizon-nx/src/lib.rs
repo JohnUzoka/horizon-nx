@@ -39,7 +39,7 @@ pub mod profiler;
 #[cfg(target_os = "horizon")]
 mod boost;
 #[cfg(target_os = "horizon")]
-mod clocks;
+pub mod clocks;
 #[cfg(target_os = "horizon")]
 mod keyboard;
 #[cfg(target_os = "horizon")]
@@ -52,7 +52,7 @@ pub use compat::{
     thread_logging,
 };
 #[cfg(target_os = "horizon")]
-pub use boost::loading_world;
+pub use boost::{horizon_nx_entered_world, loading_world, title_ready};
 #[cfg(target_os = "horizon")]
 pub use keyboard::software_keyboard;
 #[cfg(target_os = "horizon")]

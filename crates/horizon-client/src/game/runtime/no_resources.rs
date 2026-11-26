@@ -15,11 +15,13 @@ struct Missing {
     pointer: (f64, f64),
     api: horizon_client::graphics::GraphicsApi,
     settings: Settings,
+    #[cfg(target_os = "horizon")]
+    pads: super::pad::Pads,
     error: Option<Box<dyn std::error::Error>>,
 }
 
 /// Shows the screen until the player closes it.
-pub(super) fn show(looked_in: &std::path::Path, settings: &Settings) -> Result<()> {
+pub(super) fn show(looked_in: &std::path::Path, settings: &Settings, outdated: bool) -> Result<()> {
     // The player's language, from the strings compiled in: there are no prepared ones.
     horizon_client::lang::set(horizon_client::lang::Language::load(
         &[],
@@ -29,16 +31,20 @@ pub(super) fn show(looked_in: &std::path::Path, settings: &Settings) -> Result<(
         window: None,
         renderer: None,
         gui: UiResources {
-            atlas: HudAtlas::build(&horizon_assets::resource_source::ResourceSource::directory(
-                looked_in.to_path_buf(),
-            ))?,
+            atlas: HudAtlas::boot(),
             panorama: Arc::new(horizon_client::gfx::panorama::Faces::colour([0; 4])),
             splashes: Arc::from(""),
         },
-        screen: NoResources::new(looked_in, horizon_hooks::engine::get_the_game()),
+        screen: if outdated {
+            NoResources::outdated(looked_in)
+        } else {
+            NoResources::new(looked_in, horizon_hooks::engine::get_the_game())
+        },
         pointer: (0.0, 0.0),
         api: settings.horizon.effective_api(),
         settings: settings.clone(),
+        #[cfg(target_os = "horizon")]
+        pads: Default::default(),
         error: None,
     };
 
@@ -168,13 +174,28 @@ impl ApplicationHandler for Missing {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "horizon")]
+        {
+            use horizon_client::gamepad::Button;
+            if !horizon_nx::process_applet_messages()
+                || self
+                    .pads
+                    .poll_title(&self.settings.controller)
+                    .into_iter()
+                    .any(|(button, down)| down && button == Button::Start)
+            {
+                event_loop.exit();
+                return;
+            }
+            horizon_nx::flush_logs();
+        }
         if horizon_threads::stop_requests() > 0 {
             event_loop.exit();
             return;
         }
-        // Wake now and then for Ctrl+C in the console; redraws come with events.
+        // Wake to poll Switch input, or for Ctrl+C on desktop.
         event_loop.set_control_flow(ControlFlow::WaitUntil(
-            Instant::now() + Duration::from_millis(250),
+            Instant::now() + Duration::from_millis(if cfg!(target_os = "horizon") { 16 } else { 250 }),
         ));
     }
 }

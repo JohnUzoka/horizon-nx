@@ -160,6 +160,7 @@ impl GlyphArt for HorizonArt {
 pub struct Glyphs {
     family: GlyphStyle,
     letters: bool,
+    hidden: bool,
 }
 
 impl Default for Glyphs {
@@ -178,6 +179,7 @@ impl Glyphs {
         Self {
             family: shown,
             letters: shown == GlyphStyle::Nintendo && settings.by_letter(family),
+            hidden: settings.glyphs == GlyphStyle::Off,
         }
     }
     /// The glyphs for a pad of `family` by the buttons' places, whatever the letter setting. Only
@@ -188,6 +190,7 @@ impl Glyphs {
         Self {
             family: settings.glyphs.resolve(family),
             letters: false,
+            hidden: settings.glyphs == GlyphStyle::Off,
         }
     }
     /// The family the art comes from, for naming it ("Glyphs in use").
@@ -252,7 +255,7 @@ fn printed(button: Button, style: GlyphStyle) -> &'static str {
         GlyphStyle::Nintendo => [
             "B", "A", "Y", "X", "L", "R", "ZL", "ZR", "−", "+", "LS", "RS", "↑", "↓", "←", "→",
         ][i],
-        GlyphStyle::Xbox | GlyphStyle::Auto => [
+        GlyphStyle::Xbox | GlyphStyle::Auto | GlyphStyle::Off => [
             "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "View", "Menu", "LS", "RS", "↑", "↓", "←",
             "→",
         ][i],
@@ -276,7 +279,7 @@ fn colour(button: Button, style: GlyphStyle) -> [u8; 3] {
             [92, 205, 170],
         ][face],
         GlyphStyle::Nintendo => [255, 255, 255],
-        GlyphStyle::Xbox | GlyphStyle::Auto => [
+        GlyphStyle::Xbox | GlyphStyle::Auto | GlyphStyle::Off => [
             [110, 200, 90],
             [235, 90, 80],
             [80, 150, 240],
@@ -303,6 +306,9 @@ fn sprite(button: Button, style: GlyphStyle) -> Option<&'static str> {
 
 /// The sprite this atlas can draw for the glyph; none (the boot screen's atlas) means text.
 pub fn art(atlas: &HudAtlas, glyph: Glyph) -> Option<&'static str> {
+    if glyph.glyphs.hidden {
+        return None;
+    }
     let (family, button) = glyph.glyphs.on_pad(glyph.part);
     source()?
         .sprite(family, button)
@@ -318,6 +324,9 @@ fn art_width(art: &Art) -> f32 {
 
 /// How wide the glyph shows, in GUI pixels.
 pub fn width(atlas: &HudAtlas, glyph: Glyph) -> f32 {
+    if glyph.glyphs.hidden {
+        return 0.0;
+    }
     let (family, button) = glyph.glyphs.on_pad(glyph.part);
     match art(atlas, glyph).and_then(|_| source()?.width(family, button)) {
         Some(width) => width,
@@ -333,6 +342,9 @@ pub fn rect(atlas: &HudAtlas, glyph: Glyph, x: f32, y: f32) -> [f32; 4] {
 /// Draw the glyph over the 8 pixel text line at `(x, y)`, filling [`rect`]. A dark key backs text
 /// only: the art brings its own.
 pub fn draw(batch: &mut HudBatch, atlas: &HudAtlas, glyph: Glyph, x: f32, y: f32) {
+    if glyph.glyphs.hidden {
+        return;
+    }
     let [left, top, wide, tall] = rect(atlas, glyph, x, y);
     if let Some(name) = art(atlas, glyph) {
         batch.sprite_scaled(
@@ -578,6 +590,18 @@ mod tests {
         assert_eq!(art(&atlas, g(Button::South, GlyphStyle::Xbox)), None);
         let label = HudBatch::text_width(&atlas, "A").ceil() + 4.0;
         assert_eq!(width(&atlas, g(Button::South, GlyphStyle::Xbox)), label);
+    }
+
+    #[test]
+    fn glyphs_off_does_not_draw_a_prompt_or_change_its_button() {
+        let atlas = atlas();
+        let settings = PadSettings::parse("glyphs:off\nnintendoLetters:true\n");
+        let glyph = Glyph::menu(MenuJob::Confirm, Glyphs::of(&settings, GlyphStyle::Nintendo));
+        let mut batch = HudBatch::scratch([640, 480]);
+        draw(&mut batch, &atlas, glyph, 10.0, 20.0);
+        assert!(quads(&batch).is_empty());
+        assert_eq!(width(&atlas, glyph), 0.0);
+        assert_eq!(glyph.label(), "A");
     }
 
     #[test]

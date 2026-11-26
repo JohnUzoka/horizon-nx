@@ -947,6 +947,8 @@ struct Game<'a> {
     res: Arc<Resources>,
     rest_loader: Option<WorldRestLoader>,
     pending_entry: Option<PendingWorldEntry>,
+    #[cfg(target_os = "horizon")]
+    switch_world_entry: Option<world_entry::SwitchWorldEntry>,
     /// `DebugEntryChunkGeneration`'s `lastPos` and `result`: F3's `Density` line is sampled
     /// again only when the feet block (or the dimension) changes.
     debug_density: RefCell<debug_keys::DensityCache>,
@@ -4657,12 +4659,12 @@ impl Game<'_> {
         self.ui.room = horizon_client::hud_kit::room::Room::new(gui.width, gui.height);
         // The pack prompt replaces the connecting screen (setScreen), but
         // in game it opens over the world.
-        let mut batch = if (self.server_packs.prompt.is_some()
+        let (mut batch, guide_from) = if (self.server_packs.prompt.is_some()
             || self.code_of_conduct.is_some()
             || self.dialog_open())
             && self.player.is_none()
         {
-            HudBatch::new(size, self.settings.gui_scale_inputs())
+            (HudBatch::new(size, self.settings.gui_scale_inputs()), None)
         } else {
             self.hud_layers(size)
         };
@@ -4682,10 +4684,13 @@ impl Game<'_> {
         self.draw_debug_overlay(&mut batch, size);
         self.frame_graph
             .draw(self.settings.horizon.overlay, &mut batch, &self.gui.atlas);
+        if let Some(from) = guide_from {
+            self.draw_pad_guide(&mut batch, from);
+        }
         self.draw_pad_over_hud(&mut batch);
         batch
     }
-    fn hud_layers(&mut self, size: [u32; 2]) -> HudBatch {
+    fn hud_layers(&mut self, size: [u32; 2]) -> (HudBatch, Option<usize>) {
         self.input_hud_begin();
         let mut batch = HudBatch::new(size, self.settings.gui_scale_inputs());
         batch.glint_colour = self.pvp_glint_texel();
@@ -4707,7 +4712,7 @@ impl Game<'_> {
             // The early return skips the match below: the hooks still see the
             // screen, after its own drawing.
             self.draw_screen_with_post_hook(&mut batch);
-            return batch;
+            return (batch, None);
         }
         if self.screen == Screen::Options {
             if self.title.is_none() {
@@ -4722,7 +4727,7 @@ impl Game<'_> {
             }
             self.draw_screen_with_post_hook(&mut batch);
             self.draw_split_hud(&mut batch, true);
-            return batch;
+            return (batch, None);
         }
         self.settle_title_toasts();
         if let Some(title) = &mut self.title {
@@ -4754,7 +4759,7 @@ impl Game<'_> {
             self.draw_tutorial_toasts(&mut batch, false);
             self.draw_pack_toasts(&mut batch, false);
             self.draw_music_toast(&mut batch, false);
-            return batch;
+            return (batch, None);
         }
         if self.title.is_some() {
             // TitleScreen.extractRenderState, then ToastManager over it: vanilla
@@ -4780,7 +4785,7 @@ impl Game<'_> {
             self.draw_tutorial_toasts(&mut batch, false);
             self.draw_pack_toasts(&mut batch, false);
             self.draw_music_toast(&mut batch, false);
-            return batch;
+            return (batch, None);
         }
         let atlas_ptr: *const HudAtlas = &self.gui.atlas;
         let _ = atlas_ptr;
@@ -4789,7 +4794,7 @@ impl Game<'_> {
         if self.remote_overlay(&mut batch) {
             self.draw_pack_toasts(&mut batch, false);
             self.draw_music_toast(&mut batch, false);
-            return batch;
+            return (batch, None);
         }
         // Hud.extractRenderState: F1 (keyToggleGui) hides camera overlays, the
         // crosshair, hotbar, effects, bars, sidebar, action bar, titles and chat;
@@ -4812,10 +4817,10 @@ impl Game<'_> {
         // The mods' layers (`register_gui_layers`) draw among vanilla's while the HUD shows.
         self.hud_layer_next = show_hud.then_some(0);
         self.ui.room = self.hud_room(w, h, show_hud);
-        let mut guide_from = 0;
+        let mut guide_from = None;
         if show_hud {
             self.draw_spyglass(&mut batch);
-            guide_from = batch.vertices.len();
+            guide_from = Some(batch.vertices.len());
             // Hud.extractCrosshair / extractItemHotbar / extractPlayerHealth /
             // extractVehicleHealth and the experience bar, laid out by hud_layout.
             // Combat feel Legacy hides the attack indicator unless the player keeps it.
@@ -5164,10 +5169,7 @@ impl Game<'_> {
             self.draw_book(&mut batch);
         }
         self.draw_studio_bars(&mut batch);
-        if show_hud {
-            self.draw_pad_guide(&mut batch, guide_from);
-        }
-        batch
+        (batch, guide_from)
     }
 
     pub(super) fn close_container(&mut self) {
@@ -7940,16 +7942,38 @@ impl Game<'_> {
         if self.renderer.as_mut().is_some_and(|r| r.display_changed()) {
             self.apply_ui_settings();
         }
-        // World entry is CPU-bound; restore the Switch's loading boost while it runs.
-        #[cfg(target_os = "horizon")]
-        if self.integrated_starting.is_some() || self.pending_entry.is_some() {
-            horizon_nx::loading_world();
-        }
         self.follow_frame();
         self.observe_screen();
         // `Gui.setScreen` clears the focus of the screen it leaves: a menu
         // that comes back starts with no widget highlighted.
         self.drop_left_screen_focus();
+        #[cfg(target_os = "horizon")]
+        if let Some((stage, progress)) = self.switch_local_loading() {
+            horizon_client::widgets::begin_screen(|| {
+                screen_info::level_loading(progress, &screen_info::tr)
+            });
+            if let Some(renderer) = &mut self.renderer {
+                let mut hud = HudBatch::new(
+                    [renderer.config.width, renderer.config.height],
+                    self.settings.gui_scale_inputs(),
+                );
+                horizon_client::level_loading::draw_local_world(
+                    &mut hud,
+                    &self.gui.atlas,
+                    stage,
+                    progress,
+                );
+                pr.lap("pr_loading");
+                drop(prepare);
+                return consume(renderer, &loading_frame(&hud));
+            }
+            return Ok(false);
+        }
+        // Other loading screens (including world upgrades) still restore the boost.
+        #[cfg(target_os = "horizon")]
+        if self.integrated_starting.is_some() || self.pending_entry.is_some() {
+            horizon_nx::loading_world();
+        }
         // Minecraft.doWorldLoad: the LevelLoadingScreen while single player's
         // server starts, with the server's chunk map and progress.
         if let Some(starting) = &self.integrated_starting {
@@ -8053,7 +8077,15 @@ impl Game<'_> {
                     [renderer.config.width, renderer.config.height],
                     self.settings.gui_scale_inputs(),
                 );
-                horizon_client::ui_theme::draw_loading_overlay(
+                #[cfg(target_os = "horizon")]
+                horizon_client::ui_theme::draw_pack_reload(
+                    &self.gui.atlas,
+                    &mut hud,
+                    reload.progress.line(),
+                    reload.progress.fraction(),
+                );
+                #[cfg(not(target_os = "horizon"))]
+                horizon_client::level_loading::draw_loading_overlay(
                     &mut hud,
                     &self.gui.atlas,
                     reload.progress.line(),
@@ -8065,6 +8097,10 @@ impl Game<'_> {
                 return renderer.render(&loading_frame(&hud));
             }
             return Ok(false);
+        }
+        #[cfg(target_os = "horizon")]
+        if self.title.is_some() && self.remote.is_none() {
+            horizon_nx::title_ready();
         }
         let Some(size) = self
             .renderer
@@ -10514,6 +10550,8 @@ impl<'a> Game<'a> {
             res: res.clone(),
             rest_loader: None,
             pending_entry: None,
+            #[cfg(target_os = "horizon")]
+            switch_world_entry: None,
             debug_density: RefCell::default(),
             pending_pack_reload: false,
             frame_attempted: render_settings::FrameAttempt::default(),
@@ -11210,7 +11248,8 @@ pub(crate) fn run_with(
     let vanilla_root = options.resources.clone();
     // Saves from before 1.13 upgrade with vanilla's tables, prepared from the player's jar.
     horizon_world::datafix::set_resources(
-        &std::path::absolute(&vanilla_root).unwrap_or_else(|_| vanilla_root.clone()),
+        &horizon_client::device_path::absolute(&vanilla_root)
+            .unwrap_or_else(|_| vanilla_root.clone()),
     );
     if let Some(error) = missing_resources(&vanilla_root, horizon_hooks::engine::get_the_game()) {
         // The game build started by hand (the release's zip), not by the
@@ -11219,7 +11258,20 @@ pub(crate) fn run_with(
         if !options.offscreen && !synchronous_startup(&options) {
             log::error!("Horizon: {error}");
             let settings = Settings::load(&Game::options_path());
-            return no_resources::show(&vanilla_root, &settings);
+            return no_resources::show(&vanilla_root, &settings, false);
+        }
+        return Err(error.into());
+    }
+    #[cfg(target_os = "horizon")]
+    if loading_screen::outdated_prepared(&vanilla_root) {
+        let error = format!(
+            "Prepared game files in {} are from an older version; prepare them again on your PC and replace the resources folder. Keep your saves.",
+            vanilla_root.display(),
+        );
+        if !options.offscreen && !synchronous_startup(&options) {
+            log::error!("Horizon: {error}");
+            let settings = Settings::load(&Game::options_path());
+            return no_resources::show(&vanilla_root, &settings, true);
         }
         return Err(error.into());
     }
@@ -11239,6 +11291,8 @@ pub(crate) fn run_with(
         .as_deref()
         .and_then(|dir| horizon_client::gfx::safe_start::take_watchdog(dir, std::env::consts::OS));
     let mut early_settings = Settings::load(&Game::options_path());
+    #[cfg(target_os = "horizon")]
+    Game::apply_switch_clock_settings(&early_settings);
     if device_loss_hold.is_some() {
         early_settings.horizon.safe_start = device_loss_hold;
     }

@@ -1,12 +1,12 @@
 //! Options > Mods > Browse mods (docs/design/mod-hotload.md): reading the
-//! registry's index and installing a content mod run on a worker
+//! registry's index and installing a content mod or resource pack run on a worker
 //! (`horizon_client::mod_registry`); each frame takes what it finished into the
 //! options screen's `mod_browser`. The window's game and the startup menu each
 //! have one.
 use super::Game;
 use horizon_client::{
     lang,
-    mod_browser::{Listing, ModBrowser, Status},
+    mod_browser::{InstallMessage, Listing, ModBrowser, ProjectKind, Status},
     mod_list::ModList,
     mod_registry::{self, Done},
 };
@@ -21,7 +21,7 @@ use std::sync::{
 /// outcome with the listings after it.
 enum Finished {
     Index(Result<(Arc<Index>, Vec<Listing>), String>),
-    Installed(Result<Done, String>, Vec<Listing>),
+    Installed(String, Result<Done, String>, Vec<Listing>),
 }
 
 /// One job at a time, and the index read last.
@@ -67,30 +67,29 @@ impl Jobs {
         spawn("mod-browser-install", move || {
             let done = mod_registry::install(&index, &home, &id, &mod_registry::download);
             let listings = mod_registry::listings(&index, &home);
-            let _ = send.send(Finished::Installed(done, listings));
+            let _ = send.send(Finished::Installed(id, done, listings));
         });
     }
 
-    /// What the worker finished: `(installed, changed)`. An installed mod is
-    /// turned on in `mods`; the caller saves the settings and lists the mods
-    /// again for `installed`, and lays the Browse mods page out again for
-    /// `changed`, which covers a listing's content too, not just its count.
+    /// What the worker finished: `(installed kind, changed)`. Content mods are
+    /// turned on in `mods`; packs are left for the player to select separately.
+    /// The caller lays out the page again for `changed`.
     /// Completion waits while a world owns its frozen registry set.
     pub(super) fn poll(
         &mut self,
         ui: &mut ModBrowser,
         mods: &mut ModList,
         in_world: bool,
-    ) -> (bool, bool) {
+    ) -> (Option<ProjectKind>, bool) {
         if in_world {
-            return (false, false);
+            return (None, false);
         }
         let Some(running) = &self.running else {
-            return (false, false);
+            return (None, false);
         };
         let finished = match running.try_recv() {
             Ok(finished) => finished,
-            Err(TryRecvError::Empty) => return (false, false),
+            Err(TryRecvError::Empty) => return (None, false),
             Err(TryRecvError::Disconnected) => {
                 self.running = None;
                 let changed = ui.installing.is_some() || ui.status == Status::Loading;
@@ -98,67 +97,66 @@ impl Jobs {
                 if ui.status == Status::Loading {
                     ui.status = Status::Failed("the worker stopped".into());
                 }
-                return (false, changed);
+                return (None, changed);
             }
         };
-        let before = (
-            ui.status.clone(),
-            ui.listings.clone(),
-            ui.installing.clone(),
-            ui.message.clone(),
-        );
         self.running = None;
-        let installed = match finished {
+        match finished {
             Finished::Index(Ok((index, listings))) => {
                 self.index = Some(index);
+                let changed = ui.status != Status::Ready || ui.listings != listings;
                 ui.listings = listings;
                 ui.status = Status::Ready;
-                false
+                (None, changed)
             }
             Finished::Index(Err(why)) => {
                 log::warn!("Horizon: the mod registry wasn't read: {why}");
+                let mut changed = false;
                 if ui.status != Status::Ready {
-                    ui.status = Status::Failed(why);
+                    let status = Status::Failed(why);
+                    changed = ui.status != status;
+                    ui.status = status;
                 }
-                false
+                (None, changed)
             }
-            Finished::Installed(done, listings) => {
+            Finished::Installed(project, done, listings) => {
                 ui.installing = None;
                 ui.listings = listings;
-                match done {
+                let (kind, text) = match done {
                     Ok(done) => {
                         log::info!(
-                            "Horizon: installed the mod {} {} from the registry ({})",
+                            "Horizon: installed {} {} from the registry ({})",
                             done.id,
                             done.version,
                             if done.verified { "signed" } else { "unsigned" }
                         );
-                        mods.enabled.insert(done.id.clone());
-                        mods.disabled.remove(&done.id);
                         let name = ui
                             .listing(&done.id)
-                            .map_or(done.id.clone(), |l| l.name.clone());
-                        let text = lang::tr("horizon.mods.browse.done", &[&name, &done.version]);
-                        ui.message = Some((text, true));
-                        true
+                            .map_or(done.id.as_str(), |l| l.name.as_str());
+                        let key = match done.kind {
+                            ProjectKind::Mod => "horizon.mods.browse.done",
+                            ProjectKind::ResourcePack => "horizon.mods.browse.pack_done",
+                        };
+                        let text = lang::tr(key, &[&name, &done.version]);
+                        if done.kind == ProjectKind::Mod {
+                            mods.disabled.remove(&done.id);
+                            mods.enabled.insert(done.id);
+                        }
+                        (Some(done.kind), text)
                     }
                     Err(why) => {
-                        log::warn!("Horizon: a registry mod wasn't installed: {why}");
-                        let text = lang::tr("horizon.mods.browse.install_failed", &[&why]);
-                        ui.message = Some((text, false));
-                        false
+                        log::warn!("Horizon: registry install of {project} failed: {why}");
+                        (None, lang::tr("horizon.mods.browse.install_failed", &[&why]))
                     }
-                }
+                };
+                ui.message = Some(InstallMessage {
+                    project,
+                    text,
+                    success: kind.is_some(),
+                });
+                (kind, true)
             }
-        };
-        let changed = before
-            != (
-                ui.status.clone(),
-                ui.listings.clone(),
-                ui.installing.clone(),
-                ui.message.clone(),
-            );
-        (installed, changed)
+        }
     }
 }
 
@@ -181,18 +179,27 @@ impl Game<'_> {
         if changed {
             self.ui.options.layout_changed();
         }
-        if installed {
-            self.settings.save(&Self::options_path());
-            self.start_mods();
-            self.switch_mods();
-            // A mod with blocks, items or worldgen waits for a restart: the
-            // project page says so instead of "installed and on".
-            if let (Some(note), Some((message, _))) = (
-                &self.ui.options.mods_note,
-                &mut self.ui.options.mod_browser.message,
-            ) {
-                *message = format!("{message} {note}");
+        match installed {
+            Some(ProjectKind::Mod) => {
+                self.settings.save(&Self::options_path());
+                self.start_mods();
+                self.switch_mods();
+                // A mod with blocks, items or worldgen waits for a restart: the
+                // project page says so instead of "installed and on".
+                if let (Some(note), Some(message)) = (
+                    &self.ui.options.mods_note,
+                    &mut self.ui.options.mod_browser.message,
+                ) {
+                    message.text.push(' ');
+                    message.text.push_str(note);
+                }
             }
+            Some(ProjectKind::ResourcePack) => {
+                let infos = self.resource_pack_infos();
+                self.ui.options.update_pack_infos(infos);
+                self.ui.options.pack_configs = super::packs::pack_configs(&self.vanilla_root());
+            }
+            None => {}
         }
     }
 }
@@ -213,37 +220,37 @@ mod tests {
             ..ModBrowser::default()
         };
         let mut mods = ModList::default();
-        assert_eq!(jobs.poll(&mut ui, &mut mods, false), (false, false));
+        assert_eq!(jobs.poll(&mut ui, &mut mods, false), (None, false));
         send.send(Finished::Index(Err("offline".into()))).unwrap();
-        assert_eq!(jobs.poll(&mut ui, &mut mods, false), (false, true));
+        assert_eq!(jobs.poll(&mut ui, &mut mods, false), (None, true));
         assert_eq!(ui.status, Status::Failed("offline".into()));
-        assert_eq!(jobs.poll(&mut ui, &mut mods, false), (false, false));
+        assert_eq!(jobs.poll(&mut ui, &mut mods, false), (None, false));
 
         let (send, receive) = channel();
         jobs.running = Some(receive);
         ui.status = Status::Loading;
         ui.installing = Some("ruby".into());
         drop(send);
-        assert_eq!(jobs.poll(&mut ui, &mut mods, false), (false, true));
+        assert_eq!(jobs.poll(&mut ui, &mut mods, false), (None, true));
         assert!(ui.installing.is_none());
         assert_eq!(ui.status, Status::Failed("the worker stopped".into()));
-        assert_eq!(jobs.poll(&mut ui, &mut mods, false), (false, false));
+        assert_eq!(jobs.poll(&mut ui, &mut mods, false), (None, false));
 
         let (send, receive) = channel();
         jobs.running = Some(receive);
         ui.status = Status::Ready;
         drop(send);
-        assert_eq!(jobs.poll(&mut ui, &mut mods, false), (false, false));
+        assert_eq!(jobs.poll(&mut ui, &mut mods, false), (None, false));
         assert_eq!(ui.status, Status::Ready);
 
         let (send, receive) = channel();
         jobs.running = Some(receive);
         ui.installing = Some("ruby".into());
-        send.send(Finished::Installed(Err("offline".into()), Vec::new()))
+        send.send(Finished::Installed("ruby".into(), Err("offline".into()), Vec::new()))
             .unwrap();
-        assert_eq!(jobs.poll(&mut ui, &mut mods, false), (false, true));
+        assert_eq!(jobs.poll(&mut ui, &mut mods, false), (None, true));
         assert!(ui.installing.is_none());
-        assert!(matches!(ui.message, Some((_, false))));
+        assert!(matches!(ui.message, Some(m) if m.project == "ruby" && !m.success));
         assert!(mods.enabled.is_empty());
     }
 
@@ -258,21 +265,57 @@ mod tests {
         let mut mods = ModList::default();
         mods.disabled.insert("ruby".into());
         send.send(Finished::Installed(
+            "ruby".into(),
             Ok(Done {
                 id: "ruby".into(),
+                kind: ProjectKind::Mod,
                 version: "1.0".into(),
                 verified: false,
             }),
             Vec::new(),
         ))
         .unwrap();
-        assert_eq!(jobs.poll(&mut ui, &mut mods, true), (false, false));
+        assert_eq!(jobs.poll(&mut ui, &mut mods, true), (None, false));
         assert!(mods.enabled.is_empty());
         assert!(mods.disabled.contains("ruby"));
         assert!(jobs.running.is_some());
-        assert!(jobs.poll(&mut ui, &mut mods, false).0);
+        assert_eq!(
+            jobs.poll(&mut ui, &mut mods, false),
+            (Some(ProjectKind::Mod), true)
+        );
         assert!(mods.enabled.contains("ruby"));
         assert!(!mods.disabled.contains("ruby"));
         assert!(jobs.running.is_none());
+    }
+
+    #[test]
+    fn installing_a_resource_pack_does_not_change_mod_selection() {
+        let (send, receive) = channel();
+        let mut jobs = Jobs {
+            running: Some(receive),
+            index: None,
+        };
+        let mut ui = ModBrowser::default();
+        let mut mods = ModList::default();
+        mods.enabled.insert("ruby".into());
+        mods.disabled.insert("crisp".into());
+        send.send(Finished::Installed(
+            "crisp".into(),
+            Ok(Done {
+                id: "crisp".into(),
+                kind: ProjectKind::ResourcePack,
+                version: "1.0".into(),
+                verified: false,
+            }),
+            Vec::new(),
+        ))
+        .unwrap();
+        assert_eq!(
+            jobs.poll(&mut ui, &mut mods, false),
+            (Some(ProjectKind::ResourcePack), true)
+        );
+        assert_eq!(mods.enabled.into_iter().collect::<Vec<_>>(), ["ruby"]);
+        assert_eq!(mods.disabled.into_iter().collect::<Vec<_>>(), ["crisp"]);
+        assert!(matches!(ui.message, Some(m) if m.project == "crisp" && m.success));
     }
 }

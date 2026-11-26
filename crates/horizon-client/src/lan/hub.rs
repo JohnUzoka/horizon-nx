@@ -2465,7 +2465,9 @@ impl Hub {
                 .guests
                 .iter()
                 .filter(|g| {
-                    g.participates_online() && g.left_reason.is_empty() && g.sender.timed_out()
+                    g.participates_online()
+                        && g.left_reason.is_empty()
+                        && g.sender.keep_alive_timed_out()
                 })
                 .map(|g| g.conn)
                 .collect();

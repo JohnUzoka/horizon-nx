@@ -34,7 +34,8 @@ impl NoResources {
     /// The screen in the current language, with `get`'s page when a hook answered
     /// (`horizon_hooks::engine::get_the_game`).
     pub fn new(looked_in: &std::path::Path, get: Option<GetTheGame>) -> Self {
-        let shown = std::path::absolute(looked_in).unwrap_or_else(|_| looked_in.to_path_buf());
+        let shown =
+            crate::device_path::absolute(looked_in).unwrap_or_else(|_| looked_in.to_path_buf());
         let quit = (lang::get("horizon.no_resources.quit"), Action::Quit);
         let (title, paragraphs, buttons) = match get {
             Some(get) => {
@@ -62,6 +63,18 @@ impl NoResources {
             paragraphs,
             buttons,
             looked_in: lang::tr("horizon.no_resources.looked_in", &[&shown.display()]),
+        }
+    }
+
+    /// The resource folder exists, but its export predates this Switch build.
+    pub fn outdated(looked_in: &std::path::Path) -> Self {
+        let shown =
+            crate::device_path::absolute(looked_in).unwrap_or_else(|_| looked_in.to_path_buf());
+        Self {
+            title: lang::get("horizon.no_resources.outdated.title"),
+            paragraphs: vec![lang::get("horizon.no_resources.outdated.prepare")],
+            buttons: vec![(lang::get("horizon.no_resources.switch_quit"), Action::Quit)],
+            looked_in: lang::tr("horizon.no_resources.outdated.looked_in", &[&shown.display()]),
         }
     }
 

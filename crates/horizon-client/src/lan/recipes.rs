@@ -60,6 +60,23 @@ fn registration_order<V>(all: &BTreeMap<String, V>) -> Vec<&V> {
     ordered.into_iter().map(|(_, v)| v).collect()
 }
 
+/// Only NeoForge's block-tag ingredient needs Block.getItem. Look through
+/// nested ingredients and both codec field names without interpreting the recipe here.
+fn uses_block_tag_ingredient(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => {
+            fields
+                .get("neoforge:ingredient_type")
+                .or_else(|| fields.get("type"))
+                .and_then(Value::as_str)
+                == Some("neoforge:block_tag")
+                || fields.values().any(uses_block_tag_ingredient)
+        }
+        Value::Array(values) => values.iter().any(uses_block_tag_ingredient),
+        _ => false,
+    }
+}
+
 /// The network copy of the already-resolved load cohort. Only recipes accepted
 /// by the canonical loader participate in display numbering, keeping client
 /// display ids aligned with the server's recipe index. Accepted ingredients
@@ -73,11 +90,23 @@ pub(super) fn network_recipes(
 ) -> crate::Result<(BTreeMap<String, Box<str>>, HashMap<String, i32>)> {
     // The resolved copy: the load's `ingredient` answers are in place, and
     // none of them leaves it (`forget_answers` below).
-    let items = horizon_client::items::Items::catalog_with_damage_registry(
-        resources, overlay, defaults, damage,
-    )?;
-    let accepted =
-        horizon_client::crafting::Recipes::from_resolved(resources, &items, overlay, sources)?;
+    use crate::spans::startup;
+    let items = startup::time("sync.recipes.item_catalog", || {
+        let needs_block_items = sources
+            .recipes
+            .iter()
+            .any(|recipe| uses_block_tag_ingredient(&recipe.resolved));
+        horizon_client::items::Items::recipe_catalog(
+            resources,
+            overlay,
+            defaults,
+            damage,
+            needs_block_items,
+        )
+    })?;
+    let accepted = startup::time("sync.recipes.accepted", || {
+        horizon_client::crafting::Recipes::from_resolved(resources, &items, overlay, sources)
+    })?;
     let accepted: std::collections::HashSet<&str> = accepted
         .by_type
         .values()
@@ -88,6 +117,7 @@ pub(super) fn network_recipes(
                 .map(|recipe| recipe.id.as_str())
         })
         .collect();
+    let _assemble = startup::step("sync.recipes.assemble");
     let mut all: BTreeMap<_, _> = sources
         .recipes
         .iter()

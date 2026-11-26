@@ -12,6 +12,9 @@ use std::time::SystemTime;
 mod platform;
 pub mod utils;
 
+#[cfg(target_os = "horizon")]
+pub use platform::{HorizonRumble, HorizonRumbleStep};
+
 /// True, if Y axis of sticks commonly points downwards.
 pub const IS_Y_AXIS_REVERSED: bool = platform::IS_Y_AXIS_REVERSED;
 

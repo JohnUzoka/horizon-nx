@@ -6,6 +6,8 @@ use super::{
     super::{Game, Screen},
     Connection, PadEvent, Pads,
 };
+#[cfg(target_os = "horizon")]
+use gilrs_core::{HorizonRumble, HorizonRumbleStep};
 use horizon_client::controller_ui::Device;
 use horizon_client::gamepad::{self, Button, GlyphStyle, PadState, Rumble, TriggerFeel};
 use horizon_dualsense::xbox;
@@ -29,6 +31,8 @@ pub(super) struct Devices {
     active: Option<gilrs::GamepadId>,
     /// Vibrations playing (an effect stops when dropped) and when they end.
     rumbles: Vec<(gilrs::ff::Effect, Instant)>,
+    #[cfg(target_os = "horizon")]
+    switch_rumble: Option<HorizonRumble>,
     /// The active pad is a DualSense.
     dualsense: bool,
     /// Its own output over HID (rumble here; gilrs only reads it), started once this window
@@ -170,6 +174,7 @@ const EXTRA_SDL_MAPPINGS: &str = concat!(
 /// The pad gilrs can make vibrate: the active one, or the same pad's other entry. Windows lists
 /// an Xbox pad twice (the WGI gamepad, which has force feedback, and a raw HID one, which has
 /// none), and whichever last sent input is the one the game reads.
+#[cfg(not(target_os = "horizon"))]
 fn ff_pad(gilrs: &gilrs::Gilrs, id: PadId) -> PadId {
     let Some(pad) = gilrs.connected_gamepad(id) else {
         return id;
@@ -236,22 +241,25 @@ fn play_pulse(
 /// the player turned Impulse Triggers off. A hit holds one flat step at the pulse's level: its
 /// shape's fade dropped the handles to levels the grip motors do not answer, so a hit played in
 /// the triggers alone. A flat step gives the handles the whole pulse to spin up.
-fn xbox_steps(rumble: Rumble, impulse: bool) -> Vec<(xbox::Motors, Duration)> {
-    let triggers = |pulse: gamepad::Pulse| {
-        if impulse { pulse.triggers } else { [0.0; 2] }
-    };
-    if let Rumble::Hurt(_) = rumble
-        && let Some(p) = rumble.pulse()
-    {
+#[cfg(any(not(target_os = "horizon"), test))]
+fn xbox_steps(
+    rumble: Rumble,
+    pulse: gamepad::Pulse,
+    impulse: bool,
+    strength: f32,
+) -> Vec<(xbox::Motors, Duration)> {
+    let triggers = |step: gamepad::Pulse| if impulse { step.triggers } else { [0.0; 2] };
+    if matches!(rumble, Rumble::Hurt(_)) {
         return vec![(
-            xbox::Motors::levels(p.strong, p.weak, triggers(p)),
-            Duration::from_millis(u64::from(p.millis)),
+            xbox::Motors::levels(pulse.strong, pulse.weak, triggers(pulse)),
+            Duration::from_millis(u64::from(pulse.millis)),
         )];
     }
     rumble
         .shape()
         .into_iter()
         .map(|step| {
+            let step = step.scaled(strength);
             (
                 xbox::Motors::levels(step.strong, step.weak, triggers(step)),
                 Duration::from_millis(u64::from(step.millis)),
@@ -262,7 +270,10 @@ fn xbox_steps(rumble: Rumble, impulse: bool) -> Vec<(xbox::Motors, Duration)> {
 
 /// The one way to open gilrs: each reader needs the extra rows.
 fn gilrs_builder() -> gilrs::GilrsBuilder {
-    gilrs::GilrsBuilder::new().add_mappings(EXTRA_SDL_MAPPINGS)
+    gilrs::GilrsBuilder::new()
+        .add_mappings(EXTRA_SDL_MAPPINGS)
+        // Horizon uses the same backend's HD timer instead of the 50 ms generic mixer.
+        .with_force_feedback(!cfg!(target_os = "horizon"))
 }
 
 impl Pads {
@@ -295,6 +306,8 @@ impl Pads {
     /// gets adaptive triggers or the lightbar: it has no output path for those yet.
     pub(in crate::game) fn release_hardware(&mut self) {
         if self.devices.started {
+            #[cfg(target_os = "horizon")]
+            self.stop_switch_rumble();
             self.devices.gilrs = None;
             self.devices.started = false;
             self.devices.active = None;
@@ -317,6 +330,11 @@ impl Pads {
         } else {
             self.devices.active
         }
+    }
+
+    #[cfg(target_os = "horizon")]
+    pub(super) fn stop_switch_rumble(&mut self) {
+        self.devices.switch_rumble = None;
     }
 
     /// Drain gilrs' events and read the active pad (opening gilrs the first time).
@@ -357,6 +375,8 @@ impl Pads {
                     self.devices.xbox_output = None;
                 }
                 E::Disconnected => {
+                    #[cfg(target_os = "horizon")]
+                    HorizonRumble::disconnected(usize::from(id));
                     log::info!("Controller disconnected: {}", gilrs.gamepad(id).name());
                     self.devices.known.retain(|known| *known != id);
                     self.connections.push(Connection::Disconnected {
@@ -392,6 +412,10 @@ impl Pads {
             self.radial.cancel();
             self.menu.stop_craft();
             // The output follows the pad in use: a new one must not keep writing to the old.
+            #[cfg(target_os = "horizon")]
+            {
+                self.devices.switch_rumble = None;
+            }
             self.devices.xbox_output = None;
         }
         let Some(pad) = self
@@ -623,6 +647,9 @@ impl PadRouter {
         self.started = false;
         // Its players' own outputs stop with it: dropping a link stops its motors.
         self.xbox.clear();
+        self.rumbles.clear();
+        #[cfg(target_os = "horizon")]
+        pads.stop_switch_rumble();
         pads.devices.routed = None;
         if let Some(gilrs) = self.gilrs.take() {
             pads.devices.gilrs = Some(gilrs);
@@ -704,6 +731,8 @@ impl PadRouter {
                     }
                 }
                 gilrs::EventType::Disconnected => {
+                    #[cfg(target_os = "horizon")]
+                    HorizonRumble::disconnected(usize::from(id));
                     log::info!("Controller disconnected: {}", gilrs.gamepad(id).name());
                     // Its own output goes with it: a link on the old one buzzes nothing.
                     self.xbox.retain(|(pad, _)| *pad != id);
@@ -775,6 +804,10 @@ impl Game<'_> {
     /// Controllers are turned off: dropping the pads' outputs frees their triggers (and the
     /// Xbox pad's handle).
     pub(super) fn pad_output_off(&mut self) {
+        #[cfg(target_os = "horizon")]
+        self.pad.stop_switch_rumble();
+        self.pad.devices.rumbles.clear();
+        self.pad.devices.routed_rumbles.clear();
         self.pad.devices.output = None;
         self.pad.devices.xbox_output = None;
         self.pad.devices.shown = None;
@@ -783,6 +816,14 @@ impl Game<'_> {
     /// After each poll: a pad's own output opens once this window has the pad in hand, then
     /// shows what the game is doing; vibrations that are over stop.
     pub(super) fn pad_output_frame(&mut self) {
+        #[cfg(target_os = "horizon")]
+        if !self.settings.controller.vibration
+            || self.settings.controller.vibration_strength <= 0.0
+            || !self.pad.in_use
+            || !self.pad_has_window()
+        {
+            self.pad.stop_switch_rumble();
+        }
         if self.pad.devices.dualsense
             && self.pad.in_use
             && self.pad_has_window()
@@ -805,6 +846,7 @@ impl Game<'_> {
 
     /// The Xbox pad's HID output, while it is the active pad, open, and this window has focus
     /// (another game on the same pad keeps it otherwise).
+    #[cfg(not(target_os = "horizon"))]
     fn pad_xbox_output(&self) -> Option<&xbox::Link> {
         let output = self.pad.devices.xbox_output.as_ref()?;
         (self.pad.devices.xbox && self.pad_has_window() && output.open().is_some())
@@ -949,15 +991,47 @@ impl Game<'_> {
 
     /// Release the pads' outputs (the game is quitting).
     pub(in crate::game) fn pad_close_output(&mut self) {
+        #[cfg(target_os = "horizon")]
+        self.pad.stop_switch_rumble();
+        self.pad.devices.rumbles.clear();
+        self.pad.devices.routed_rumbles.clear();
         self.pad.devices.haptics = None;
         self.pad.devices.output = None;
         self.pad.devices.xbox_output = None;
     }
 
+    /// On Switch the same id that feeds gameplay drives its own HD envelope, including for
+    /// guests. Register the worker's release before it can make any libnx calls.
+    #[cfg(target_os = "horizon")]
+    pub(super) fn pad_vibrate(&mut self, rumble: Rumble, pulse: gamepad::Pulse, strength: f32) {
+        let Some(id) = self.pad.switch_pad().filter(|_| self.pad_has_window()) else {
+            return;
+        };
+        static RELEASE_REGISTERED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+            let registered = horizon_nx::register_release_hook(HorizonRumble::shutdown);
+            if !registered {
+                log::warn!("Horizon: could not register Switch HD rumble cleanup");
+            }
+            registered
+        });
+        if !*RELEASE_REGISTERED {
+            return;
+        }
+        let steps = rumble.hd(pulse, strength).map(|step| {
+            step.map(|step| HorizonRumbleStep {
+                low: step.low,
+                high: step.high,
+                millis: step.millis,
+            })
+        });
+        self.pad.devices.switch_rumble = HorizonRumble::play(usize::from(id), steps);
+    }
+
     /// Play a vibration on the active pad: a DualSense through its own report, an Xbox One pad
     /// through its handles and impulse triggers, else gilrs' force feedback, which platforms
     /// without it (gilrs on macOS) skip.
-    pub(super) fn pad_vibrate(&mut self, rumble: Rumble, pulse: gamepad::Pulse) {
+    #[cfg(not(target_os = "horizon"))]
+    pub(super) fn pad_vibrate(&mut self, rumble: Rumble, pulse: gamepad::Pulse, strength: f32) {
         let level = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         if let Some(haptics) = self
             .pad
@@ -968,8 +1042,8 @@ impl Game<'_> {
         {
             let steps = rumble.shape().into_iter().map(|step| {
                 (
-                    step.strong,
-                    step.weak,
+                    step.strong * strength,
+                    step.weak * strength,
                     Duration::from_millis(u64::from(step.millis)),
                 )
             });
@@ -979,7 +1053,10 @@ impl Game<'_> {
         if let Some(output) = self.pad_output() {
             let steps = rumble.shape().into_iter().map(|step| {
                 let length = Duration::from_millis(u64::from(step.millis));
-                ([level(step.strong), level(step.weak)], length)
+                (
+                    [level(step.strong * strength), level(step.weak * strength)],
+                    length,
+                )
             });
             output.rumble(steps.collect());
             return;
@@ -991,7 +1068,9 @@ impl Game<'_> {
             // handles-only pulse on that path would stop a trigger mid-vibration.
             output.rumble(xbox_steps(
                 rumble,
+                pulse,
                 self.settings.controller.impulse_triggers,
+                strength,
             ));
             return;
         }
@@ -1135,11 +1214,20 @@ mod takeover_tests {
 mod xbox_output_tests {
     use super::*;
 
+    fn steps(rumble: Rumble, impulse: bool, strength: f32) -> Vec<(xbox::Motors, Duration)> {
+        xbox_steps(
+            rumble,
+            rumble.pulse().unwrap().scaled(strength),
+            impulse,
+            strength,
+        )
+    }
+
     #[test]
     fn a_handles_only_pulse_rides_the_pads_own_output_too() {
         // A radial tick moves no trigger. If it stayed on gilrs, its force feedback (triggers
         // always zero) could stop a trigger motor mid-vibration.
-        let steps = xbox_steps(Rumble::RadialSlot, true);
+        let steps = steps(Rumble::RadialSlot, true, 1.0);
         assert!(!steps.is_empty());
         let motors = steps[0].0;
         assert!(motors.strong > 0 || motors.weak > 0);
@@ -1148,13 +1236,13 @@ mod xbox_output_tests {
 
     #[test]
     fn the_trigger_motors_follow_the_pulse_unless_turned_off() {
-        let on = xbox_steps(Rumble::BlockBroken, true);
+        let on = steps(Rumble::BlockBroken, true, 1.0);
         // One fixed level: the grips at the level a hit is felt at, the triggers at 35%.
         assert_eq!(on[0].0.left_trigger, 89);
         assert_eq!(on[0].0.right_trigger, 89);
         assert_eq!(on[0].0.strong, 153);
         assert_eq!(on[0].0.weak, 153);
-        let off = xbox_steps(Rumble::BlockBroken, false);
+        let off = steps(Rumble::BlockBroken, false, 1.0);
         assert_eq!([off[0].0.left_trigger, off[0].0.right_trigger], [0, 0]);
         assert_eq!([off[0].0.strong, off[0].0.weak], [153, 153]);
     }
@@ -1163,12 +1251,24 @@ mod xbox_output_tests {
     fn a_hit_drives_all_four_motors_hard() {
         // One flat step for the whole pulse: the shaped fade dropped the handles below what
         // the grip motors answer, so a hit played in the triggers alone.
-        let steps = xbox_steps(Rumble::Hurt(4.0), true);
+        let steps = steps(Rumble::Hurt(4.0), true, 1.0);
         assert_eq!(steps.len(), 1);
         let (motors, length) = steps[0];
         assert_eq!(length, Duration::from_millis(280));
         assert!(motors.strong >= 178, "the heavy handle: {}", motors.strong);
         assert!(motors.weak >= 153, "the light handle: {}", motors.weak);
         assert_eq!([motors.left_trigger, motors.right_trigger], [166, 166]);
+    }
+
+    #[test]
+    fn profile_strength_scales_the_grip_and_impulse_motors() {
+        let half = steps(Rumble::BlockBroken, true, 0.5)[0].0;
+        assert_eq!([half.strong, half.weak], [77, 77]);
+        assert_eq!([half.left_trigger, half.right_trigger], [45, 45]);
+        let off = steps(Rumble::Hurt(4.0), true, 0.0)[0].0;
+        assert_eq!(
+            [off.strong, off.weak, off.left_trigger, off.right_trigger],
+            [0; 4]
+        );
     }
 }

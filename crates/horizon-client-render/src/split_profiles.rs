@@ -386,9 +386,12 @@ impl SplitProfiles {
             .replacen("%s", place, 1),
             None => tr("horizon.splitscreen.profiles.move", "Move where you play"),
         };
-        let keys = [MenuJob::PagePrev, MenuJob::PageNext].map(|job| Glyph::menu(job, glyphs));
+        let keys = [MenuJob::PagePrev, MenuJob::PageNext]
+            .map(|job| Glyph::menu(job, glyphs))
+            .into_iter()
+            .filter(|&b| pad_glyph::width(atlas, b) > 0.0);
         let key_width = |b: Glyph| pad_glyph::width(atlas, b);
-        let total = keys.iter().map(|&b| key_width(b) + 4.0).sum::<f32>() + 2.0 + width(&words);
+        let total = keys.clone().map(|b| key_width(b) + 4.0).sum::<f32>() + 2.0 + width(&words);
         let (mut x, y) = (((batch.width - total) / 2.0).floor(), 30.0);
         for b in keys {
             let kw = key_width(b);

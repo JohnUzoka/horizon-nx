@@ -92,6 +92,8 @@ pub(super) struct ServerPackState {
     user: (String, u128),
     /// The packs loaded on top of the player's own, bottom first.
     pub(super) active: Vec<packs::Pack>,
+    /// Input paths for the currently published stack, opened afresh on the next reload.
+    pub(super) active_paths: Vec<(u128, PathBuf)>,
     /// The download batches' notifiers, oldest first.
     notifiers: Vec<PackNotifier>,
     /// `SystemToastId.PACK_LOAD_FAILURE`: the toast `Minecraft.clearResourcePacksOnError` adds.
@@ -475,19 +477,9 @@ impl Game<'_> {
     /// `DownloadedPackSource.startReload`: the packs on top of the player's
     /// own, staged on a worker (`Minecraft.reloadResourcePacks` under a
     /// `LoadingOverlay`); `drive_pack_reload` applies it. A pack with no
-    /// readable `pack.mcmeta` fails the reload at once, as `onFailure`.
+    /// readable `pack.mcmeta` fails staging, as `onFailure`.
     fn start_pack_reload(&mut self, load: &[(u128, PathBuf)]) {
-        let server: Option<Vec<_>> = load
-            .iter()
-            .map(|(id, path)| packs::server_pack(*id, path))
-            .collect();
-        let Some(server) = server else {
-            log::warn!("Horizon: invalid pack metadata in a server pack, ignoring all");
-            self.finish_pack_reload(false);
-            return;
-        };
-        self.server_packs.active = server;
-        if let Err(e) = self.spawn_pack_reload(ReloadKind::Server) {
+        if let Err(e) = self.spawn_server_pack_reload(load.to_vec()) {
             log::error!("Horizon: could not start the pack reload worker: {e}");
             self.finish_pack_reload(false);
         }

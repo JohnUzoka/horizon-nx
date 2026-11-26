@@ -89,8 +89,9 @@ deko3d without the changes in the next table; "now" is the `deko3d` branch with 
 
 "deko3d now", 1% low: one value per run; the first run had a one-second hitch.
 
-Packed terrain vertices (the default; `HORIZON_PACKED_QUADS=0` turns them off) cost NVK about
-11 ms of median GPU and make no difference on deko3d (25.6 FPS with wide ones).
+Packed terrain vertices cost NVK about 11 ms of median GPU and make no difference on deko3d (25.6
+FPS with wide ones). The Switch now defaults to the wide ones (0.2.0's choice for NVK);
+`HORIZON_PACKED_QUADS=1` turns packed ones on. The table's runs above used packed ones.
 
 ### Solid terrain against Build 40
 

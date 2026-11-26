@@ -392,9 +392,9 @@ pub enum Mode {
     },
     /// AccessibilityOnboardingScreen: the first screen of a first launch.
     Onboarding(Onboarding),
-    /// The Switch update's question before it downloads (`switch_update`): the build on offer.
+    /// The Switch update's question before it downloads (`switch_update`): the version on offer.
     ConfirmUpdate {
-        build: u32,
+        version: crate::switch_update::Version,
     },
     /// `BanNoticeScreens`: a ConfirmLinkScreen `Gui.addInitialScreens` queued.
     BanNotice(crate::ban_notice::Notice),
@@ -847,15 +847,15 @@ fn update_button() -> Option<(String, bool)> {
     }
     Some(match switch_update::status() {
         Status::None => return None,
-        Status::Available { build } => (
-            translate("horizon.update.button", "Update to build %s", &[&build]),
+        Status::Available { version } => (
+            translate("horizon.update.button", "Update to %s", &[&version]),
             true,
         ),
-        Status::Downloading { build, percent } => (
+        Status::Downloading { version, percent } => (
             translate(
                 "horizon.update.downloading",
-                "Downloading build %s: %s%%",
-                &[&build, &percent],
+                "Downloading %s: %s%%",
+                &[&version, &percent],
             ),
             false,
         ),
@@ -868,15 +868,15 @@ fn update_button() -> Option<(String, bool)> {
 }
 
 /// The Switch update's question (`Mode::ConfirmUpdate`): its title, and its message with the
-/// build and its download size.
-fn update_question(build: u32) -> (String, String) {
+/// version and its download size.
+fn update_question(version: crate::switch_update::Version) -> (String, String) {
     let size = crate::switch_update::download_size().map_or_else(String::new, |bytes| {
         format!(" ({:.0} MB)", bytes as f64 / 1_048_576.0)
     });
     let message = translate(
         "horizon.update.confirm.message",
-        "Build %s%s downloads now, then replaces this version when you quit Horizon. Your worlds and settings stay as they are.",
-        &[&build, &size],
+        "Horizon %s%s downloads now, then replaces this version when you quit Horizon. Your worlds and settings stay as they are.",
+        &[&version, &size],
     );
     (
         lang::get_or("horizon.update.confirm.title", "Update Horizon?"),
@@ -2172,8 +2172,8 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                 )
             }
             // The Switch update's question, a ConfirmScreen: its title and message.
-            Mode::ConfirmUpdate { build } => {
-                let (title, message) = update_question(*build);
+            Mode::ConfirmUpdate { version } => {
+                let (title, message) = update_question(*version);
                 ScreenInfo::new("switch_update", join(&[&title, &message]))
             }
             Mode::Account => self.account_narration(),
@@ -3915,8 +3915,8 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
     fn update_click(&mut self) -> Action {
         use crate::switch_update::{self as update, Status};
         match update::status() {
-            Status::Available { build } => {
-                self.set_mode(Mode::ConfirmUpdate { build });
+            Status::Available { version } => {
+                self.set_mode(Mode::ConfirmUpdate { version });
                 Action::None
             }
             Status::Failed { .. } => {

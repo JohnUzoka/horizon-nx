@@ -90,6 +90,23 @@ impl Loading {
             || self.menu.pending.is_some()
             || self.ui_at.is_none_or(|at| at.elapsed() >= TITLE_FRAME_WAIT)
     }
+
+    /// Switch commits to the full renderer on entry, not while browsing the
+    /// title. A failed core load still exits immediately.
+    fn can_finish(&self, defer_until_entry: bool) -> bool {
+        match &self.loaded {
+            Some(Err(_)) => true,
+            Some(Ok(loaded)) if defer_until_entry => {
+                self.menu.pending.is_some()
+                    && loaded
+                        .rest_loader
+                        .as_ref()
+                        .is_none_or(|loader| loader.handle.is_finished())
+            }
+            Some(Ok(_)) => self.ready_for_handoff(),
+            None => false,
+        }
+    }
     pub(super) fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -282,14 +299,22 @@ impl Loading {
         }
         event_loop.set_control_flow(ControlFlow::Poll);
     }
-    pub(super) fn draw(&mut self) {
+    pub(super) fn draw(&mut self) -> bool {
         let Some(size) = self
             .renderer
             .as_ref()
             .map(|r| [r.config.width, r.config.height])
         else {
-            return;
+            return false;
         };
+        #[cfg(target_os = "horizon")]
+        if self.gui.is_some() {
+            if self.menu.pending.is_some() {
+                horizon_nx::loading_world();
+            } else {
+                horizon_nx::title_ready();
+            }
+        }
         let mut batch = HudBatch::new(size, self.settings.gui_scale_inputs());
         self.draw_menu(&mut batch);
         self.menu.frame_drawn((batch.width, batch.height));
@@ -298,27 +323,37 @@ impl Loading {
             self.started.elapsed().as_secs_f32(),
             self.settings.file.double("panoramaScrollSpeed") as f32,
         );
+        let mut presented = false;
         if let Some(renderer) = &mut self.renderer {
             match renderer.render(&frame) {
-                Ok(true) if self.gui.is_some() && self.menu.pending.is_none() => {
-                    self.title_drawn = true;
-                    self.menu.perf.title_shown();
+                Ok(drawn) => {
+                    presented = drawn;
+                    if drawn && self.gui.is_some() && self.menu.pending.is_none() {
+                        self.title_drawn = true;
+                        self.menu.perf.title_shown();
+                    }
                 }
-                Ok(_) => {}
                 Err(e) => log::warn!("Horizon: loading screen frame failed: {e}"),
             }
         }
         if !self.shown {
             self.shown = true;
             startup::mark("loading_screen.shown");
+            #[cfg(target_os = "horizon")]
+            if self.gui.is_none() {
+                log::info!("Horizon: Switch launch wordmark: waiting for the menu bundle");
+            }
             log::info!(
                 "Horizon: loading screen shown after {} ms",
                 self.started.elapsed().as_millis()
             );
         }
+        presented
     }
     pub(super) fn finish(&mut self, mut loaded: Loaded) -> Result<Option<split::Split<'static>>> {
         let handoff_at = Instant::now();
+        #[cfg(target_os = "horizon")]
+        let local_entry = matches!(&self.menu.pending, Some(PendingWorldEntry::Local { .. }));
         let mut options = self.options.take().ok_or("loading already finished")?;
         options.resources = loaded.root.clone();
         // StartupMenu owns world selection until it can hand it to Game.
@@ -326,11 +361,38 @@ impl Loading {
         options.server = None;
         let gui = self.gui.take().ok_or("missing menu bundle")?;
         let window = self.window.clone().ok_or("window closed")?;
+        #[cfg(target_os = "horizon")]
+        let present_handoff = |renderer: &mut Renderer, stage| -> Result<()> {
+            let mut batch = HudBatch::new(
+                [renderer.config.width, renderer.config.height],
+                self.settings.gui_scale_inputs(),
+            );
+            gui.atlas.font.begin_frame();
+            horizon_client::level_loading::draw_local_world(&mut batch, &gui.atlas, stage, None);
+            let drawn = renderer.render(&loading_frame(&batch))?;
+            log::info!("Horizon: Switch local world handoff: {stage}, drawn={drawn}");
+            Ok(())
+        };
         // Keep the loader's device and swap in the real textures in one step. The loading
         // screen draws no frame after this: its atlas texture is freed before the world
         // renderer uploads its own, so a phone never holds both (#15608).
         let mut previous = self.renderer.take();
         if let Some(renderer) = &mut previous {
+            // A pending request can bypass the title frame. Paint before taking
+            // its surface so the old buffer names the work about to block it.
+            #[cfg(target_os = "horizon")]
+            if local_entry {
+                log::info!(
+                    "Horizon: Switch local world queued on startup menu (loader: {}; rest worker finished: {})",
+                    self.progress.line(),
+                    loaded
+                        .rest_loader
+                        .as_ref()
+                        .is_none_or(|loader| loader.handle.is_finished()),
+                );
+                horizon_nx::loading_world();
+                present_handoff(renderer, "horizon.loading.renderer")?;
+            }
             renderer.release_surface();
             if let Some(atlas) = &renderer.hud.atlas_texture {
                 atlas.destroy();
@@ -366,6 +428,16 @@ impl Loading {
             self.started.elapsed().as_millis()
         );
         let renderer_ms = renderer_at.elapsed().as_millis();
+        // Reconfiguring the surface may discard its last buffer. The new
+        // renderer has the menu atlas already: cover it before audio and Game setup.
+        #[cfg(target_os = "horizon")]
+        let renderer = if local_entry {
+            let mut renderer = renderer;
+            present_handoff(&mut renderer, "horizon.loading.client")?;
+            renderer
+        } else {
+            renderer
+        };
         // Audio is created on the main thread, after the core is ready.
         let audio = if !options.execution_role.is_client() {
             Audio::silent(&loaded.pack.source)
@@ -481,7 +553,14 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                     return;
                 }
-                match if loading.menu.reload_packs || !loading.ready_for_handoff() {
+                let can_finish = !loading.menu.reload_packs
+                    && loading.can_finish(cfg!(target_os = "horizon"));
+                // Present the entry overlay before renderer setup can block
+                // the event loop. If the surface isn't drawable, try next loop.
+                #[cfg(target_os = "horizon")]
+                let can_finish = can_finish
+                    && (matches!(&loading.loaded, Some(Err(_))) || loading.draw());
+                match if !can_finish {
                     None
                 } else {
                     loading.loaded.take()
@@ -509,8 +588,19 @@ impl ApplicationHandler for App {
         }
     }
     fn exiting(&mut self, event_loop: &ActiveEventLoop) {
-        if let App::Ready(game) = self {
-            game.exiting(event_loop);
+        match self {
+            App::Ready(game) => game.exiting(event_loop),
+            App::Loading(loading) => {
+                // Quitting directly from the Switch title is a clean exit,
+                // even if the full renderer was never needed.
+                if cfg!(target_os = "horizon") && loading.title_drawn && loading.error.is_none() {
+                    loading.settings.file.set(
+                        "startedCleanly",
+                        horizon_client::options_file::V::Bool(true),
+                    );
+                    loading.settings.save(&Game::options_path());
+                }
+            }
         }
     }
 }
@@ -523,7 +613,7 @@ pub(super) fn missing_resources(
     root: &std::path::Path,
     get: Option<horizon_hooks::GetTheGame>,
 ) -> Option<String> {
-    let shown = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let shown = horizon_client::device_path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
     if !root.join("horizon-resources.json").is_file() {
         let launcher = get.map_or(String::new(), |get| {
             format!(
@@ -570,6 +660,23 @@ pub(super) fn damaged_prepared(root: &std::path::Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Early Switch check for the 0.1.0 export. Skip the large registry tables
+/// without allocating them; the loader still validates the new definitions.
+#[cfg(any(target_os = "horizon", test))]
+pub(super) fn outdated_prepared(root: &std::path::Path) -> bool {
+    if !root.join("horizon-resources.json").is_file() {
+        return false;
+    }
+    #[derive(serde::Deserialize)]
+    struct Export {
+        fluid_state_definitions: Option<serde::de::IgnoredAny>,
+    }
+    std::fs::read(root.join("block-behaviours.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Export>(&bytes).ok())
+        .is_some_and(|export| export.fluid_state_definitions.is_none())
 }
 
 /// `Minecraft.<init>`: `startedCleanly` left false means the previous start

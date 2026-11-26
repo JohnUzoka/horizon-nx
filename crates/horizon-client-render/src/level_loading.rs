@@ -399,6 +399,38 @@ pub fn draw(
     }
 }
 
+/// The Switch's single-player loading presentation, shared by the startup
+/// menu and Game. Progress belongs to the named stage; omit the bar for
+/// steps that cannot report a fraction. Leave the title panorama visible,
+/// as on the saving screen.
+pub fn draw_local_world(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    stage_key: &str,
+    progress: Option<f32>,
+) {
+    let (x, y) = ((batch.width as i32) / 2, (batch.height as i32) / 2 - 50);
+    centered_line(
+        batch,
+        atlas,
+        &Text::translate("multiplayer.downloadingTerrain", &[]),
+        x,
+        y,
+        u32::MAX,
+    );
+    centered_line(
+        batch,
+        atlas,
+        &Text::translate(stage_key, &[]),
+        x,
+        y + 14,
+        opaque(0xB0B0B0),
+    );
+    if let Some(progress) = progress {
+        draw_loading_bar(batch, atlas, x, y + 26, progress.clamp(0.0, 1.0));
+    }
+}
+
 /// `LoadingOverlay.MOJANG_STUDIOS_LOGO_LOCATION`, from the player's own resources.
 pub const MOJANG_STUDIOS_LOGO: &str = "gui/title/mojangstudios";
 
@@ -620,8 +652,8 @@ fn centered_line(
     );
 }
 
-/// `FileFixerProgressScreen.extractProgressBar`.
-fn file_fixer_bar(batch: &mut HudBatch, atlas: &HudAtlas, x_center: i32, y: i32, progress: f32) {
+/// A 200 x 2 loading progress bar (`FileFixerProgressScreen.extractProgressBar`).
+fn draw_loading_bar(batch: &mut HudBatch, atlas: &HudAtlas, x_center: i32, y: i32, progress: f32) {
     let left = x_center - 100;
     batch.fill(atlas, left as f32, y as f32, 200.0, 2.0, opaque(0));
     batch.fill(
@@ -664,7 +696,7 @@ pub fn draw_file_fixer(
         let of_type = progress.type_file_fix_stats();
         let running = progress.running_file_fixer_stats();
         let mut y = text_top + 9 + 3;
-        file_fixer_bar(batch, atlas, x_center, y, running.progress());
+        draw_loading_bar(batch, atlas, x_center, y, running.progress());
         y += 7;
         // extractFileStats
         let converted = Text::tr(
@@ -688,7 +720,7 @@ pub fn draw_file_fixer(
             centered_line(batch, atlas, &label, x_center, y, GREY);
         }
         y += 9 + 3;
-        file_fixer_bar(batch, atlas, x_center, y, of_type.progress());
+        draw_loading_bar(batch, atlas, x_center, y, of_type.progress());
         y += 7;
         // extractTypeProgress: Mth.floor(progress * 100)
         let percent = (of_type.progress() * 100.0).floor() as i32;
@@ -709,6 +741,30 @@ pub fn draw_file_fixer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn switch_local_loading_leaves_the_panorama_visible_and_only_reports_measured_progress() {
+        let atlas = HudAtlas::boot();
+        let draw = |progress| {
+            let mut batch = HudBatch::scratch([1280, 720]);
+            draw_local_world(&mut batch, &atlas, "horizon.loading.resources", progress);
+            assert!(batch.vertices.iter().all(|vertex| {
+                vertex.pos[0] > 0.0 && vertex.pos[0] < batch.width
+            }));
+            batch
+        };
+        let indeterminate = draw(None);
+        let measured = draw(Some(0.25));
+        let bar: Vec<_> = measured.vertices[indeterminate.vertices.len()..]
+            .iter()
+            .filter(|v| v.color == opaque(0x00FF00))
+            .collect();
+        assert_eq!(bar.len(), 6);
+        let (left, right) = bar.iter().fold((f32::INFINITY, 0.0_f32), |(lo, hi), v| {
+            (lo.min(v.pos[0]), hi.max(v.pos[0]))
+        });
+        assert_eq!(right - left, 50.0); // A quarter of the 200-pixel bar.
+    }
 
     #[test]
     fn mod_bars_draw_under_the_stage_bar_at_most_four() {
