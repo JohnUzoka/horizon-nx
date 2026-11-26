@@ -168,12 +168,31 @@ impl Beardifier {
         self.kernel_junctions = junctions;
         self
     }
-    fn sample_unchecked(&self, [x, y, z]: [i32; 3]) -> f32 {
+    fn sample_unchecked(&self, point: [i32; 3]) -> f32 {
+        self.sample_parts(
+            point,
+            &self.pieces,
+            &self.junctions,
+            &self.kernel_pieces,
+            &self.kernel_junctions,
+        )
+    }
+    /// [`Self::sample_unchecked`] over the parts given, in their order. A part left
+    /// out must add exactly 0 at `point` (it is too far, [`Self::column_parts`]): the
+    /// sums skip only zero terms, so they come out bit for bit the same.
+    fn sample_parts<'a>(
+        &self,
+        [x, y, z]: [i32; 3],
+        pieces: impl IntoIterator<Item = &'a RigidPiece>,
+        junctions: impl IntoIterator<Item = &'a JigsawJunction>,
+        kernel_pieces: impl IntoIterator<Item = &'a KernelPiece>,
+        kernel_junctions: impl IntoIterator<Item = &'a KernelJunction>,
+    ) -> f32 {
         let mut value = 0.;
         // The kernel is a process-wide constant; resolving it once keeps the
         // per-piece and per-junction beard evaluations off the OnceLock.
         let kernel = kernel();
-        for piece in &self.pieces {
+        for piece in pieces {
             let low = piece.bounds.minimum;
             let high = piece.bounds.maximum;
             let dx = 0.max(low[0].wrapping_sub(x).max(x.wrapping_sub(high[0])));
@@ -201,7 +220,7 @@ impl Beardifier {
                 }
             };
         }
-        for junction in &self.junctions {
+        for junction in junctions {
             let dx = x.wrapping_sub(junction.source_x);
             let dy = y.wrapping_sub(junction.source_ground_y);
             let dz = z.wrapping_sub(junction.source_z);
@@ -211,7 +230,7 @@ impl Beardifier {
             return value;
         }
         let mut density = f64::from(value);
-        for piece in &self.kernel_pieces {
+        for piece in kernel_pieces {
             let (low, high) = (piece.bounds.minimum, piece.bounds.maximum);
             let d: [i32; 3] = std::array::from_fn(|i| {
                 0.max(
@@ -225,13 +244,111 @@ impl Beardifier {
                 .factor(d[0], d[1], d[2], y.wrapping_sub(low[1]))
                 * 0.8;
         }
-        for junction in &self.kernel_junctions {
+        for junction in kernel_junctions {
             let d: [i32; 3] =
                 std::array::from_fn(|i| [x, y, z][i].wrapping_sub(junction.source[i]));
             density += junction.kernel.factor(d[0], d[1], d[2], d[1]) * 0.4;
         }
         density as f32
     }
+    /// The parts that can add anything in column (`x`, `z`), in their order, with the
+    /// y range where they can, into `parts` (cleared first). Outside it, and for the
+    /// parts left out, a part is too far for its falloff (a beard's 24-block kernel, a
+    /// bury's 6-block sphere, a terrain kernel's size) and adds exactly 0.
+    fn column_parts<'a>(&'a self, [x, z]: [i32; 2], parts: &mut ColumnParts<'a>) {
+        let across = |low: [i32; 3], high: [i32; 3]| {
+            (
+                0.max(low[0].wrapping_sub(x).max(x.wrapping_sub(high[0]))),
+                0.max(low[2].wrapping_sub(z).max(z.wrapping_sub(high[2]))),
+            )
+        };
+        parts.pieces.clear();
+        parts.pieces.extend(self.pieces.iter().filter_map(|piece| {
+            let (low, high) = (piece.bounds.minimum, piece.bounds.maximum);
+            let (dx, dz) = across(low, high);
+            let ground = low[1].wrapping_add(piece.ground_level_delta);
+            let ys = match piece.adjustment {
+                TerrainAdjustment::None => return None,
+                // `bury`'s squared distance is at least dx² + dz² + (dy/2)², 0 from 36 on.
+                TerrainAdjustment::Bury if dx < 6 && dz < 6 => {
+                    (ground.saturating_sub(11), ground.saturating_add(11))
+                }
+                // `beard`'s kernel spans -12..=11 on each axis.
+                TerrainAdjustment::BeardThin if dx <= 11 && dz <= 11 => {
+                    (ground.saturating_sub(12), ground.saturating_add(11))
+                }
+                TerrainAdjustment::BeardBox if dx <= 11 && dz <= 11 => {
+                    (ground.saturating_sub(11), high[1].saturating_add(11))
+                }
+                // `bury` at half the distance.
+                TerrainAdjustment::Encapsulate if dx < 12 && dz < 12 => {
+                    (low[1].saturating_sub(11), high[1].saturating_add(11))
+                }
+                _ => return None,
+            };
+            Some((piece, ys))
+        }));
+        let beard_reach = |d: i32| (-12..=11).contains(&d);
+        parts.junctions.clear();
+        parts.junctions.extend(self.junctions.iter().filter_map(|junction| {
+            (beard_reach(x.wrapping_sub(junction.source_x))
+                && beard_reach(z.wrapping_sub(junction.source_z)))
+            .then(|| {
+                let y = junction.source_ground_y;
+                (junction, (y.saturating_sub(12), y.saturating_add(11)))
+            })
+        }));
+        // A kernel's offsets reach -radius..size - radius.
+        let kernel_reach = |kernel: &TerrainKernel, d: i32| {
+            (0..kernel.size).contains(&d.wrapping_add(kernel.radius()))
+        };
+        let kernel_ys = |kernel: &TerrainKernel, low: i32, high: i32| {
+            (
+                low.saturating_sub(kernel.radius()),
+                high.saturating_add(kernel.size - kernel.radius() - 1),
+            )
+        };
+        parts.kernel_pieces.clear();
+        parts.kernel_pieces.extend(self.kernel_pieces.iter().filter_map(|piece| {
+            let (low, high) = (piece.bounds.minimum, piece.bounds.maximum);
+            let (dx, dz) = across(low, high);
+            (kernel_reach(&piece.kernel, dx) && kernel_reach(&piece.kernel, dz))
+                .then(|| (piece, kernel_ys(&piece.kernel, low[1], high[1])))
+        }));
+        parts.kernel_junctions.clear();
+        parts.kernel_junctions.extend(self.kernel_junctions.iter().filter_map(|junction| {
+            (kernel_reach(&junction.kernel, x.wrapping_sub(junction.source[0]))
+                && kernel_reach(&junction.kernel, z.wrapping_sub(junction.source[2])))
+            .then(|| {
+                let y = junction.source[1];
+                (junction, kernel_ys(&junction.kernel, y, y))
+            })
+        }));
+    }
+}
+/// The parts of a [`Beardifier`] that reach one column, each with the inclusive y range
+/// where it can add anything (`Beardifier::column_parts`).
+#[derive(Default)]
+struct ColumnParts<'a> {
+    pieces: Vec<(&'a RigidPiece, (i32, i32))>,
+    junctions: Vec<(&'a JigsawJunction, (i32, i32))>,
+    kernel_pieces: Vec<(&'a KernelPiece, (i32, i32))>,
+    kernel_junctions: Vec<(&'a KernelJunction, (i32, i32))>,
+}
+impl ColumnParts<'_> {
+    fn is_empty(&self) -> bool {
+        self.pieces.is_empty()
+            && self.junctions.is_empty()
+            && self.kernel_pieces.is_empty()
+            && self.kernel_junctions.is_empty()
+    }
+}
+/// The parts of `parts` that reach `y`.
+fn at_y<'a, T>(parts: &'a [(&'a T, (i32, i32))], y: i32) -> impl Iterator<Item = &'a T> {
+    parts
+        .iter()
+        .filter(move |(_, (low, high))| (*low..=*high).contains(&y))
+        .map(|(part, _)| *part)
 }
 impl DensitySampler for Beardifier {
     fn sample_value(&self, _: &mut SamplerContext, position: [i32; 3]) -> Result<f32, SampleError> {
@@ -278,17 +395,31 @@ impl DensitySampler for Beardifier {
                     .div_euclid(steps[i]),
             )
         });
+        // Each column sums only the parts that reach it (a village's pieces are a few
+        // blocks across, the chunk sees dozens): the same sums, without the zero terms.
+        let mut parts = ColumnParts::default();
         for z in low[2]..=high[2] {
             for x in low[0]..=high[0] {
+                let at = [
+                    minimum[0].wrapping_add(x.wrapping_mul(steps[0])),
+                    minimum[2].wrapping_add(z.wrapping_mul(steps[2])),
+                ];
+                self.column_parts(at, &mut parts);
+                if parts.is_empty() {
+                    continue;
+                }
                 for y in low[1]..=high[1] {
                     let index = volume
                         .index([x as usize, y as usize, z as usize])
                         .expect("bounded structure density indices");
-                    let local = [x, y, z];
-                    let point = std::array::from_fn(|i| {
-                        minimum[i].wrapping_add(local[i].wrapping_mul(steps[i]))
-                    });
-                    buffer[index] = self.sample_unchecked(point);
+                    let py = minimum[1].wrapping_add(y.wrapping_mul(steps[1]));
+                    buffer[index] = self.sample_parts(
+                        [at[0], py, at[1]],
+                        at_y(&parts.pieces, py),
+                        at_y(&parts.junctions, py),
+                        at_y(&parts.kernel_pieces, py),
+                        at_y(&parts.kernel_junctions, py),
+                    );
                 }
             }
         }
