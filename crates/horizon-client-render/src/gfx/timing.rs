@@ -36,6 +36,8 @@ const FAILED: u8 = 5;
 struct Slot {
     buffer: wgpu::Buffer,
     state: Arc<AtomicU8>,
+    /// `GpuTimer::tag` when its frame began.
+    tag: u32,
 }
 
 pub struct GpuTimer {
@@ -50,6 +52,11 @@ pub struct GpuTimer {
     markers: Option<Markers>,
     /// Slots resolved in this frame's commands, read back once it is submitted.
     resolved: Vec<usize>,
+    /// Set by the caller before `begin`: the frame's tag, given back with its time in
+    /// `tagged` (HORIZON_TERRAIN_AB's variants); `tagged` stays empty unless `tagging`.
+    pub tag: u32,
+    pub tagging: bool,
+    pub tagged: Vec<(u32, f32)>,
 }
 
 /// The marker passes: the start's compute pipeline, and the end's shader and
@@ -99,6 +106,7 @@ impl GpuTimer {
                     mapped_at_creation: false,
                 }),
                 state: Arc::new(AtomicU8::new(FREE)),
+                tag: 0,
             })
             .collect();
         Some(Self {
@@ -130,6 +138,9 @@ impl GpuTimer {
                 }
             }),
             resolved: Vec::new(),
+            tag: 0,
+            tagging: false,
+            tagged: Vec::new(),
         })
     }
     pub fn begin(&mut self, encoder: &mut wgpu::CommandEncoder) {
@@ -151,6 +162,7 @@ impl GpuTimer {
         let slot = self.next;
         self.current = (self.slots[slot].state.load(Ordering::Acquire) == FREE).then_some(slot);
         let Some(slot) = self.current else { return };
+        self.slots[slot].tag = self.tag;
         let index = 2 * slot as u32;
         let Some(markers) = &self.markers else {
             encoder.write_timestamp(&self.queries, index);
@@ -262,7 +274,11 @@ impl GpuTimer {
                 let stamps: [u64; 2] = bytemuck::pod_read_unaligned(&data[..16]);
                 // A start marker that ran late (rare on Metal) leaves the frame untimed.
                 if let Some(ticks) = stamps[1].checked_sub(stamps[0]) {
-                    out.push((ticks as f64 * f64::from(self.period_ns) / 1e6) as f32);
+                    let ms = (ticks as f64 * f64::from(self.period_ns) / 1e6) as f32;
+                    out.push(ms);
+                    if self.tagging {
+                        self.tagged.push((slot.tag, ms));
+                    }
                 }
             }
             slot.buffer.unmap();

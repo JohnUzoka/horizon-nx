@@ -66,7 +66,48 @@ fn taa_light_key(
 }
 
 pub(in crate::gfx) fn terrain_shader() -> String {
-    wgsl_prefix::HDR_LIGHT.to_owned() + include_str!("terrain.wgsl")
+    let mut terrain = include_str!("terrain.wgsl").to_owned();
+    // terrain.wgsl's compile-time choices, so a build without them carries none of their code.
+    if terrain_ab::TerrainAb::wanted() {
+        terrain = terrain.replacen(
+            "const TERRAIN_AB: bool = false;",
+            "const TERRAIN_AB: bool = true;",
+            1,
+        );
+    }
+    if nearest_texels() {
+        terrain = terrain.replacen(
+            "const NEAREST_TEXELS: bool = false;",
+            "const NEAREST_TEXELS: bool = true;",
+            1,
+        );
+    }
+    wgsl_prefix::HDR_LIGHT.to_owned() + &terrain
+}
+
+/// `HORIZON_NEAREST_TEXELS=1` (read once): with no texture filtering, terrain sprites take the
+/// nearest texel from the sampler, their mip levels still blended, instead of terrain.wgsl's
+/// `sample_nearest` working out a crisp texel from a linear sampler. Build 40's look within a
+/// level (it also took the nearest level); much cheaper on the Switch's GM20B.
+fn nearest_texels() -> bool {
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var("HORIZON_NEAREST_TEXELS").as_deref() == Ok("1"));
+    *ON
+}
+
+/// The terrain sprites' sampler for a Texture Filtering option (`filtering`) and anisotropy.
+fn terrain_sampler(filtering: u32, anisotropy: u16) -> wgpu::SamplerDescriptor<'static> {
+    if filtering == 0 && nearest_texels() {
+        wgpu::SamplerDescriptor {
+            label: Some("Block sprites (nearest texels)"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..SPRITE_NEAREST
+        }
+    } else {
+        sprite_sampler_descriptor(anisotropy)
+    }
 }
 
 fn border_shader() -> String {
@@ -478,6 +519,16 @@ fn packed_wanted() -> bool {
     std::env::var("HORIZON_PACKED_QUADS").as_deref() != Ok("0")
 }
 
+/// Whether solid terrain draws in two passes (`split_solid`): the opaque quads first through
+/// `fs_opaque`, which never discards, then the cutout ones. Where a discard costs the GPU its
+/// hidden surface removal: Apple's tiled GPUs (Metal), and the Switch's GM20B (deko3d and NVK),
+/// where the forest benchmark's heavy canopy frames took 9.5 ms less GPU time split (an in-run
+/// A/B, `HORIZON_TERRAIN_AB=0,4`). Elsewhere the second pass doubles the solid draw calls for
+/// nothing.
+fn split_solid_terrain(backend: wgpu::Backend) -> bool {
+    backend == wgpu::Backend::Metal || cfg!(target_os = "horizon")
+}
+
 pub(crate) mod animate;
 mod arena;
 pub mod capture;
@@ -572,6 +623,7 @@ mod off_page;
 use off_page::move_off_page;
 pub mod submit;
 mod sunrise_fan;
+mod terrain_ab;
 mod timing;
 pub mod translucency;
 pub(crate) mod upload;
@@ -1524,6 +1576,8 @@ pub struct Renderer {
     /// (see `startup_step`).
     first_frame: FirstFrame,
     gpu_timer: Option<timing::GpuTimer>,
+    /// `HORIZON_TERRAIN_AB`'s in-run variants of solid terrain (`terrain_ab`).
+    terrain_ab: Option<terrain_ab::TerrainAb>,
     /// GPU frame times (ms) read back since the caller last drained them.
     pub gpu_times: Vec<f32>,
     /// The last lightmap written, RGBA rows of sky level by block level
@@ -3295,7 +3349,7 @@ impl Renderer {
                 ..Default::default()
             });
         let sprite_views = sprite_views(&sprite_textures, &sprite_unused, None);
-        let sprite_sampler = device.create_sampler(&sprite_sampler_descriptor(1));
+        let sprite_sampler = device.create_sampler(&terrain_sampler(0, 1));
         let sprite_nearest = device.create_sampler(&SPRITE_NEAREST);
         let lightmap = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Lightmap"),
@@ -4316,9 +4370,13 @@ impl Renderer {
             .flags
             .contains(wgpu::DownlevelFlags::INDIRECT_EXECUTION);
         let flat_wanted = flat::wanted(&adapter, &device);
-        // Metal draws solid terrain in two passes (`split_solid`): meshes put all
-        // their opaque quads first, so each pass draws its part in a run or two.
-        crate::mesher::group_parts(adapter.get_info().backend == wgpu::Backend::Metal);
+        // Two solid passes where `split_solid_terrain` says: meshes put all their opaque
+        // quads first, so each pass draws its part in a run or two.
+        let terrain_ab = terrain_ab::TerrainAb::from_env();
+        crate::mesher::group_parts(
+            split_solid_terrain(adapter.get_info().backend)
+                || terrain_ab.as_ref().is_some_and(|ab| ab.splits()),
+        );
         // Readable as storage where flat draws run: a shader pack's terrain program reads them.
         let arena = arena::Arena::new(
             &device,
@@ -4600,6 +4658,7 @@ impl Renderer {
                 FirstFrame::Drawn
             },
             gpu_timer,
+            terrain_ab,
             gpu_times: Vec::new(),
             lightmap_pixels: [0; 16 * 16 * 4],
             last_wait: std::time::Duration::ZERO,
@@ -7263,8 +7322,53 @@ impl Renderer {
         self.max_anisotropy = anisotropy;
         self.sprite_sampler = self
             .device
-            .create_sampler(&sprite_sampler_descriptor(anisotropy));
+            .create_sampler(&terrain_sampler(filtering, anisotropy));
         self.rebuild_terrain_group();
+    }
+    /// `HORIZON_TERRAIN_AB`'s bits 16 and 128 (`terrain_ab::sampler_variant`): this frame's
+    /// terrain group samples the sprites with Build 40's nearest sampler or a variant of either
+    /// sampler's mip filter; the groups not in use wait in `groups`.
+    fn swap_terrain_ab_group(&mut self, ab: u32) {
+        let Some(t) = &mut self.terrain_ab else {
+            return;
+        };
+        let want = terrain_ab::sampler_variant(ab);
+        if want == t.current {
+            return;
+        }
+        let group = t.groups[want].take().unwrap_or_else(|| {
+            let usual = sprite_sampler_descriptor(self.max_anisotropy);
+            let nearest = wgpu::SamplerDescriptor {
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                ..SPRITE_NEAREST
+            };
+            let descriptor = match want {
+                0 => usual,
+                1 => nearest,
+                2 => wgpu::SamplerDescriptor {
+                    mipmap_filter: wgpu::MipmapFilterMode::Linear,
+                    ..nearest
+                },
+                _ => wgpu::SamplerDescriptor {
+                    mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+                    ..usual
+                },
+            };
+            terrain_group(
+                &self.device,
+                "Horizon terrain resources (terrain A/B sampler)",
+                &self.terrain_layout,
+                &self.globals,
+                &self.sprite_views,
+                &self.device.create_sampler(&descriptor),
+                &self.lightmap_view,
+                &self.lightmap_sampler,
+                &self.emission_stats.view,
+            )
+        });
+        t.groups[t.current] = Some(std::mem::replace(&mut self.group, group));
+        t.current = want;
     }
     fn rebuild_terrain_group(&mut self) {
         self.sprite_views = sprite_views(
@@ -7272,6 +7376,10 @@ impl Renderer {
             &self.sprite_unused,
             Some(self.mipmaps + 1),
         );
+        if let Some(t) = &mut self.terrain_ab {
+            t.groups = [None, None, None, None];
+            t.current = 0;
+        }
         self.group = terrain_group(
             &self.device,
             "Horizon terrain resources",
@@ -7678,6 +7786,9 @@ impl Renderer {
         debug_assert_eq!(output.encoding, self.hdr.as_ref().map(|hdr| hdr.output));
         // Its steps as spans (HORIZON_SPIKES): each lap names the step that just ended.
         let mut laps = crate::spans::laps();
+        // This frame's `HORIZON_TERRAIN_AB` variant bits (terrain.wgsl's `terrain_ab`).
+        let ab = self.terrain_ab.as_mut().map_or(0, |a| a.next_frame());
+        self.swap_terrain_ab_group(ab);
         let landing = Instant::now();
         self.land_frame();
         // Waiting for the previous frame (offscreen: at most two on the GPU), not work.
@@ -8130,7 +8241,7 @@ impl Renderer {
                 } else {
                     0.0
                 },
-                0.0,
+                ab as f32,
             ],
             hdr_light: [
                 0.0,
@@ -8672,11 +8783,14 @@ impl Renderer {
         self.phase2_pages.clear();
         self.solid_runs.clear();
         self.phase2_runs.clear();
-        // On Metal, phase 1 goes the opaque quads of every list, then the cutout
-        // ones (`Part`), each solid pass drawing its own: `[..opaque_draws]`,
-        // then the rest; phase 2 likewise. A fading list's quads all draw in the
-        // cutout pass.
-        let split_solid = self.info.backend == wgpu::Backend::Metal && !msaa_on;
+        // Where solid terrain draws in two passes (`split_solid_terrain`), phase 1 goes the
+        // opaque quads of every list, then the cutout ones (`Part`), each solid pass drawing
+        // its own: `[..opaque_draws]`, then the rest; phase 2 likewise. A fading list's quads
+        // all draw in the cutout pass. A GPU frame's solid quads draw in one.
+        // `HORIZON_TERRAIN_AB`'s bit 4 turns it the other way.
+        let ab_toggle = ab & terrain_ab::SPLIT != 0;
+        let split_solid =
+            (split_solid_terrain(self.info.backend) != ab_toggle) && !msaa_on && !gpu_frame;
         let parts = |fading: bool| -> &'static [(u8, Quads)] {
             match (split_solid, fading) {
                 (false, _) => &[(0, Quads::All)],
@@ -8685,10 +8799,6 @@ impl Renderer {
             }
         };
         let (mut opaque_draws, mut phase2_opaque) = (0, 0);
-        debug_assert!(
-            !(split_solid && gpu_frame),
-            "GPU culling is never offered on Metal"
-        );
         // In a GPU frame the GPU draws the solid quads of the whole sections within the
         // render distance that have records (`SectionGpu::gpu_draws_solid`), and the walk
         // listed those among them with translucent quads. Here stay those fading in or out
@@ -9982,6 +10092,8 @@ impl Renderer {
             ..Default::default()
         });
         if let Some(timer) = &mut self.gpu_timer {
+            timer.tag = ab;
+            timer.tagging = self.terrain_ab.is_some();
             timer.begin(&mut encoder);
         }
         // The frame's statistics (`show_stats`): a CPU frame's at once; a GPU frame's when the
@@ -10334,10 +10446,6 @@ impl Renderer {
             let multisampled = m.msaa.filter(|_| msaa.is_some());
             multisampled.map_or(m.solid, |(solid, _)| solid)
         });
-        // Two solid passes only where a discard costs the GPU its hidden surface
-        // removal: Apple's tiled GPUs, behind Metal. Elsewhere the second pass
-        // would double the solid draw calls and vertex work for nothing.
-        let split_solid = self.info.backend == wgpu::Backend::Metal && !msaa_on;
         let translucent_pipeline = material.map_or(&self.translucent, |m| m.translucent);
         let pack_flat = material.and_then(|m| m.flat);
         let pack_flat_msaa = material
@@ -11987,6 +12095,9 @@ impl Renderer {
         if let Some(timer) = &mut self.gpu_timer {
             timer.submitted(&self.queue);
             timer.collect(&self.device, &mut self.gpu_times);
+            if let Some(ab) = &mut self.terrain_ab {
+                ab.collect(&mut timer.tagged);
+            }
         }
         self.pack_timing_submitted();
         if let Some(timer) = &mut self.own_timing {
