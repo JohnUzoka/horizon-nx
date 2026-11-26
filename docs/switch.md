@@ -81,13 +81,13 @@ deko3d without the changes in the next table; "now" is the `deko3d` branch with 
 
 | | NVK, packed terrain vertices (3 runs) | NVK, wide terrain vertices (1) | Build 40, NVK (1) | deko3d before (2) | deko3d now (2) | deko3d now, `HORIZON_NEAREST_TEXELS=1` (2) |
 | --- | --- | --- | --- | --- | --- | --- |
-| avg FPS | 24.4 | 36.9 | 42.2 | 21.2 | 28.9 | 34.0 |
-| 1% low FPS | 14.3 | 23.3 | 24.4 | 11.6 | 18.5, 6.1 | 21.5 |
-| p50 / p99 frame ms | 35.8 / 69.5 | 24.2 / 42.7 | 20.1 / 40.2 | 49.6 / 83.2 | 31.1 / 53.0 | 26.4 / 45.2 |
-| CPU p50 ms | 7.1 | 6.3 | 5.2 | 31.1 | 6.2 | 5.7 |
-| GPU p50 ms | 34.2 | 23.0 | 16.4 | 32.4 | 30.1 | 26.0 |
+| avg FPS | 24.4 | 36.9 | 42.2 | 21.2 | 35.7 | 41.3 |
+| 1% low FPS | 14.3 | 23.3 | 24.4 | 11.6 | 6.3, 23.8 | 26.7 |
+| p50 / p99 frame ms | 35.8 / 69.5 | 24.2 / 42.7 | 20.1 / 40.2 | 49.6 / 83.2 | 25.1 / 40.4 | 21.5 / 35.4 |
+| CPU p50 ms | 7.1 | 6.3 | 5.2 | 31.1 | 5.4 | 5.0 |
+| GPU p50 ms | 34.2 | 23.0 | 16.4 | 32.4 | 24.2 | 20.2 |
 
-"deko3d now", 1% low: one value per run; the second run had a one-second hitch.
+"deko3d now", 1% low: one value per run; the first run had a one-second hitch.
 
 Packed terrain vertices (the default; `HORIZON_PACKED_QUADS=0` turns them off) cost NVK about
 11 ms of median GPU and make no difference on deko3d (25.6 FPS with wide ones).
@@ -118,6 +118,11 @@ and the emissive overlays' second sprite path doubled the code. Both are now pip
 Texture Filtering, or a frame with emissive overlays (OptiFine-style packs, native mods) in a
 renderer built without them, has the game make the renderer again, as 4x MSAA does. Split-screen's
 renderers aren't made again, so they keep reading both per frame. The image doesn't change.
+
+The other options' pipelines run too: RGSS (Texture Filtering 1) at GPU p50 47.5 and 46.1 ms
+against 50.1 ms before (one run), anisotropic (2) at 26.5 ms (one run). RGSS's four taps keep it
+the slowest option on the Switch, with or without this change: its 1% low was 1.7–5.3 FPS on both
+builds.
 
 Forest benchmark, GPU p50 (two runs each; builds of the `deko3d` branch from the same day; the last
 row's also has the GLSL loop fix of `third_party/naga`, about 0.5 ms):
@@ -152,6 +157,7 @@ What moved deko3d from "before" to "now", as measured on the console:
 | Occlusion culling on deko3d | −2.4 ms GPU where terrain is hidden; about +1 ms in this flight |
 | Queue command memory 64 KiB → 1 MiB | `dkQueueSubmitCommands` 16–30 → 0.01 ms per frame; 1% low 6.2 → 16.1 FPS, p99 116.5 → 60 ms |
 | Solid terrain in two passes (opaque, then cutout with `discard`) and sprites sampled at an explicit level | GPU 33.7 → 30.1 ms; 25.7 → 28.9 FPS |
+| Solid terrain built for the Texture Filtering option and the emissive overlays in use ([above](#solid-terrain-against-build-40)) | GPU 30.1 → 24.2 ms; 28.9 → 35.7 FPS |
 
 Tried without gain: hardware compression of colour targets (`DkImageFlags_HwCompression`: GPU 36.3
 against 35.9 ms) and Mailbox (above).
