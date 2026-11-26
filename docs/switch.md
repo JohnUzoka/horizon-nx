@@ -79,19 +79,25 @@ Horizon's own benchmark (`--benchmark forest`, [Benchmark your own machine](benc
 render distance 12, 1280x720, stock clocks, the 12-second forest flight, on one console. "Before" is
 deko3d without the changes in the next table; "now" is the `deko3d` branch with them.
 
-| | NVK, packed terrain vertices (3 runs) | NVK, wide terrain vertices (1) | Build 40, NVK (1) | deko3d before (2) | deko3d now (2) |
-| --- | --- | --- | --- | --- | --- |
-| avg FPS | 24.4 | 36.9 | 42.2 | 21.2 | 25.7 |
-| 1% low FPS | 14.3 | 23.3 | 24.4 | 11.6 | 16.1 |
-| p50 / p99 frame ms | 35.8 / 69.5 | 24.2 / 42.7 | 20.1 / 40.2 | 49.6 / 83.2 | 34.7 / 60.0 |
-| CPU p50 ms | 7.1 | 6.3 | 5.2 | 31.1 | 6.6 |
-| GPU p50 ms | 34.2 | 23.0 | 16.4 | 32.4 | 33.8 |
+| | NVK, packed terrain vertices (3 runs) | NVK, wide terrain vertices (1) | Build 40, NVK (1) | deko3d before (2) | deko3d now (2) | deko3d now, `HORIZON_NEAREST_TEXELS=1` (2) |
+| --- | --- | --- | --- | --- | --- | --- |
+| avg FPS | 24.4 | 36.9 | 42.2 | 21.2 | 28.9 | 34.0 |
+| 1% low FPS | 14.3 | 23.3 | 24.4 | 11.6 | 18.5, 6.1 | 21.5 |
+| p50 / p99 frame ms | 35.8 / 69.5 | 24.2 / 42.7 | 20.1 / 40.2 | 49.6 / 83.2 | 31.1 / 53.0 | 26.4 / 45.2 |
+| CPU p50 ms | 7.1 | 6.3 | 5.2 | 31.1 | 6.2 | 5.7 |
+| GPU p50 ms | 34.2 | 23.0 | 16.4 | 32.4 | 30.1 | 26.0 |
+
+"deko3d now", 1% low: one value per run; the second run had a one-second hitch.
 
 Packed terrain vertices (the default; `HORIZON_PACKED_QUADS=0` turns them off) cost NVK about
 11 ms of median GPU and make no difference on deko3d (25.6 FPS with wide ones). Against NVK with wide
-vertices, deko3d is slower: solid terrain is 93% of the heavy frame on both backends, and takes about
-56 ms on deko3d against about 38 ms on NVK for the same 650–775 draws. Build 40, whose terrain shader
-is simpler, takes 24–27 ms. Closing both gaps is the current work.
+vertices, deko3d is still slower, and the gap is solid terrain's fragment shading: in in-run A/Bs
+of the terrain shader, removing sample_nearest's texel snapping saves 14 ms of a heavy frame's GPU,
+removing the fog and emission finish 7.6 ms, and a minimal vertex shader nothing.
+
+`HORIZON_NEAREST_TEXELS=1` (in `env.txt`) samples terrain sprites as Build 40 does: the sampler
+takes the nearest texel, with no snapping in the shader, and mips stay blended. It changes the image
+(sharper texel edges up close), so it's off by default.
 
 What moved deko3d from "before" to "now", as measured on the console:
 
@@ -102,13 +108,14 @@ What moved deko3d from "before" to "now", as measured on the console:
 | Barriers only for real hazards | full barriers ~43 → 9 per frame |
 | Occlusion culling on deko3d | −2.4 ms GPU where terrain is hidden; about +1 ms in this flight |
 | Queue command memory 64 KiB → 1 MiB | `dkQueueSubmitCommands` 16–30 → 0.01 ms per frame; 1% low 6.2 → 16.1 FPS, p99 116.5 → 60 ms |
+| Solid terrain in two passes (opaque, then cutout with `discard`) and sprites sampled at an explicit level | GPU 33.7 → 30.1 ms; 25.7 → 28.9 FPS |
 
 Tried without gain: hardware compression of colour targets (`DkImageFlags_HwCompression`: GPU 36.3
 against 35.9 ms) and Mailbox (above).
 
 Both renderers are GPU-bound here. With Fifo a frame takes 33.4 or 50 ms (two or three refreshes),
-and deko3d's GPU time sits at the two-refresh line, so small GPU savings don't show in the FPS. By
-Resolution Scale (deko3d, one run each except 100%):
+so small GPU savings show in the FPS only when they move frames across that line. By Resolution
+Scale (deko3d before the two terrain passes, one run each except 100%):
 
 | Resolution Scale | GPU p50 ms | avg FPS |
 | --- | --- | --- |
