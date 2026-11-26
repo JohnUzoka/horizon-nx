@@ -132,7 +132,8 @@ Build 40 on NVK flies the same benchmark at 16.4 ms, 42.2 FPS; with Build 40's s
 build above was at 15.7 (`HORIZON_NEAREST_TEXELS=1`). Between 20.2 and 15.7 ms the two shaders
 still differ in the sprite sampled at the UV's gradients (`textureSampleGrad`, which keeps distant
 tiles' mip level across block seams) where Build 40 took implicit ones, the chunk fade-in's mix
-toward the fog colour, and today's wider vertex output; none of these is measured alone yet.
+toward the fog colour, and today's wider vertex output. Without the fade-in's mix (the harness
+build, one run) it was 19.3 against 20.2 ms; the mix is vanilla's visible fade-in, so it stays.
 
 Tried without gain: moving the vertex shader's colored-light loop first (39 → 32 registers in the
 section vertex shaders; 30.4 ms in one run against 30.1) and, earlier, a minimal vertex shader.
