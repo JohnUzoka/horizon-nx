@@ -955,15 +955,12 @@ impl<T> Graveyard<T> {
     }
 }
 
-/// Drops `items` on a short-lived thread of its own, as `chunk::free_columns` does for
-/// unloaded chunks; should the thread not start, they drop here.
+/// Drops `items` on the freeing thread, as `chunk::free_columns` does for unloaded chunks.
 pub fn free_later<T: Send + 'static>(items: Vec<T>) {
     if items.is_empty() {
         return;
     }
-    let _ = std::thread::Builder::new()
-        .name("Buffer freeing".into())
-        .spawn(move || drop(items));
+    crate::freeing::drop_later(items);
 }
 
 /// `create_buffer` with an out-of-memory failure returned instead of raised
