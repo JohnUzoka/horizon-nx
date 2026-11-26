@@ -203,6 +203,33 @@ Found while measuring input lag on deko3d; they apply to both renderers.
   of about 7 s) and then rewrote the shared file as version 2, which the release rejects. The rewrite
   now replaces only an unusable file and keeps 128 MiB of the card free.
 
+## Frame drops while playing
+
+`--benchmark travel` (render distance 12, the 32-second flight over new terrain, then four 4-second
+holds), two runs per build; frames of 50 ms or more are hitches at Fifo's 16.7 ms:
+
+| Build | travel avg FPS | 1% low FPS | max frame ms | frames ≥ 100 ms | threads created per 10 s |
+| --- | --- | --- | --- | --- | --- |
+| before | 48.0, 55.2 | 3.1, 15.7 | 2542, 458 | 4, 2 | 11.8, 11.7 |
+| `[Thread]` lines queued | 58.4, 56.6 | 39.8, 31.0 | 37.5, 37.1 | 0, 0 | 12.4, 11.9 |
+| ... and one audio device thread | 56.6, 56.6 | 31.2, 31.0 | 32.7, 36.2 | 0, 0 | 2.5, 2.3 |
+| ... and one freeing thread | 56.6, 58.3 | 31.2, 38.4 | 32.5, 40.5 | 0, 0 | 0.7, 0.7 |
+
+The holds ran at 60 FPS in every build. The hitches were frames of 0.3–2.5 s whose timed steps added
+up to a few ms, each with one thread created in it. horizon-nx wrote every thread's `[Thread]` line
+to the SD card on the creating thread, behind the log writer's lock, which the writer holds while
+it writes and syncs `log.txt` (a sync can take a second). The lines now go through the writer's
+queue. The threads came from the render thread: the audio output's device check started one every
+second (as `SoundEngine` looks at the devices), and freed buffers and unloaded chunk columns got one
+per batch. Each now has one long-lived thread.
+
+`HORIZON_SPIKE_LOG=MS` (in `env.txt`) logs each frame of `MS` or more with its timed steps, the
+threads created in it and the uploads waiting, and every 10 s a count of slow frames; each
+`[Thread]` line names its creator's return addresses (NRO offsets, `nm` of the ELF names them).
+What it still shows in this benchmark: the section arena growing a page (`arena_grow`, 63–65 ms
+on the render thread, about once a run) and frames waiting up to 90 ms for the GPU. Pausing (which
+saves) gave one frame of 135 ms before and 70 ms after the queued lines (one session each).
+
 ## Known issues
 
 - On the title screen, GPU time per frame grew from 6–8 ms to 19–23 ms after minutes in the menus
