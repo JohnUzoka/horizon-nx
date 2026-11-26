@@ -572,7 +572,7 @@ impl Arena {
         }) {
             let grown = self.grown(current, len);
             if (grown - current >= len || grown == self.page_limit)
-                && self.grow(device, encoder, index, grown)
+                && crate::spans::time("arena_grow", || self.grow(device, encoder, index, grown))
                 && let Some(start) = self.pages[index].as_mut().unwrap().free.take(len)
             {
                 return Some((index as u32, start));
@@ -586,7 +586,8 @@ impl Arena {
         .max(len)
         .min(self.page_limit);
         // A page just large enough when memory is short, for its buffer or its looks.
-        let (((buffer, host), looks), capacity) = match self.new_page(device, capacity) {
+        let made = crate::spans::time("arena_page", || self.new_page(device, capacity));
+        let (((buffer, host), looks), capacity) = match made {
             Some(made) => (made, capacity),
             None if capacity > len => (self.new_page(device, len)?, len),
             None => return None,

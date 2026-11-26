@@ -105,6 +105,18 @@ pub fn thread_logging() -> bool {
     THREAD_LOGGING.load(AtomicOrdering::Relaxed)
 }
 
+/// Threads created since launch, by anything (0 off the console).
+pub fn threads_created() -> u32 {
+    #[cfg(target_os = "horizon")]
+    {
+        horizon_stubs::THREADS_CREATED.load(AtomicOrdering::Relaxed)
+    }
+    #[cfg(not(target_os = "horizon"))]
+    {
+        0
+    }
+}
+
 #[cfg(target_os = "horizon")]
 pub mod horizon_stubs {
     use core::arch::asm;
@@ -692,7 +704,7 @@ pub mod horizon_stubs {
         placement: Option<(i32, u64)>,
     }
 
-    static THREADS_CREATED: AtomicU32 = AtomicU32::new(0);
+    pub(super) static THREADS_CREATED: AtomicU32 = AtomicU32::new(0);
 
     unsafe extern "C" {
         /// libnx's own `threadCreate`; `--wrap=threadCreate` gives it this name.
@@ -727,13 +739,18 @@ pub mod horizon_stubs {
         prio: c_int,
         cpuid: c_int,
     ) -> u32 {
+        // The creator's frame record: C between here and std (pthread_create) keeps x29 as it was.
+        let fp: u64;
+        unsafe { asm!("mov {}, x29", out(reg) fp, options(nomem, nostack, preserves_flags)) };
+        let mut creator = [0u32; CREATOR_FRAMES];
+        let creator_len = if super::thread_logging() { creator_chain(fp, &mut creator) } else { 0 };
         // Frees the stacks of detached threads that have exited before taking another one.
         close_detached_threads(Duration::ZERO);
         // malloc, not Box: this must not depend on whichever #[global_allocator] the game uses.
         let start = unsafe { malloc(size_of::<ThreadStart>()) }.cast::<ThreadStart>();
         let number = THREADS_CREATED.fetch_add(1, Ordering::Relaxed) + 1;
         if start.is_null() {
-            log_thread_created(number, stack_sz, prio, cpuid, LIBNX_OUT_OF_MEMORY, None);
+            log_thread_created(number, stack_sz, prio, cpuid, LIBNX_OUT_OF_MEMORY, None, &creator[..creator_len]);
             return LIBNX_OUT_OF_MEMORY;
         }
         let policy = super::thread_core_policy();
@@ -777,7 +794,7 @@ pub mod horizon_stubs {
             } else {
                 None
             };
-            log_thread_created(number, stack_sz, prio, create_core, rc, placed.as_ref());
+            log_thread_created(number, stack_sz, prio, create_core, rc, placed.as_ref(), &creator[..creator_len]);
             if rc != 0 {
                 free(start.cast());
             }
@@ -891,6 +908,50 @@ pub mod horizon_stubs {
         Some(unsafe { svcSetThreadCoreMask(CUR_THREAD_HANDLE, ideal, mask) })
     }
 
+    /// Return addresses logged for a thread's creator.
+    const CREATOR_FRAMES: usize = 16;
+
+    /// Fills `out` with the return addresses (NRO offsets) of the frame records from `fp` up,
+    /// nearest first, and returns how many. Each record must lie above the last, inside the
+    /// stack's mapping, and hold an address just after a call in the NRO's code.
+    #[inline(never)]
+    fn creator_chain(mut fp: u64, out: &mut [u32; CREATOR_FRAMES]) -> usize {
+        let base = nro_base();
+        let mut info = ffi::MemoryInfo::default();
+        let mut page = 0u32;
+        let code_end = if unsafe { ffi::svcQueryMemory(&mut info, &mut page, base) } == 0 && info.perm == 5 {
+            info.addr + info.size
+        } else {
+            nro_end()
+        };
+        if unsafe { ffi::svcQueryMemory(&mut info, &mut page, fp) } != 0 || info.perm & 1 == 0 {
+            return 0;
+        }
+        let (stack_start, stack_end) = (info.addr, info.addr + info.size);
+        let is_return = |address: u64| {
+            address & 3 == 0 && address >= base + 4 && address < code_end && {
+                let insn = unsafe { core::ptr::read_volatile((address - 4) as *const u32) };
+                insn & 0xFC00_0000 == 0x9400_0000 || insn & 0xFFFF_FC1F == 0xD63F_0000
+            }
+        };
+        let mut len = 0;
+        while len < CREATOR_FRAMES && fp & 7 == 0 && fp >= stack_start && fp + 16 <= stack_end {
+            let (next, ret) = unsafe {
+                (core::ptr::read_volatile(fp as *const u64), core::ptr::read_volatile((fp + 8) as *const u64))
+            };
+            if !is_return(ret) {
+                break;
+            }
+            out[len] = (ret - base) as u32;
+            len += 1;
+            if next <= fp {
+                break;
+            }
+            fp = next;
+        }
+        len
+    }
+
     /// Stack-only formatting: this runs inside `pthread_create`.
     #[inline(never)]
     fn log_thread_created(
@@ -900,12 +961,13 @@ pub mod horizon_stubs {
         cpuid: c_int,
         rc: u32,
         placement: Option<&CorePlacement>,
+        creator: &[u32],
     ) {
         let failed = rc != 0 || placement.is_some_and(|p| p.rc != 0);
         if !failed && !super::thread_logging() {
             return;
         }
-        let mut out = FixedBuf::<384>::new();
+        let mut out = FixedBuf::<640>::new();
         let _ = write!(
             out,
             "[Thread] #{number}: threadCreate with a {} KiB stack, priority {prio:#x}, core {cpuid}{}: ",
@@ -925,6 +987,12 @@ pub mod horizon_stubs {
             );
             if rc != 0 {
                 let _ = write!(out, " (applying the policy FAILED with {})", ResultCode(rc));
+            }
+        }
+        if !creator.is_empty() {
+            let _ = write!(out, "; creator's return addresses (NRO offsets):");
+            for ret in creator {
+                let _ = write!(out, " {ret:#x}");
             }
         }
         let _ = writeln!(out);

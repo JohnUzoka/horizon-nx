@@ -10161,6 +10161,9 @@ impl Game<'_> {
                     self.mapped_key_event(key, event.state == ElementState::Pressed, event.repeat)?;
                 }
                 WindowEvent::RedrawRequested => {
+                    if spike_log::threshold().is_some() {
+                        horizon_client::spans::record_here(true);
+                    }
                     horizon_client::spans::time("recover_device", || self.recover_device())?;
                     self.observe_fullscreen();
                     self.sync_ime();
@@ -10261,6 +10264,17 @@ impl Game<'_> {
                             ]);
                             self.frame_stats
                                 .record_block_entities(r.static_block_entity_frame_stats());
+                            spike_log::frame(
+                                &spike_log::Facts {
+                                    since_last_ms: ms(elapsed),
+                                    frame_ms: ms(now.elapsed()),
+                                    wait_ms: ms(r.last_wait),
+                                    gpu_ms: r.gpu_times.last().copied(),
+                                    uploads: self.pending_uploads.len(),
+                                    streaming: self.streaming.pending(),
+                                },
+                                &frame_spans,
+                            );
                         }
                         self.frame_stats.record_gpu(&r.gpu_times);
                         r.gpu_times.clear();

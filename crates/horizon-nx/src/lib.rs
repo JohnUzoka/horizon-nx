@@ -49,7 +49,7 @@ mod motion;
 
 pub use compat::{
     ThreadCorePolicy, set_thread_core_policy, set_thread_logging, thread_core_policy,
-    thread_logging,
+    thread_logging, threads_created,
 };
 #[cfg(target_os = "horizon")]
 pub use boost::loading_world;
