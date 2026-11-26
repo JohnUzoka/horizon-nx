@@ -28,6 +28,9 @@ pub(in crate::game) struct WorldLoad {
     progress: f32,
     /// The player's dimension and column at the last frame.
     place: Option<(Dim, (i32, i32))>,
+    /// The last frame a loading screen was up: [`LONGEST`] counts from it (an open can
+    /// take longer than that behind its screens).
+    screen_at: Option<Instant>,
 }
 
 impl WorldLoad {
@@ -110,6 +113,9 @@ impl Game<'_> {
         } else if screen {
             self.world_load_begins("loading screen");
         }
+        if screen {
+            self.world_load.screen_at = Some(now);
+        }
         let Some(since) = self.world_load.since else {
             return;
         };
@@ -124,7 +130,8 @@ impl Game<'_> {
             return;
         }
         self.world_load.checked = Some(now);
-        if !screen && now.saturating_duration_since(since) >= LONGEST {
+        let waited_from = self.world_load.screen_at.map_or(since, |at| at.max(since));
+        if !screen && now.saturating_duration_since(waited_from) >= LONGEST {
             return self.world_load_ends("gave up waiting for the view");
         }
         // As far as the server fills it: its view distance and one (`ViewArrival`).
