@@ -126,7 +126,7 @@ pub mod horizon_stubs {
     use std::time::{Duration, Instant};
 
     use crate::logging::{
-        FixedBuf, ResultCode, append_crash_file, ffi, nro_base, nro_end, start_boot_log,
+        FixedBuf, ResultCode, append_crash_file, ffi, nro_base, nro_end, queue_log, start_boot_log,
         sync_log, write_log,
     };
 
@@ -996,7 +996,8 @@ pub mod horizon_stubs {
             }
         }
         let _ = writeln!(out);
-        write_log(out.as_bytes());
+        // Queued: the creator may be the frame's thread, which mustn't wait for the SD card.
+        queue_log(out.as_bytes());
     }
 
     /// Runs on the new thread, after `set_thread_pointer`. Separate and not inlined so that
@@ -1033,7 +1034,12 @@ pub mod horizon_stubs {
                 "; TPIDR_EL0 {tpidr:#x} != libnx tls_tp {tls_tp:#x}: MISMATCH, thread_local! will fault"
             )
         };
-        write_log(out.as_bytes());
+        // A mismatch faults next, so that line is in log.txt before it returns.
+        if tpidr == tls_tp {
+            queue_log(out.as_bytes());
+        } else {
+            write_log(out.as_bytes());
+        }
     }
 
     // ---- Detached threads.
