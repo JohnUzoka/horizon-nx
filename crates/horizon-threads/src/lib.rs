@@ -564,7 +564,17 @@ fn idle() -> bool {
     unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE) != 0 }
 }
 
-#[cfg(not(any(target_os = "linux", target_vendor = "apple", windows)))]
+/// On the Switch the helpers' priority (`behind`, 0x3d). Every thread starts at 0x3b, the render
+/// and server threads included, so the stronghold ring search, the background far decoration and
+/// the prepared-data writer shared the cores evenly with the frame right after a world opened (an
+/// fps drop to ~20). Not lower: a chunk near a stronghold ring waits for the searches this thread
+/// has taken, and at 0x3f, behind the busy chunk workers, they barely ran.
+#[cfg(target_os = "horizon")]
+fn idle() -> bool {
+    behind()
+}
+
+#[cfg(not(any(target_os = "linux", target_vendor = "apple", windows, target_os = "horizon")))]
 fn idle() -> bool {
     false
 }
