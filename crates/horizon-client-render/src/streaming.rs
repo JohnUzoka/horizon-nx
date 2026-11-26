@@ -409,6 +409,20 @@ mod job_log {
             jobs.join(", "),
             busy.as_secs_f64() / window.as_secs_f64(),
         );
+        // Where a generation job's time goes (`StageTimings`), every worker's chunks.
+        let stages = horizon_world::worldgen::generator::take_stage_totals();
+        if stages.chunks > 0 {
+            let each = |d: Duration| d.as_secs_f64() * 1000.0 / stages.chunks as f64;
+            log::info!(
+                "Horizon: generation stages over {} chunks, ms each: biomes {:.1}, structures {:.1}, noise {:.1}, surface {:.1}, carvers {:.1}",
+                stages.chunks,
+                each(stages.biomes),
+                each(stages.structures),
+                each(stages.noise),
+                each(stages.surface),
+                each(stages.carvers),
+            );
+        }
         *s = Sums {
             since: Some(now),
             count: [0; KINDS.len()],
