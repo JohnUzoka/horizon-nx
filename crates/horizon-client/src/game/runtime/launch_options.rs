@@ -90,6 +90,11 @@ impl Options {
     pub(super) fn is_client_start(&self) -> bool {
         self.execution_role.is_client() && !self.split_guest
     }
+    /// A splitscreen player's: its windows share the device with the others', so its renderer
+    /// is not made again for a setting alone (`follow_frame`).
+    pub(super) fn split(&self) -> bool {
+        self.paced_by_split || self.split_guest
+    }
     /// The name to join servers with: the one given, else the offline name kept
     /// next to options.txt (created on first use).
     pub(super) fn player_name(&self) -> String {

@@ -1407,6 +1407,18 @@ pub struct ScreenshotRequest {
     /// `Renderer::screenshot_result` for the owning thread's hook before encoding.
     pub background: bool,
 }
+/// What the terrain's pipelines are built for (terrain.wgsl's `TEXTURE_FILTERING` and
+/// `EMISSIVE_OVERLAYS`), by a renderer the game makes again when it changes
+/// (`Renderer::take_terrain_rebuild`). A path a pipeline leaves out costs it nothing: read every
+/// frame, the paths not taken still set the registers the Switch's GM20B runs a shader with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerrainBuild {
+    /// The Texture Filtering option: 0 none, 1 RGSS, 2 anisotropic.
+    pub filtering: u32,
+    /// Whether emissive overlays draw (native_emissive.rs): the resources have some. A frame
+    /// with overlays has the renderer made again with them.
+    pub emissive_overlays: bool,
+}
 /// A solid terrain pipeline without HDR output's lighting (terrain.wgsl's `HDR_LIGHTING`),
 /// for the frames HDR is off, and with it where the display offers HDR output: the
 /// lighting's code, even never run, slows the shader on Apple GPUs (~15% of the solid
@@ -1816,6 +1828,15 @@ pub struct Renderer {
     sprite_sampler: wgpu::Sampler,
     /// `Options.textureFiltering`: 0 none, 1 RGSS, 2 anisotropic.
     texture_filtering: u32,
+    /// What the terrain's pipelines are built for (`Renderer::new`'s `terrain_build`), `None`
+    /// where they read it every frame.
+    terrain_build: Option<TerrainBuild>,
+    /// A setting or frame has left `terrain_build`: the renderer is to be made again
+    /// (`take_terrain_rebuild`).
+    terrain_rebuild: bool,
+    /// Whether emissive overlays are built in or a frame has had some since: a renderer made
+    /// again from this one keeps them (`Renderer::new`).
+    emissive_seen: bool,
     /// The anisotropic sampler's clamp (`Options.maxAnisotropyValue`); 1 unless anisotropic.
     max_anisotropy: u16,
     lightmap_view: wgpu::TextureView,
@@ -2565,6 +2586,10 @@ impl Renderer {
         settings: &crate::graphics::Graphics,
         request: output::FrameRequest,
         display: output::DisplayReading,
+        // What the terrain's pipelines are built for (terrain.wgsl's pipeline constants); `None`
+        // reads it every frame, for a renderer the game doesn't make again when it changes
+        // (split-screen's, `take_terrain_rebuild`).
+        terrain_build: Option<TerrainBuild>,
     ) -> Result<Self> {
         let Opened {
             instance,
@@ -2732,9 +2757,21 @@ impl Renderer {
         if sprite_arrays > 1 {
             log::info!("Horizon: {layers} block textures in {sprite_arrays} arrays");
         }
+        // A frame had emissive overlays in the renderer this one is made again from.
+        let terrain_build = terrain_build.map(|b| TerrainBuild {
+            emissive_overlays: b.emissive_overlays || previous.is_some_and(|r| r.emissive_seen),
+            ..b
+        });
+        // Every pipeline of the terrain's module takes these: its sprite arrays, and the Texture
+        // Filtering option and emissive overlays it is built for (3 and 1: read every frame).
         let sprite_constants = [
             ("SPRITE_ARRAYS", f64::from(sprite_arrays)),
             ("SPRITE_SPLIT", f64::from(split)),
+            ("TEXTURE_FILTERING", terrain_build.map_or(3.0, |b| f64::from(b.filtering))),
+            (
+                "EMISSIVE_OVERLAYS",
+                terrain_build.map_or(1.0, |b| f64::from(u8::from(b.emissive_overlays))),
+            ),
         ];
         let terrain_entries = if surface_setup::mesh_shader::on(&device) {
             surface_setup::mesh_shader::terrain_entries()
@@ -2790,6 +2827,8 @@ impl Renderer {
         let plain_constants = [
             sprite_constants[0],
             sprite_constants[1],
+            sprite_constants[2],
+            sprite_constants[3],
             ("HDR_LIGHTING", 0.0),
         ];
         // `hud`: the debug crosshair, drawn with the HUD in the overlays' format, with its
@@ -4798,11 +4837,14 @@ impl Renderer {
             mip_levels,
             mipmaps: mip_levels - 1,
             terrain_layout: bindings,
-            terrain_sprites: sprite_constants.map(|(_, v)| v),
+            terrain_sprites: [sprite_constants[0].1, sprite_constants[1].1],
             sprite_split: split,
             sprite_sampler,
             sprite_nearest,
             texture_filtering: 0,
+            terrain_build,
+            terrain_rebuild: false,
+            emissive_seen: terrain_build.is_some_and(|b| b.emissive_overlays),
             max_anisotropy: 1,
             lightmap_view,
             lightmap_sampler,
@@ -7315,6 +7357,10 @@ impl Renderer {
         } else {
             1
         };
+        // Pipelines built for another option sample as that one: they are made again.
+        if self.terrain_build.is_some_and(|b| b.filtering != filtering) {
+            self.terrain_rebuild = true;
+        }
         if filtering == self.texture_filtering && anisotropy == self.max_anisotropy {
             return;
         }
@@ -7324,6 +7370,12 @@ impl Renderer {
             .device
             .create_sampler(&terrain_sampler(filtering, anisotropy));
         self.rebuild_terrain_group();
+    }
+    /// Whether the renderer is to be made again for terrain pipelines built for what the
+    /// settings and frames now call for (`TerrainBuild`): another Texture Filtering option
+    /// (`set_texture_filtering`), or emissive overlays where they were left out; true once.
+    pub fn take_terrain_rebuild(&mut self) -> bool {
+        std::mem::take(&mut self.terrain_rebuild)
     }
     /// `HORIZON_TERRAIN_AB`'s bits 16 and 128 (`terrain_ab::sampler_variant`): this frame's
     /// terrain group samples the sprites with Build 40's nearest sampler or a variant of either
@@ -7789,6 +7841,14 @@ impl Renderer {
         // This frame's `HORIZON_TERRAIN_AB` variant bits (terrain.wgsl's `terrain_ab`).
         let ab = self.terrain_ab.as_mut().map_or(0, |a| a.next_frame());
         self.swap_terrain_ab_group(ab);
+        // Emissive overlays where the terrain's pipelines left them out: the renderer is made
+        // again with them (`take_terrain_rebuild`), and keeps them from then on.
+        if !frame.emissive_layers.is_empty()
+            && self.terrain_build.is_some_and(|b| !b.emissive_overlays)
+        {
+            self.emissive_seen = true;
+            self.terrain_rebuild = true;
+        }
         let landing = Instant::now();
         self.land_frame();
         // Waiting for the previous frame (offscreen: at most two on the GPU), not work.

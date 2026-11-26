@@ -276,6 +276,7 @@ fn fixture(window: Arc<Window>) -> Result<(), Box<dyn std::error::Error>> {
         &client::graphics::Graphics::default(),
         Default::default(),
         Default::default(),
+        None,
     ))?;
     if std::env::args().any(|a| a == "--bench") {
         return bench(&mut renderer, out);

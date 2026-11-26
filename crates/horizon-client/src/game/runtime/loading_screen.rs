@@ -358,6 +358,7 @@ impl Loading {
                     self.settings.file.int("textureFiltering"),
                     self.settings.file.int("maxAnisotropyBit"),
                 ),
+                !options.split(),
             )
         })?;
         log::info!(
