@@ -162,6 +162,14 @@ struct Inner {
     /// Workers that freed their buffers and took no job since.
     released: Padded<AtomicUsize>,
     threads: Padded<AtomicUsize>,
+    /// Workers that may take a job now: worker `i` runs only while `i < active`.
+    /// All of them while a world loads ([`Pool::set_loading`]), `playing` otherwise.
+    active: Padded<AtomicUsize>,
+    /// The workers that run while playing (at most `threads`).
+    playing: usize,
+    /// Signalled, under `sleep`, when `active` grows: the workers past it wait here,
+    /// never on `wake`, so they don't take a notify meant for a worker that may run.
+    gate: Condvar,
     idle_release: Duration,
 }
 
@@ -185,6 +193,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 static CONFIGURED: AtomicUsize = AtomicUsize::new(0);
+static CONFIGURED_LOADING: AtomicUsize = AtomicUsize::new(0);
 static POOL: OnceLock<Pool> = OnceLock::new();
 
 /// The number of workers the machine gets by default: one thread per core
@@ -195,26 +204,41 @@ pub fn default_threads() -> usize {
     crate::default_workers()
 }
 
-/// Size the process's pool before its first use (later calls change
-/// nothing): `threads` workers, or `HORIZON_JOB_THREADS` when it is set.
-pub fn configure(threads: usize) {
+/// Size the process's pool before its first use (later calls change nothing):
+/// `threads` workers run while playing, `loading` (at least `threads`) while a
+/// world loads ([`set_loading`]). `HORIZON_JOB_THREADS` sets both instead, and
+/// `HORIZON_LOAD_JOB_THREADS` the loading count alone.
+pub fn configure(threads: usize, loading: usize) {
     CONFIGURED.store(threads.max(1), Ordering::Relaxed);
+    CONFIGURED_LOADING.store(loading.max(threads).max(1), Ordering::Relaxed);
+}
+
+fn env_threads(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
 }
 
 /// The process's pool, started on first use.
 pub fn pool() -> &'static Pool {
     POOL.get_or_init(|| {
-        let threads = std::env::var("HORIZON_JOB_THREADS")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or_else(|| match CONFIGURED.load(Ordering::Relaxed) {
-                0 => default_threads(),
-                n => n,
-            });
+        let (playing, loading) = match env_threads("HORIZON_JOB_THREADS") {
+            Some(n) => (n, n),
+            None => match CONFIGURED.load(Ordering::Relaxed) {
+                0 => (default_threads(), default_threads()),
+                n => (n, CONFIGURED_LOADING.load(Ordering::Relaxed).max(n)),
+            },
+        };
+        let loading = env_threads("HORIZON_LOAD_JOB_THREADS").map_or(loading, |n| n.max(playing));
         // The name the crash reports know a worker by (vanilla's `Util` workers).
-        Pool::new(threads, "horizon-worker")
+        Pool::gated(playing, loading, "horizon-worker")
     })
+}
+
+/// [`Pool::set_loading`] on the process's pool.
+pub fn set_loading(loading: bool) {
+    pool().set_loading(loading);
 }
 
 impl Pool {
@@ -224,9 +248,19 @@ impl Pool {
         Self::with_idle_release(threads, name, IDLE_RELEASE)
     }
 
+    /// A pool of `loading` workers of which `playing` take jobs until
+    /// [`Pool::set_loading`] lets them all.
+    pub fn gated(playing: usize, loading: usize, name: &str) -> Self {
+        Self::named(playing, loading, name, IDLE_RELEASE)
+    }
+
     /// [`Pool::new`] whose workers free their buffers after `idle_release`.
     pub fn with_idle_release(threads: usize, name: &str, idle_release: Duration) -> Self {
-        Self::with_spawner(threads, idle_release, |worker, i| {
+        Self::named(threads, threads, name, idle_release)
+    }
+
+    fn named(playing: usize, threads: usize, name: &str, idle_release: Duration) -> Self {
+        Self::with_spawner(playing, threads, idle_release, |worker, i| {
             horizon_guest_stack::builder()
                 .name(format!("{name}-{i}"))
                 .spawn(move || {
@@ -238,10 +272,13 @@ impl Pool {
     }
 
     fn with_spawner(
+        playing: usize,
         threads: usize,
         idle_release: Duration,
         mut spawn: impl FnMut(Arc<Inner>, usize) -> std::io::Result<()>,
     ) -> Self {
+        let threads = threads.max(playing).max(1);
+        let playing = playing.clamp(1, threads);
         let inner = Arc::new(Inner {
             sources: RwLock::new(Vec::new()),
             next_id: AtomicU64::new(0),
@@ -252,12 +289,15 @@ impl Pool {
             finished: Condvar::new(),
             far: Padded::new(AtomicUsize::new(0)),
             released: Padded::new(AtomicUsize::new(0)),
-            threads: Padded::new(AtomicUsize::new(threads.max(1))),
+            threads: Padded::new(AtomicUsize::new(threads)),
+            active: Padded::new(AtomicUsize::new(playing)),
+            playing,
+            gate: Condvar::new(),
             idle_release,
         });
         let mut started = 0;
         let mut last_error = None;
-        for i in 0..threads.max(1) {
+        for i in 0..threads {
             match spawn(inner.clone(), i) {
                 Ok(()) => started += 1,
                 Err(error) => last_error = Some(error),
@@ -274,10 +314,33 @@ impl Pool {
         }
     }
 
-    /// The workers: the size of a source's [`PerWorker`] and of the work it
-    /// keeps queued.
+    /// The workers: the size of a source's [`PerWorker`] and of the most work
+    /// it keeps queued.
     pub fn threads(&self) -> usize {
         self.threads
+    }
+
+    /// The workers that may take a job now: what a source keeps queued for.
+    pub fn active(&self) -> usize {
+        self.inner.active.load(Ordering::Relaxed).min(self.threads)
+    }
+
+    /// A world is loading (its loading screens, its spawn area, the view after a
+    /// teleport): every worker takes jobs. Otherwise only the playing count does,
+    /// so play keeps cores for the render and server threads; a worker past it
+    /// ends its job, frees its buffers and waits.
+    pub fn set_loading(&self, loading: bool) {
+        let active = if loading {
+            self.threads
+        } else {
+            self.inner.playing
+        };
+        let before = self.inner.active.swap(active, Ordering::SeqCst);
+        if active > before {
+            // A gated worker checks `active` holding `sleep`.
+            drop(lock(&self.inner.sleep));
+            self.inner.gate.notify_all();
+        }
     }
 
     /// Add a source; its jobs run until the registration is dropped.
@@ -371,9 +434,9 @@ impl Drop for Registration {
 
 /// The most urgent queued job's source, counted as running, if any may run now.
 fn choose(inner: &Inner) -> Option<(Arc<Entry>, bool)> {
-    let threads = inner.threads.load(Ordering::Relaxed);
-    // Far work keeps one worker free for near work (when there are two or more).
-    let far_cap = threads.saturating_sub(1).max(1);
+    let active = inner.active.load(Ordering::Relaxed);
+    // Far work keeps one worker free for near work (when two or more may run).
+    let far_cap = active.saturating_sub(1).max(1);
     let sources = inner.sources.read().unwrap_or_else(|e| e.into_inner());
     let mut skip_far = false;
     loop {
@@ -462,6 +525,26 @@ fn work(inner: &Inner, worker: usize) {
     let mut idle_since = Instant::now();
     let mut release_seen = crate::release_seen();
     loop {
+        if worker >= inner.active.load(Ordering::SeqCst) {
+            // Past the playing count while no world loads: free this worker's
+            // buffers and wait for the next load.
+            if !released {
+                released = true;
+                release_worker(inner, worker, &mut release_seen);
+            }
+            let sleep = lock(&inner.sleep);
+            let (sleep, wait) = inner
+                .gate
+                .wait_timeout_while(sleep, crate::RELEASE_POLL, |_| {
+                    worker >= inner.active.load(Ordering::SeqCst)
+                })
+                .unwrap_or_else(|e| e.into_inner());
+            drop(sleep);
+            if wait.timed_out() && crate::release_asked(&mut release_seen) {
+                crate::release_free_memory();
+            }
+            continue;
+        }
         let epoch = inner.epoch.load(Ordering::SeqCst);
         if let Some((entry, far)) = choose(inner) {
             crate::server_core::leave_reserved();
@@ -529,29 +612,35 @@ fn work(inner: &Inner, worker: usize) {
         // Nothing to do for a while (a server nobody is on, a player standing
         // still): free this worker's buffers until the next job needs them.
         released = true;
-        let last = inner.released.fetch_add(1, Ordering::Relaxed) + 1
-            == inner.threads.load(Ordering::Relaxed);
-        let sources: Vec<_> = inner
-            .sources
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|e| e.source.clone())
-            .collect();
-        for source in &sources {
-            let _ = catch_unwind(AssertUnwindSafe(|| source.idle(worker)));
-        }
-        if last {
-            for source in &sources {
-                let _ = catch_unwind(AssertUnwindSafe(|| source.all_idle()));
-            }
-        }
-        // The allocator keeps freed pages until memory runs short: hand back
-        // what this worker just freed (its own heap), and the shared arenas'
-        // once every worker has.
-        crate::release_asked(&mut release_seen);
-        crate::release_free_memory();
+        release_worker(inner, worker, &mut release_seen);
     }
+}
+
+/// Worker `worker` frees what every source keeps for it (and what they share, once
+/// every worker has), then gives the allocator's free pages back.
+fn release_worker(inner: &Inner, worker: usize, release_seen: &mut u64) {
+    let last = inner.released.fetch_add(1, Ordering::Relaxed) + 1
+        == inner.threads.load(Ordering::Relaxed);
+    let sources: Vec<_> = inner
+        .sources
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|e| e.source.clone())
+        .collect();
+    for source in &sources {
+        let _ = catch_unwind(AssertUnwindSafe(|| source.idle(worker)));
+    }
+    if last {
+        for source in &sources {
+            let _ = catch_unwind(AssertUnwindSafe(|| source.all_idle()));
+        }
+    }
+    // The allocator keeps freed pages until memory runs short: hand back
+    // what this worker just freed (its own heap), and the shared arenas'
+    // once every worker has.
+    crate::release_asked(release_seen);
+    crate::release_free_memory();
 }
 
 #[cfg(test)]
@@ -559,7 +648,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "GuestWorkerUnavailable")]
     fn all_worker_spawn_failures_refuse_the_pool() {
-        super::Pool::with_spawner(2, super::IDLE_RELEASE, |_, _| {
+        super::Pool::with_spawner(2, 2, super::IDLE_RELEASE, |_, _| {
             Err(std::io::Error::other("injected stack reservation refusal"))
         });
     }
@@ -933,5 +1022,69 @@ mod tests {
             assert!(Instant::now() < deadline, "the worker died with the panic");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// A gated pool runs its playing count of jobs at once, all its workers while
+    /// loading, and the playing count again once loading ends.
+    #[test]
+    fn loading_lets_every_worker_run() {
+        struct Wide {
+            left: AtomicUsize,
+            running: AtomicUsize,
+            peak: AtomicUsize,
+        }
+        impl Source for Wide {
+            fn next(&self) -> Option<Rank> {
+                (self.left.load(Ordering::SeqCst) > 0).then_some(Rank::new(Class::Near, 0))
+            }
+            fn run(&self, _worker: usize) -> bool {
+                let mut left = self.left.load(Ordering::SeqCst);
+                loop {
+                    if left == 0 {
+                        return false;
+                    }
+                    match self.left.compare_exchange_weak(
+                        left,
+                        left - 1,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(_) => break,
+                        Err(now) => left = now,
+                    }
+                }
+                let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(20));
+                self.running.fetch_sub(1, Ordering::SeqCst);
+                true
+            }
+        }
+        let run = |pool: &Pool, jobs: usize| {
+            let wide = Arc::new(Wide {
+                left: AtomicUsize::new(jobs),
+                running: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+            });
+            let reg = pool.register(wide.clone());
+            reg.notify_all();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while wide.left.load(Ordering::SeqCst) > 0 || wide.running.load(Ordering::SeqCst) > 0 {
+                assert!(Instant::now() < deadline, "jobs left undone");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            wide.peak.load(Ordering::SeqCst)
+        };
+        let pool = Pool::gated(1, 3, "test-gate");
+        assert_eq!((pool.threads(), pool.active()), (3, 1));
+        assert_eq!(run(&pool, 12), 1);
+        pool.set_loading(true);
+        assert_eq!(pool.active(), 3);
+        assert_eq!(run(&pool, 30), 3);
+        pool.set_loading(false);
+        assert_eq!(pool.active(), 1);
+        // A worker past the count may end the job it had; none takes another.
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(run(&pool, 12), 1);
     }
 }

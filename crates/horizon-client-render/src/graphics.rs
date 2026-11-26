@@ -1402,6 +1402,16 @@ impl Graphics {
         // silicon only the performance cores count (horizon_threads::default_workers).
         horizon_threads::sizing::for_pool_with(self.battery, horizon_threads::sizing::Pool::Jobs)
     }
+    /// Worker threads while a world loads (`horizon_threads::jobs::set_loading`): the
+    /// automatic count without Battery Mode's halving, or the player's own count if it
+    /// is higher. A loading view leaves the render thread waiting on the GPU, so the
+    /// cores Battery Mode keeps free for play would sit idle.
+    pub fn loading_worker_threads(&self) -> usize {
+        self.worker_threads().max(horizon_threads::sizing::for_pool_with(
+            false,
+            horizon_threads::sizing::Pool::Jobs,
+        ))
+    }
     /// The frame cap battery mode adds: 60 in a world, 30 in menus without a
     /// world or while another window has focus.
     pub fn battery_limit(&self, limit: i32, in_world: bool, focused: bool) -> i32 {

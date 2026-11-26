@@ -1022,6 +1022,8 @@ struct Game<'a> {
     /// Whether the view's columns have all arrived, and how new it is: large
     /// translucent pages wait for both before they shrink (`set_terrain_loading`).
     view_arrival: horizon_client::streaming::ViewArrival,
+    /// Every job worker while a world loads (`world_load`).
+    world_load: world_load::WorldLoad,
     options: Options,
     player: Option<PlayerMotion>,
     spawn: Option<Vec3>,
@@ -10209,6 +10211,7 @@ impl Game<'_> {
                     self.frame_ticks = elapsed.as_secs_f32() * 20.0;
                     self.previous = now;
                     self.upload_pace.frame(elapsed);
+                    self.update_world_load(now);
                     self.studio_fly(elapsed);
                     // Arrow-key camera controls belong to gameplay; chat and
                     // other screens use the same keys for their own navigation.
@@ -10602,6 +10605,7 @@ impl<'a> Game<'a> {
             lod_blue_map: None,
             lod_covered_at: None,
             view_arrival: Default::default(),
+            world_load: Default::default(),
             options,
             player: None,
             spawn: None,

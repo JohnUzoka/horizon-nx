@@ -635,6 +635,8 @@ impl Game<'_> {
             folder: folder.to_owned(),
             new_world,
         });
+        // A synchronous open draws no loading screen: the gate opens here.
+        self.world_load_begins("opening the world");
         // Harnesses, control scripts and runs without a window go on with the world open.
         if self.window.is_none() || super::synchronous_startup(&self.options) {
             while self.integrated_starting.is_some() {

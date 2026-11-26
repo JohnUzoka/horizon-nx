@@ -110,7 +110,7 @@ fn main() -> Result<(), Error> {
 
     // Generation and light, on the game's worker pool (`threads` workers).
     // Meshing is left out here and measured on its own below.
-    horizon_threads::jobs::configure(threads);
+    horizon_threads::jobs::configure(threads, threads);
     let mut streaming = Streaming::new(Arc::new(terrain), context.clone(), threads);
     streaming.mesh = false;
     streaming.center = center;

@@ -702,7 +702,7 @@ pub struct Streaming {
     /// This streamer's place in the shared pool (`horizon_threads::jobs`);
     /// dropping it waits for its running jobs.
     jobs: Registration,
-    /// The workers its in-flight work is sized for.
+    /// The most workers its in-flight work is sized for (`Streaming::workers`).
     workers: usize,
     order: u64,
     /// Ticks since the columns and protos that fell out of range were swept.
@@ -1879,6 +1879,12 @@ impl Streaming {
     pub fn pending(&self) -> usize {
         self.shared.queue.lock().unwrap().len()
     }
+    /// The workers its in-flight work is sized for now: those the pool runs at the
+    /// moment (all of them while a world loads, `horizon_threads::jobs::set_loading`),
+    /// at most its own count.
+    fn workers(&self) -> usize {
+        self.workers.min(horizon_threads::jobs::pool().active()).max(1)
+    }
     /// Whether any chunk is queued or on its way from generation to a mesh.
     pub fn busy(&self) -> bool {
         self.chunks_in_flight() || !self.meshing.is_empty() || self.pending() != 0
@@ -2270,7 +2276,7 @@ impl Streaming {
         // Decorate chunks whose 3x3 proto neighbourhood is available, in
         // vanilla's order: decoration is order dependent where write regions
         // overlap (see `DecorationOrder`).
-        let workers = self.workers;
+        let workers = self.workers();
         if self.decorates && self.order_area != Some((self.center, self.radius)) {
             let (decorated, chunks) = (&self.decorated, &world.chunks);
             // The render distance is the server view distance in singleplayer.
@@ -2410,7 +2416,7 @@ impl Streaming {
         // were queued for (#3629). What stays in `dirty_light` is asked
         // for again, from the current centre, as capacity frees.
         if !world.dirty_light.is_empty() {
-            let room = (self.workers * 4).saturating_sub(self.lighting.len());
+            let room = (self.workers() * 4).saturating_sub(self.lighting.len());
             {
                 let ranges = self.ranges();
                 for &(x, z) in world.dirty_light.iter() {
@@ -2493,7 +2499,7 @@ impl Streaming {
         // Meshes waiting for upload count too: when uploads fall behind (a
         // low frame rate at a wide distance), meshing on held gigabytes of
         // them until the system swapped.
-        let room = (self.workers * 32).saturating_sub(self.meshing.len() + self.upload_backlog);
+        let room = (self.workers() * 32).saturating_sub(self.meshing.len() + self.upload_backlog);
         // Column by column: skip scanning dirty columns entirely when no mesh
         // room is available or nothing is dirty.
         if room > 0 && !world.dirty_sections.is_empty() {
@@ -3119,22 +3125,10 @@ impl ViewArrival {
         if self.since.is_none() || view != self.view {
             (self.view, self.since, self.arrived) = (view, Some(now), false);
         }
-        let ((x, z), r) = view;
-        if self.arrived || r < 0 || !self.recent(now) {
+        if self.arrived || view.1 < 0 || !self.recent(now) {
             return false;
         }
-        self.arrived = (-r..=r).all(|d| {
-            // How far row (and column) `d` reaches: `in_view_distance` solved for it.
-            let gap = i64::from((d.abs() - 1).max(0));
-            let room = i64::from(r).pow(2) - gap * gap;
-            room <= 0 || {
-                let e = (room - 1).isqrt() as i32 + 1;
-                // Both ends of row `d`, and of column `d`.
-                [-e, e]
-                    .into_iter()
-                    .all(|e| has((x + d, z + e)) && has((x + e, z + d)))
-            }
-        });
+        self.arrived = view_edges_in(view, has);
         !self.arrived
     }
     /// Whether the view `arriving` was last given changed less than `VIEW_WAIT`
@@ -3143,6 +3137,24 @@ impl ViewArrival {
         self.since
             .is_some_and(|since| now.saturating_duration_since(since) < VIEW_WAIT)
     }
+}
+/// Whether the outermost columns of `view` (centre, radius) are in (`has`): at both
+/// ends of each of its rows and columns (`in_view_distance`). A server sends a view
+/// nearest first, so these come last.
+pub fn view_edges_in(view: ((i32, i32), i32), has: impl Fn((i32, i32)) -> bool) -> bool {
+    let ((x, z), r) = view;
+    (-r..=r).all(|d| {
+        // How far row (and column) `d` reaches: `in_view_distance` solved for it.
+        let gap = i64::from((d.abs() - 1).max(0));
+        let room = i64::from(r).pow(2) - gap * gap;
+        room <= 0 || {
+            let e = (room - 1).isqrt() as i32 + 1;
+            // Both ends of row `d`, and of column `d`.
+            [-e, e]
+                .into_iter()
+                .all(|e| has((x + d, z + e)) && has((x + e, z + d)))
+        }
+    })
 }
 /// The rings around a `/forceload`ed chunk, in chunks. Vanilla's FORCED
 /// ticket is level 31 (`ChunkMap.FORCED_TICKET_LEVEL`), the level rises one

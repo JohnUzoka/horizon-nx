@@ -275,7 +275,7 @@ fn main() -> Result<(), Error> {
         return Ok(());
     }
     let n = threads[0];
-    horizon_threads::jobs::configure(n);
+    horizon_threads::jobs::configure(n, n);
 
     let assets = Arc::new(Assets::load(&root)?);
     let render = Arc::new(assets.reload(
