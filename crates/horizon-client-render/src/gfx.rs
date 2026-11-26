@@ -85,13 +85,19 @@ pub(in crate::gfx) fn terrain_shader() -> String {
     wgsl_prefix::HDR_LIGHT.to_owned() + &terrain
 }
 
-/// `HORIZON_NEAREST_TEXELS=1` (read once): with no texture filtering, terrain sprites take the
-/// nearest texel from the sampler, their mip levels still blended, instead of terrain.wgsl's
-/// `sample_nearest` working out a crisp texel from a linear sampler. Build 40's look within a
-/// level (it also took the nearest level); much cheaper on the Switch's GM20B.
+/// Nearest texels (read once): with no texture filtering, terrain sprites take the nearest texel
+/// from the sampler, their mip levels still blended, instead of terrain.wgsl's `sample_nearest`
+/// working out a crisp texel from a linear sampler. Build 40's look within a level (it also took
+/// the nearest level); much cheaper on the Switch's GM20B, so on by default there
+/// (docs/switch.md). `HORIZON_NEAREST_TEXELS=1` turns it on elsewhere, `=0` off on the Switch.
 fn nearest_texels() -> bool {
-    static ON: std::sync::LazyLock<bool> =
-        std::sync::LazyLock::new(|| std::env::var("HORIZON_NEAREST_TEXELS").as_deref() == Ok("1"));
+    static ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        match std::env::var("HORIZON_NEAREST_TEXELS").as_deref() {
+            Ok("1") => true,
+            Ok("0") => false,
+            _ => cfg!(target_os = "horizon"),
+        }
+    });
     *ON
 }
 
