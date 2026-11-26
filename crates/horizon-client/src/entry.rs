@@ -116,6 +116,13 @@ pub fn start<G>(
     } = startup;
     runtime_environment::capture(&launch);
     horizon_threads::configure_allocator();
+    // The Switch has no resolv.conf: a server's SRV record is asked of the connection's DNS
+    // servers, which nifm gives a thread of their own, never the network thread at a join (a
+    // build that asked there froze the console on joining). `HORIZON_NX_SRV=0` turns it off.
+    #[cfg(target_os = "horizon")]
+    if horizon_nx::dns::start() {
+        horizon_protocol::set_name_servers(horizon_nx::dns::name_servers);
+    }
     horizon_chat_filter::install();
     horizon_look::give();
     // OptiFine's and Polytone's pack formats (platform, docs/layers.md), before any pack loads.

@@ -29,6 +29,9 @@ pub mod logging;
 pub mod controllers;
 
 #[cfg(target_os = "horizon")]
+pub mod dns;
+
+#[cfg(target_os = "horizon")]
 mod memory;
 #[cfg(all(target_os = "horizon", feature = "top_down_alloc"))]
 mod allocator;
