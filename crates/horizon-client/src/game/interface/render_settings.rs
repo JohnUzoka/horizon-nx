@@ -45,13 +45,14 @@ impl Game<'_> {
                 self.settings.file.int("textureFiltering"),
                 self.settings.file.int("maxAnisotropyBit"),
             ),
+            !self.options.split(),
         )
     }
     /// The frame follows what draws the picture (docs/design/hdr-linear-light.md, "When it
     /// changes"): when HDR or the pick (unless refused) call for another frame than the
     /// renderer's, it is made again before this frame draws.
     pub(super) fn follow_frame(&mut self) {
-        let split = self.options.paced_by_split || self.options.split_guest;
+        let split = self.options.split();
         // Split-screen's renderer isn't made again here, so the Anti-aliasing button offers
         // 4x MSAA there only where the renderer already has its pipelines.
         if let Some(r) = self.renderer.as_mut() {
@@ -69,6 +70,18 @@ impl Game<'_> {
         {
             if let Err(e) = self.rebuild_renderer() {
                 log::warn!("Horizon: the renderer for 4x MSAA could not be made: {e}");
+            }
+            return;
+        }
+        // The terrain's pipelines are built for the Texture Filtering option and the emissive
+        // overlays (`TerrainBuild`): changed, the renderer is made again once.
+        if self
+            .renderer
+            .as_mut()
+            .is_some_and(Renderer::take_terrain_rebuild)
+        {
+            if let Err(e) = self.rebuild_renderer() {
+                log::warn!("Horizon: the terrain's pipelines could not be made again: {e}");
             }
             return;
         }

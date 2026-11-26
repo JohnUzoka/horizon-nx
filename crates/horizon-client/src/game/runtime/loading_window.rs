@@ -39,6 +39,10 @@ pub(super) fn build_renderer(
     shader_pack: shader_packs::PickedPack,
     display: horizon_client::gfx::DisplayReading,
     filtering: (i32, i32),
+    // Whether the game makes this renderer again when what its terrain pipelines are built for
+    // changes (`Renderer::take_terrain_rebuild`): then they are built for the option and the
+    // pack's emissive overlays (`TerrainBuild`).
+    rebuildable: bool,
 ) -> Result<Renderer> {
     let assets = &pack.render;
     let atlas = &gui.atlas;
@@ -79,6 +83,10 @@ pub(super) fn build_renderer(
         settings,
         shader_pack.frame(),
         display,
+        rebuildable.then(|| horizon_client::gfx::TerrainBuild {
+            filtering: filtering.0.clamp(0, 2) as u32,
+            emissive_overlays: !assets.emissive.is_empty(),
+        }),
     ))?;
     let (prepared_vertices, prepared_ranges) =
         native_block_entity_draw::StandaloneGeometry::new(pack, gui).prepared_upload();
@@ -178,6 +186,8 @@ pub(super) fn loading_renderer(
             ..Default::default()
         },
         previous.map(|r| r.display_reading()).unwrap_or_default(),
+        // It draws no terrain.
+        None,
     ))?;
     if let Some(atlas) = atlas {
         renderer.hud.sprite_animations = atlas

@@ -30,7 +30,7 @@ fn vis_sprite(tiled: vec2<f32>, layer: u32, du: vec2<f32>, dv: vec2<f32>) -> vec
     let tiled_face = any(tiled - uv >= vec2(0.5));
     let pixel = vec2(1.0 / globals.filtering.y);
     let texel_screen = sqrt(du * du + dv * dv);
-    if u32(globals.filtering.x) != 1u {
+    if texture_filtering() != 1u {
         return sample_nearest(uv, layer, pixel, du, dv, texel_screen, tiled_face);
     }
     let max_texel = max(texel_screen.x, texel_screen.y);

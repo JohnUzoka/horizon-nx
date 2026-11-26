@@ -234,6 +234,7 @@ fn replay(window: Arc<Window>) -> Result<(), Box<dyn std::error::Error>> {
         &horizon_client_render::graphics::Graphics::default(),
         Default::default(),
         Default::default(),
+        None,
     ))?;
     drop(pixels);
     render.pixels.pack();

@@ -390,6 +390,8 @@ impl<'a> Split<'a> {
                 self.host.settings.file.int("textureFiltering"),
                 self.host.settings.file.int("maxAnisotropyBit"),
             ),
+            // Split-screen's renderers aren't made again for a setting (`follow_frame`).
+            false,
         );
         let renderer = match built {
             Ok(r) => r,
@@ -475,6 +477,7 @@ impl<'a> Split<'a> {
                 self.host.settings.file.int("textureFiltering"),
                 self.host.settings.file.int("maxAnisotropyBit"),
             ),
+            false,
         );
         let renderer = match built {
             Ok(r) => r,

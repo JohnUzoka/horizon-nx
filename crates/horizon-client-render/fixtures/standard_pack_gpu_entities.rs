@@ -139,6 +139,7 @@ fn fixture(window: Arc<Window>, out: &Path) -> Result<(), Box<dyn std::error::Er
         &client::graphics::Graphics::default(),
         Default::default(),
         Default::default(),
+        None,
     ))?;
     renderer.resize(320, 180);
     assert!(

@@ -117,6 +117,23 @@ fn terrain_ab(bit: u32) -> bool {
 // texture filtering, the sprite sampler takes the nearest texel (its mips still blended) and
 // the sprite is sampled at the UV itself, without `sample_nearest`'s snapping.
 const NEAREST_TEXELS: bool = false;
+// Options.textureFiltering as the terrain's own pipelines are built for it (a pipeline
+// constant, gfx.rs's `sprite_constants`): 0 none, 1 RGSS, 2 anisotropic; 3, the default, reads
+// it from the frame (`globals.filtering.x`). Read per frame, every pipeline carried all three
+// paths, and the Switch's GM20B gives a shader the registers of its largest one: RGSS's took
+// `fs_opaque` to 35 of them (UAM) where its own path needs 20 and nearest texels' 16, past the
+// 32 it runs at full occupancy.
+override TEXTURE_FILTERING: u32 = 3u;
+fn texture_filtering() -> u32 {
+    if TEXTURE_FILTERING < 3u {
+        return TEXTURE_FILTERING;
+    }
+    return u32(globals.filtering.x);
+}
+// Whether the pipeline draws emissive overlays (`Globals.emissive_layers`, native_emissive.rs):
+// a pipeline constant (gfx.rs's `sprite_constants`), false for a renderer built while no pack or
+// mod had any (`TerrainBuild`). The overlay's second sprite path doubled `fs_opaque`'s code.
+override EMISSIVE_OVERLAYS: bool = true;
 // texture_sampling.glsl's sampleNearest: the sprite's texels stay square pixels, blending only
 // across the one screen pixel where two meet, so a linear (and anisotropic) sampler keeps them crisp.
 // `tiled`: a distant tile's face takes its sprite again per block, so its gradients span many
@@ -129,7 +146,7 @@ fn sample_nearest(uv: vec2<f32>, layer: u32, pixel: vec2<f32>, du: vec2<f32>, dv
     offset = (offset - 0.5) * pixel / max(texel_screen, vec2(1e-12)) + 0.5;
     offset = clamp(offset, vec2(0.0), vec2(1.0));
     let at = (center + offset) * pixel;
-    if tiled || (u32(globals.filtering.x) != 2u && !terrain_ab(1u)) {
+    if tiled || (texture_filtering() != 2u && !terrain_ab(1u)) {
         // The level the gradients give, asked for: the one tap an anisotropy of 1 takes. A
         // sampler without anisotropy (no or RGSS filtering) reads the very texels it would at
         // the gradients, and a GPU samples at a level much faster than at gradients (the
@@ -199,7 +216,7 @@ fn sprite(tiled: vec2<f32>, layer: u32) -> vec4<f32> {
 fn sprite_at(tiled: vec2<f32>, layer: u32, du: vec2<f32>, dv: vec2<f32>) -> vec4<f32> {
     // terrain.fsh's two sampling paths: sampleRGSS for RGSS, sampleNearest otherwise.
     let uv = tile_uv(tiled);
-    if (NEAREST_TEXELS && u32(globals.filtering.x) == 0u) || terrain_ab(16u) {
+    if (NEAREST_TEXELS && texture_filtering() == 0u) || terrain_ab(16u) {
         // The sampler takes the nearest texel itself (`nearest_texels`, or the A/B's Build 40
         // sampler): the sprite at the UV's own gradients, taken unwrapped so the level holds
         // across a tile's block seams.
@@ -214,7 +231,7 @@ fn sprite_at(tiled: vec2<f32>, layer: u32, du: vec2<f32>, dv: vec2<f32>) -> vec4
     let tiled_face = any(tiled - uv >= vec2(0.5));
     let pixel = vec2(1.0 / globals.filtering.y);
     let texel_screen = sqrt(du * du + dv * dv);
-    if u32(globals.filtering.x) == 1u {
+    if texture_filtering() == 1u {
         return sample_rgss(uv, layer, pixel, du, dv, texel_screen, tiled_face);
     }
     return sample_nearest(uv, layer, pixel, du, dv, texel_screen, tiled_face);
@@ -728,7 +745,7 @@ fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f3
     // The pairs are sorted by base layer: stop at the first past this one. The sprite's layer
     // is the low 14 bits: bit 15 marks opaque leaves, bit 14 a merged face (`uv_step`).
     let sprite_layer = layer & 0x3fffu;
-    for (var i = 0u; i < min(globals.emissive_count.x, 128u); i++) {
+    for (var i = 0u; EMISSIVE_OVERLAYS && i < min(globals.emissive_count.x, 128u); i++) {
         let pair = globals.emissive_layers[i];
         if pair.x == sprite_layer {
             out.emissive_layer = pair.y;
@@ -881,7 +898,7 @@ fn solid_finish_at(in: TerrainOut, texel: vec4<f32>, color: vec4<f32>, du: vec2<
             }
         }
     }
-    if in.emissive_layer != 0xffffffffu {
+    if EMISSIVE_OVERLAYS && in.emissive_layer != 0xffffffffu {
         // The high bit: an OptiFine overlay, drawn cutout (opaque where alpha >= 0.1).
         var mask = sprite_at(in.uv, in.emissive_layer & 0x7fffffffu, du, dv);
         if (in.emissive_layer & 0x80000000u) != 0u {
