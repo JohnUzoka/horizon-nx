@@ -132,6 +132,27 @@ pub const GLYPH_ROWS: u32 = 512;
 /// The largest atlas side: the 2D texture limit of the GPUs Horizon runs on
 /// (Apple silicon, RADV and Intel allow 16384; NVIDIA 32768).
 pub const MAX_ATLAS_SIZE: u32 = 16384;
+/// The GUI atlas's largest side: [`MAX_ATLAS_SIZE`], but 8192 on the Switch, whose ~3 GiB heap
+/// holds the CPU's and the GPU's memory alike. A side of 16384 is 1 GiB of pixels, kept in
+/// memory and on the GPU, and compressing the copy in memory asks for as much again: MCC
+/// Island's pack built a ~350 MiB atlas there and the game aborted ("memory allocation of
+/// 369098776 bytes failed", `pack_pixels`). Past this, the layout's own fallbacks reduce
+/// model and mod textures, as on any GPU when a pack outgrows the largest texture. The default
+/// resources need 4096x5120.
+pub const GUI_ATLAS_LIMIT: u32 = if cfg!(target_os = "horizon") {
+    8192
+} else {
+    MAX_ATLAS_SIZE
+};
+/// The GUI atlas's widest: on the Switch 4096, so it is at most 4096x8192 (128 MiB). At
+/// 8192x8192 (256 MiB) MCC Island's reduced pack still ran the GPU out of memory as the
+/// renderer was made again for it, beside the old one's 463 MiB. The default resources with
+/// Horizon's own sprites are 4096 wide (4096x7168 there).
+const GUI_ATLAS_MAX_WIDTH: u32 = if cfg!(target_os = "horizon") {
+    4096
+} else {
+    u32::MAX
+};
 /// 128x128 atlas slots for map textures. A lobby paints its signs as walls of
 /// framed maps, so the pool holds a wall; too few slots re-upload every map
 /// every frame. 26.3's `MapTextureManager` keeps a texture per map instead.
@@ -1148,7 +1169,8 @@ impl HudAtlas {
     /// room: a pack of thousands of mixed sizes (server packs with custom
     /// items) fits where the shelves' ragged ends would not.
     fn layout(images: &[PackedImage], max: u32) -> Result<(u32, Vec<(u32, u32)>, u32)> {
-        let mut width = 4096.min(max);
+        let widest = max.min(GUI_ATLAS_MAX_WIDTH);
+        let mut width = 4096.min(widest);
         loop {
             let wide_enough = images.iter().all(|i| i.1 < width);
             if wide_enough {
@@ -1159,15 +1181,15 @@ impl HudAtlas {
                     }
                 }
             }
-            if width >= max {
+            if width >= widest {
                 let texels: u64 = images.iter().map(|i| u64::from(i.1) * u64::from(i.2)).sum();
                 return Err(format!(
-                    "the textures ({} images, {texels} texels) do not fit a {max}x{max} atlas",
+                    "the textures ({} images, {texels} texels) do not fit a {widest}x{max} atlas",
                     images.len()
                 )
                 .into());
             }
-            width = (width * 2).min(max);
+            width = (width * 2).min(widest);
         }
     }
     /// `layout`'s shelves at one width: the placements and the first row below
@@ -1534,26 +1556,65 @@ impl HudAtlas {
             images.push(("horizon/recipes/settings".to_owned(), width, height, rgba));
         }
         images.sort_by(|a, b| b.2.cmp(&a.2).then(b.1.cmp(&a.1)));
+        // Whether font sheets left the atlas (the Switch's fallback): their glyphs then go
+        // through the run-time glyph rows, which get every row the atlas may still have.
+        let mut fonts_left_out = false;
         let (width, placements, glyph_region) =
-            Self::layout_leaving_out(&mut images, &mut animated, &cit_names, MAX_ATLAS_SIZE)
+            Self::layout_leaving_out(&mut images, &mut animated, &cit_names, GUI_ATLAS_LIMIT)
                 .or_else(|error| -> Result<_> {
+                    // The Switch: font sheets leave the atlas first, the largest first, which
+                    // costs no resolution; only if the rest still doesn't fit do textures
+                    // shrink. Shrinking first took MCC Island's lobby and cosmetics to 16
+                    // texels before the sheets, which alone were enough, went.
+                    if cfg!(target_os = "horizon") {
+                        let fonts: HashSet<String> = full_size_sprites(root, &images, &bordered)
+                            .into_iter()
+                            .filter(|name| !bordered.contains(name))
+                            .collect();
+                        let before = images.len();
+                        let fitted = Self::layout_leaving_out_fonts(
+                            &mut images,
+                            &fonts,
+                            GUI_ATLAS_LIMIT,
+                            GUI_ATLAS_MAX_WIDTH,
+                        );
+                        let left_out = before - images.len();
+                        fonts_left_out = left_out > 0;
+                        if left_out > 0 {
+                            log::warn!(
+                                "left {left_out} font sheets out of the GUI atlas: their glyphs are copied in as they are drawn"
+                            );
+                        }
+                        if let Ok((layout, _)) = fitted {
+                            return Ok(layout);
+                        }
+                    }
                     let models = reducible_model_sprites(root, &images, &bordered);
                     let reduced = Self::layout_reducing_models(
                         &mut images,
                         &mut gui_sizes,
                         &models,
-                        MAX_ATLAS_SIZE,
+                        GUI_ATLAS_LIMIT,
                     );
                     let layout = match reduced {
                         Ok(layout) => layout,
                         Err(_) => {
                             let keep = full_size_sprites(root, &images, &bordered);
+                            let mut shrinkable = mod_namespaces();
+                            // The Switch: a server's resource pack's own namespaces too, which
+                            // elsewhere keep their resolution. Its atlas is half a desktop's
+                            // (`GUI_ATLAS_MAX_WIDTH`), and a pack that can't fit it can't load.
+                            if cfg!(target_os = "horizon") {
+                                shrinkable.extend(images.iter().filter_map(|image| {
+                                    image.0.split_once(':').map(|(ns, _)| ns.to_owned())
+                                }));
+                            }
                             let layout = Self::layout_capping_mod_textures(
                                 &mut images,
                                 &mut gui_sizes,
                                 &keep,
-                                &mod_namespaces(),
-                                MAX_ATLAS_SIZE,
+                                &shrinkable,
+                                GUI_ATLAS_LIMIT,
                             )?;
                             log::warn!(
                                 "reduced the resolution of mods' HUD textures to keep the resource packs: {error}"
@@ -1568,7 +1629,20 @@ impl HudAtlas {
                 })?;
         // A multiple of 1024 rather than a power of two: the default resources
         // need 4096x5120 (8192 rows before), Faithful 32x 4096x12288 (16384).
-        let height = (glyph_region + GLYPH_ROWS).next_multiple_of(1024);
+        let mut height = (glyph_region + GLYPH_ROWS).next_multiple_of(1024);
+        // Glyphs from sheets outside the atlas are copied into its glyph rows as they are
+        // drawn, and rows that fill up are all drawn again from the next frame on: MCC
+        // Island's UI, every glyph of it from such sheets, uploaded 5-8 times what a frame
+        // otherwise does and held 40 fps where single player held 60.
+        if fonts_left_out {
+            height = height.max(GUI_ATLAS_LIMIT);
+        }
+        if full {
+            log::info!(
+                "Horizon: GUI atlas {width}x{height} ({} MiB)",
+                u64::from(width) * u64::from(height) * 4 >> 20
+            );
+        }
         let mut pixels = vec![0u8; (width * height * 4) as usize];
         let mut sprites = HashMap::new();
         let mut translucent = HashSet::new();
@@ -4996,6 +5070,25 @@ texture=wide",
         assert!(HudAtlas::layout_reducing_models(&mut images, &mut sizes, &models, 1024).is_err());
         assert_eq!((images[0].1, images[0].2), (1024, 1024));
         assert_eq!(sizes["item/gem"], (16, 16));
+    }
+    #[test]
+    fn the_largest_font_sheets_leave_the_atlas_first_and_nothing_else_does() {
+        // 13.7 million texels for an atlas with 14.7 million below its glyph rows, 85% of
+        // which `layout_leaving_out_fonts` aims for: one sheet has to go, the largest.
+        let mut images: Vec<PackedImage> = vec![
+            ("font/big".into(), 2048, 2048, vec![1]),
+            ("gui/panel".into(), 4000, 1536, Vec::new()),
+            ("font/mid".into(), 2048, 1536, vec![1]),
+            ("font/small".into(), 512, 512, vec![1]),
+        ];
+        let fonts: HashSet<String> = ["font/big", "font/mid", "font/small"]
+            .map(String::from)
+            .into();
+        let (_, left_out) =
+            HudAtlas::layout_leaving_out_fonts(&mut images, &fonts, 4096, 4096).unwrap();
+        let kept: Vec<&str> = images.iter().map(|i| i.0.as_str()).collect();
+        assert_eq!(left_out, 1);
+        assert_eq!(kept, ["gui/panel", "font/mid", "font/small"]);
     }
     #[test]
     fn textures_that_cannot_fit_are_an_error_not_a_gpu_panic() {
