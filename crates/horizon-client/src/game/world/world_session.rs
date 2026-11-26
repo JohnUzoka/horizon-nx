@@ -215,6 +215,7 @@ impl Game<'_> {
                 opened_at,
                 joined_at: None,
                 waiting_for_scene: false,
+                holding_for_view: false,
             });
         }
         Ok(())

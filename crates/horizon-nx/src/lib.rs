@@ -52,7 +52,7 @@ pub use compat::{
     thread_logging, threads_created,
 };
 #[cfg(target_os = "horizon")]
-pub use boost::{horizon_nx_entered_world, loading_world, title_ready};
+pub use boost::{horizon_nx_entered_world, loading_world, title_ready, world_entered};
 #[cfg(target_os = "horizon")]
 pub use keyboard::software_keyboard;
 #[cfg(target_os = "horizon")]
