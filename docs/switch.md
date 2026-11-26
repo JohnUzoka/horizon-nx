@@ -90,10 +90,52 @@ deko3d without the changes in the next table; "now" is the `deko3d` branch with 
 "deko3d now", 1% low: one value per run; the second run had a one-second hitch.
 
 Packed terrain vertices (the default; `HORIZON_PACKED_QUADS=0` turns them off) cost NVK about
-11 ms of median GPU and make no difference on deko3d (25.6 FPS with wide ones). Against NVK with wide
-vertices, deko3d is still slower, and the gap is solid terrain's fragment shading: in in-run A/Bs
-of the terrain shader, removing sample_nearest's texel snapping saves 14 ms of a heavy frame's GPU,
-removing the fog and emission finish 7.6 ms, and a minimal vertex shader nothing.
+11 ms of median GPU and make no difference on deko3d (25.6 FPS with wide ones).
+
+### Solid terrain against Build 40
+
+The gap to Build 40 is the terrain shader's code, not deko3d: Build 40's solid fragment and vertex
+shader (adapted to today's bindings, today's vertex pulling kept) run on deko3d at GPU p50 15.2 and
+16.3 ms (2 runs, 42.0 and 46.2 FPS) with `HORIZON_NEAREST_TEXELS=1`, against 25.7 ms for today's
+shader in the same build. That build replaced terrain.wgsl from a file on the SD card, a
+measurement harness that isn't in the branch.
+
+Most of it was registers. A shader on the Switch's GM20B gets the registers of its largest path,
+taken or not, and above 32 fewer warps run at once. UAM 1.1.0's counts (registers / static
+instructions) of the solid fragment shaders, with no texture filtering:
+
+| Solid fragment shader | `fs_opaque` | `fs_solid` |
+| --- | --- | --- |
+| Texture Filtering and emissive overlays read per frame (before) | 35 / 792 | 38 / 954 |
+| Built for the Texture Filtering option | 20 / 306 | 20 / 456 |
+| ... and without emissive overlays (now, default resources) | 17 / 150 | 17 / 300 |
+| now, `HORIZON_NEAREST_TEXELS=1` | 9 / 90 | 13 / 240 |
+| Build 40 | 6 / 60 | 13 / 210 |
+
+RGSS's four taps set the register count of every pipeline while the option was read per frame,
+and the emissive overlays' second sprite path doubled the code. Both are now pipeline constants
+(terrain.wgsl's `TEXTURE_FILTERING` and `EMISSIVE_OVERLAYS`, gfx.rs's `TerrainBuild`): changing
+Texture Filtering, or a frame with emissive overlays (OptiFine-style packs, native mods) in a
+renderer built without them, has the game make the renderer again, as 4x MSAA does. Split-screen's
+renderers aren't made again, so they keep reading both per frame. The image doesn't change.
+
+Forest benchmark, GPU p50 (two runs each; builds of the `deko3d` branch from the same day; the last
+row's also has the GLSL loop fix of `third_party/naga`, about 0.5 ms):
+
+| Build | default | `HORIZON_NEAREST_TEXELS=1` |
+| --- | --- | --- |
+| before | 30.1 ms, 28.9 FPS | 26.0 ms, 34.0 FPS |
+| Texture Filtering as a pipeline constant | 26.7 ms (27.5, 26.0) | – |
+| ... and emissive overlays too (now) | 24.2 ms (24.3, 24.2), 35.7 FPS | 20.2 ms (20.1, 20.3), 41.3 FPS |
+
+Build 40 on NVK flies the same benchmark at 16.4 ms, 42.2 FPS; with Build 40's shader the deko3d
+build above was at 15.7 (`HORIZON_NEAREST_TEXELS=1`). Between 20.2 and 15.7 ms the two shaders
+still differ in the sprite sampled at the UV's gradients (`textureSampleGrad`, which keeps distant
+tiles' mip level across block seams) where Build 40 took implicit ones, the chunk fade-in's mix
+toward the fog colour, and today's wider vertex output; none of these is measured alone yet.
+
+Tried without gain: moving the vertex shader's colored-light loop first (39 → 32 registers in the
+section vertex shaders; 30.4 ms in one run against 30.1) and, earlier, a minimal vertex shader.
 
 `HORIZON_NEAREST_TEXELS=1` (in `env.txt`) samples terrain sprites as Build 40 does: the sampler
 takes the nearest texel, with no snapping in the shader, and mips stay blended. It changes the image
