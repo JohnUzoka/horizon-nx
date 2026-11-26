@@ -47,15 +47,22 @@ pub struct TerrainAb {
 }
 
 impl TerrainAb {
-    pub fn from_env() -> Option<Self> {
+    /// The masks `HORIZON_TERRAIN_AB` lists, if any.
+    fn masks() -> Option<Vec<u32>> {
         let list = std::env::var("HORIZON_TERRAIN_AB").ok()?;
         let masks: Vec<u32> = list
             .split(',')
             .filter_map(|m| m.trim().parse().ok())
             .collect();
-        if masks.is_empty() {
-            return None;
-        }
+        (!masks.is_empty()).then_some(masks)
+    }
+    /// Whether this is an A/B run: only then does terrain.wgsl keep its variants
+    /// (`terrain_shader`).
+    pub fn wanted() -> bool {
+        Self::masks().is_some()
+    }
+    pub fn from_env() -> Option<Self> {
+        let masks = Self::masks()?;
         log::info!("Horizon: terrain A/B over masks {masks:?}, {BLOCK} frames each in turn");
         Some(Self {
             masks,

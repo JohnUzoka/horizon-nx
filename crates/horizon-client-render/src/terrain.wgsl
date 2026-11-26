@@ -107,10 +107,16 @@ fn sprite_level(uv: vec2<f32>, layer: u32, lod: f32) -> vec4<f32> {
         default: { return textureSampleLevel(sprites_7, sprite_sampler, uv, l, lod); }
     }
 }
-// HORIZON_TERRAIN_AB (gfx.rs's `TerrainAb`): this frame's variant bits, 0 outside an A/B run.
+// HORIZON_TERRAIN_AB (gfx.rs's `TerrainAb`): this frame's variant bits. `terrain_shader` sets
+// TERRAIN_AB only for an A/B run, so every other build compiles the variants away.
+const TERRAIN_AB: bool = false;
 fn terrain_ab(bit: u32) -> bool {
-    return (u32(globals.filtering.w) & bit) != 0u;
+    return TERRAIN_AB && (u32(globals.filtering.w) & bit) != 0u;
 }
+// `HORIZON_NEAREST_TEXELS=1` (gfx.rs's `nearest_texels`, set by `terrain_shader`): with no
+// texture filtering, the sprite sampler takes the nearest texel (its mips still blended) and
+// the sprite is sampled at the UV itself, without `sample_nearest`'s snapping.
+const NEAREST_TEXELS: bool = false;
 // texture_sampling.glsl's sampleNearest: the sprite's texels stay square pixels, blending only
 // across the one screen pixel where two meet, so a linear (and anisotropic) sampler keeps them crisp.
 // `tiled`: a distant tile's face takes its sprite again per block, so its gradients span many
@@ -193,9 +199,10 @@ fn sprite(tiled: vec2<f32>, layer: u32) -> vec4<f32> {
 fn sprite_at(tiled: vec2<f32>, layer: u32, du: vec2<f32>, dv: vec2<f32>) -> vec4<f32> {
     // terrain.fsh's two sampling paths: sampleRGSS for RGSS, sampleNearest otherwise.
     let uv = tile_uv(tiled);
-    if terrain_ab(16u) {
-        // Build 40's sampling: under the A/B's nearest sampler, the sprite at the UV's own
-        // gradients (taken unwrapped, so the level holds across a tile's block seams).
+    if (NEAREST_TEXELS && u32(globals.filtering.x) == 0u) || terrain_ab(16u) {
+        // The sampler takes the nearest texel itself (`nearest_texels`, or the A/B's Build 40
+        // sampler): the sprite at the UV's own gradients, taken unwrapped so the level holds
+        // across a tile's block seams.
         return sprite_grad(uv, layer, du, dv);
     }
     if terrain_ab(2u) {

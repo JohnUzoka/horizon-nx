@@ -66,7 +66,48 @@ fn taa_light_key(
 }
 
 pub(in crate::gfx) fn terrain_shader() -> String {
-    wgsl_prefix::HDR_LIGHT.to_owned() + include_str!("terrain.wgsl")
+    let mut terrain = include_str!("terrain.wgsl").to_owned();
+    // terrain.wgsl's compile-time choices, so a build without them carries none of their code.
+    if terrain_ab::TerrainAb::wanted() {
+        terrain = terrain.replacen(
+            "const TERRAIN_AB: bool = false;",
+            "const TERRAIN_AB: bool = true;",
+            1,
+        );
+    }
+    if nearest_texels() {
+        terrain = terrain.replacen(
+            "const NEAREST_TEXELS: bool = false;",
+            "const NEAREST_TEXELS: bool = true;",
+            1,
+        );
+    }
+    wgsl_prefix::HDR_LIGHT.to_owned() + &terrain
+}
+
+/// `HORIZON_NEAREST_TEXELS=1` (read once): with no texture filtering, terrain sprites take the
+/// nearest texel from the sampler, their mip levels still blended, instead of terrain.wgsl's
+/// `sample_nearest` working out a crisp texel from a linear sampler. Build 40's look within a
+/// level (it also took the nearest level); much cheaper on the Switch's GM20B.
+fn nearest_texels() -> bool {
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var("HORIZON_NEAREST_TEXELS").as_deref() == Ok("1"));
+    *ON
+}
+
+/// The terrain sprites' sampler for a Texture Filtering option (`filtering`) and anisotropy.
+fn terrain_sampler(filtering: u32, anisotropy: u16) -> wgpu::SamplerDescriptor<'static> {
+    if filtering == 0 && nearest_texels() {
+        wgpu::SamplerDescriptor {
+            label: Some("Block sprites (nearest texels)"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..SPRITE_NEAREST
+        }
+    } else {
+        sprite_sampler_descriptor(anisotropy)
+    }
 }
 
 fn border_shader() -> String {
@@ -3308,7 +3349,7 @@ impl Renderer {
                 ..Default::default()
             });
         let sprite_views = sprite_views(&sprite_textures, &sprite_unused, None);
-        let sprite_sampler = device.create_sampler(&sprite_sampler_descriptor(1));
+        let sprite_sampler = device.create_sampler(&terrain_sampler(0, 1));
         let sprite_nearest = device.create_sampler(&SPRITE_NEAREST);
         let lightmap = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Lightmap"),
@@ -7281,7 +7322,7 @@ impl Renderer {
         self.max_anisotropy = anisotropy;
         self.sprite_sampler = self
             .device
-            .create_sampler(&sprite_sampler_descriptor(anisotropy));
+            .create_sampler(&terrain_sampler(filtering, anisotropy));
         self.rebuild_terrain_group();
     }
     /// `HORIZON_TERRAIN_AB`'s bits 16 and 128 (`terrain_ab::sampler_variant`): this frame's
