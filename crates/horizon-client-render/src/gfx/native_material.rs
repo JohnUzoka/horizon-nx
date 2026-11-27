@@ -42,6 +42,9 @@ fn horizon_material_covers(in: HorizonMaterialOut, color: vec4<f32>, cutoff: f32
     }
     return horizon_material_sprite(in).a >= cutoff;
 }
+// True for a material that reads `fluid` and takes no derivatives (`CheckedStage::reads_fluid`,
+// `derives`): `horizon_material_color` calls it with `fluid` a constant on each side of a branch.
+override horizon_material_fluid_constant: bool = false;
 // The point's block sprite, sampled as terrain.wgsl's own entries sample it.
 fn horizon_material_sprite(in: HorizonMaterialOut) -> vec4<f32> {
     return horizon_terrain_sprite(in.uv, in.layer & 0x7fffu, (in.look & 0x8000u) != 0u);
@@ -243,27 +246,56 @@ fn horizon_material_color(in: HorizonMaterialOut, translucent: bool) -> vec4<f32
     let texels = in.uv * horizon_block_size();
     let footprint = max(dot(dpdx(texels), dpdx(texels)), dot(dpdy(texels), dpdy(texels)));
     horizon_block_lod = max(0.5 * log2(max(footprint, 1e-8)), 0.0);
-    // Water draws translucent and lava solid, so the pass resolves the fluid kind.
-    let fluid = select(0u, select(2u, 1u, translucent), (in.look & 8u) != 0u);
     // Without a look the vertex colour is the tint, with its shade and ambient occlusion in it.
     let code = (in.look >> 4u) & 7u;
     let tint = select(in.tint.rgb, unpack4x8unorm(in.look_tint).rgb, code != 0u);
-    let horizon_shaded = vec4(horizon_line_in(in.tint.rgb), 1.0);
     // `[displacement]`'s grid hands down its face's normal: its relief is the pack's to shade.
     let normal = select(horizon_material_normal(in.position), in.normal,
         dot(in.normal, in.normal) > 0.5);
     horizon_material_face_normal = normal;
     horizon_surface = vec4<f32>(0.0);
     let tangent = horizon_material_tangent(in.base, in.uv, normal);
-    let out = material(MaterialInput(vec4(horizon_line_in(albedo.rgb), albedo.a),
-        vec4(horizon_line_in(tint), 1.0), horizon_line_in(vec3(horizon_look_shade(code))).x,
+    let colored = horizon_line_in(horizon_terrain_native_colored_light(in.position));
+    let surface = HorizonMaterialSurface(albedo, tint, code, normal, tangent, colored);
+    // Water draws translucent and lava solid, so the pass resolves the fluid kind.
+    let fluid_quad = (in.look & 8u) != 0u;
+    let fluid = select(2u, 1u, translucent);
+    var out: vec4<f32>;
+    if horizon_material_fluid_constant && !translucent {
+        // The material runs with `fluid` a constant on either side, which the shader compiler
+        // folds into the pack's tests of it: the solid pass keeps no water path. (The
+        // translucent pass would only trade its lava test for a second copy of the material.)
+        // Only for a material without derivatives: a quad of pixels may straddle the branch.
+        if fluid_quad {
+            out = horizon_material_run(in, surface, translucent, fluid);
+        } else {
+            out = horizon_material_run(in, surface, translucent, 0u);
+        }
+    } else {
+        out = horizon_material_run(in, surface, translucent, select(0u, fluid, fluid_quad));
+    }
+    return vec4(horizon_line_out(out.rgb), out.a);
+}
+// What `horizon_material_color` works out for the point before the material.
+struct HorizonMaterialSurface {
+    albedo: vec4<f32>,
+    tint: vec3<f32>,
+    code: u32,
+    normal: vec3<f32>,
+    tangent: vec4<f32>,
+    colored: vec3<f32>,
+}
+// The pack's material at the point, of `fluid` kind (`MaterialInput.fluid`).
+fn horizon_material_run(in: HorizonMaterialOut, s: HorizonMaterialSurface, translucent: bool,
+    fluid: u32) -> vec4<f32> {
+    let horizon_shaded = vec4(horizon_line_in(in.tint.rgb), 1.0);
+    return material(MaterialInput(vec4(horizon_line_in(s.albedo.rgb), s.albedo.a),
+        vec4(horizon_line_in(s.tint), 1.0), horizon_line_in(vec3(horizon_look_shade(s.code))).x,
         horizon_line_in(vec3(in.tint.a)).x, in.light, horizon_line_in(in.lightmap),
         in.position, in.uv, translucent, horizon_sprite_tags(in.layer & 0x7fffu),
         horizon_sprite_material(in.layer & 0x7fffu), in.clip.xy / frame.resolution,
-        in.look & 7u, fluid, f32((in.look >> 8u) & 15u) / 15.0, normal, tangent,
-        horizon_line_in(horizon_terrain_native_colored_light(in.position)),
-        in.displaced@light_source@@lit_tint@@shaded_tint@)).color;
-    return vec4(horizon_line_out(out.rgb), out.a);
+        in.look & 7u, fluid, f32((in.look >> 8u) & 15u) / 15.0, s.normal, s.tangent,
+        s.colored, in.displaced@light_source@@lit_tint@@shaded_tint@)).color;
 }
 // `MaterialInput.light_source_tier` and `light_source_whole` from the vertex's light-source code
 // (`look` bits 12..14), as terrain.wgsl's `solid_finish_at` reads its `emission`: 1..4 a tier,
@@ -855,6 +887,11 @@ impl NativeMaterial {
         constants.push(("horizon_terrain_TEXTURE_FILTERING", shape.filtering));
         let pack = coverage == horizon_shader_api::Coverage::Pack;
         constants.push(("horizon_material_coverage_pack", f64::from(u8::from(pack))));
+        let fluid_constant = stage.reads_fluid() && !stage.derives();
+        constants.push((
+            "horizon_material_fluid_constant",
+            f64::from(u8::from(fluid_constant)),
+        ));
         let [(_, write_light), (_, linear)] =
             super::linear_blend::frame_constants(shape.format, linear);
         constants.push(("horizon_terrain_HDR_WRITE_LIGHT", write_light));

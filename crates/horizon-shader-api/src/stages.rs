@@ -292,11 +292,11 @@ const MATERIAL_RESOURCES: [Resource; 11] = [
 
 /// Functions the post prelude gives packs.
 const POST_HELPERS: &str = "\
-// The world's depth at `uv` (reversed: 0 is the sky).
+// The world's depth at `uv` (reversed: 0 is the sky): its nearest texel, the edge's beyond the
+// edges. A sample through `nearest_sampler`, which can't read outside the texture, instead of a
+// load that queries the texture's size to clamp to it and then again to test it on every call.
 fn depth_at(uv: vec2<f32>) -> f32 {
-    let size = vec2<f32>(textureDimensions(scene_depth));
-    let texel = vec2<i32>(clamp(uv * size, vec2<f32>(0.0), size - 1.0));
-    return textureLoad(scene_depth, texel, 0);
+    return textureSampleLevel(scene_depth, nearest_sampler, uv, 0);
 }
 // The camera-relative world position, in blocks, of the point at `uv` and `depth`.
 fn view_position(uv: vec2<f32>, depth: f32) -> vec3<f32> {
