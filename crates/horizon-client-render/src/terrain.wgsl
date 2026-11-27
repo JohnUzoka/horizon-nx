@@ -207,9 +207,34 @@ fn rotated_grid(uv: vec2<f32>, layer: u32, pixel: vec2<f32>, du: vec2<f32>,
 fn tile_uv(uv: vec2<f32>) -> vec2<f32> {
     return uv - max(ceil(uv) - 1.0, vec2(0.0));
 }
-fn sprite(tiled: vec2<f32>, layer: u32) -> vec4<f32> {
+// `repeats`: the face's sprite repeats once a block (`TerrainOut::repeats`).
+fn sprite(tiled: vec2<f32>, layer: u32, repeats: bool) -> vec4<f32> {
+    if NEAREST_TEXELS && texture_filtering() == 0u && !repeats {
+        // A face inside one sprite: its UV is unwrapped already, so the sampler's own level
+        // is the one `sprite_at` works out from the gradients, and it costs the GM20B no
+        // derivatives of its own (docs/switch.md). The flag is the primitive's, so a quad of
+        // pixels takes one side.
+        return sprite_implicit(tiled, layer);
+    }
     // The gradients come from the unwrapped UV, so the mip level holds across block seams.
     return sprite_at(tiled, layer, dpdx(tiled), dpdy(tiled));
+}
+// A sprite at the sampler's implicit level, from whichever array holds its layer.
+fn sprite_implicit(uv: vec2<f32>, layer: u32) -> vec4<f32> {
+    let l = i32(layer % SPRITE_SPLIT);
+    if SPRITE_ARRAYS == 1u {
+        return textureSample(sprites, sprite_sampler, uv, l);
+    }
+    switch layer / SPRITE_SPLIT {
+        case 0u: { return textureSample(sprites, sprite_sampler, uv, l); }
+        case 1u: { return textureSample(sprites_1, sprite_sampler, uv, l); }
+        case 2u: { return textureSample(sprites_2, sprite_sampler, uv, l); }
+        case 3u: { return textureSample(sprites_3, sprite_sampler, uv, l); }
+        case 4u: { return textureSample(sprites_4, sprite_sampler, uv, l); }
+        case 5u: { return textureSample(sprites_5, sprite_sampler, uv, l); }
+        case 6u: { return textureSample(sprites_6, sprite_sampler, uv, l); }
+        default: { return textureSample(sprites_7, sprite_sampler, uv, l); }
+    }
 }
 // `sprite` with the unwrapped UV's screen gradients given: the visibility buffer's resolve
 // (visbuffer.wgsl) works them out from the quad, as its neighbours may be other quads.
@@ -218,9 +243,13 @@ fn sprite_at(tiled: vec2<f32>, layer: u32, du: vec2<f32>, dv: vec2<f32>) -> vec4
     let uv = tile_uv(tiled);
     if (NEAREST_TEXELS && texture_filtering() == 0u) || terrain_ab(16u) {
         // The sampler takes the nearest texel itself (`nearest_texels`, or the A/B's Build 40
-        // sampler): the sprite at the UV's own gradients, taken unwrapped so the level holds
-        // across a tile's block seams.
-        return sprite_grad(uv, layer, du, dv);
+        // sampler), at the level the UV's own gradients give, taken unwrapped so the level holds
+        // across a tile's block seams. Asked for as that level, as `sample_nearest` does: the
+        // sampler has no anisotropy, so it reads the very texels it would at the gradients, and
+        // the GM20B samples at a level faster than at gradients.
+        let size = globals.filtering.y;
+        let rho2 = max(dot(du, du), dot(dv, dv)) * size * size;
+        return sprite_level(uv, layer, max(0.0, 0.5 * log2(rho2)));
     }
     if terrain_ab(2u) {
         let level = max(length(du), length(dv)) * globals.filtering.y;
@@ -249,8 +278,6 @@ struct TerrainOut {
     // How the face shines in HDR output (mesher.rs's `TIER_BITS`): 0 not
     // at all, 1 to 4 the tier with its bright parts, 5 to 8 the tier all over.
     emission: u32,
-    // Block and sky light over 16.
-    scene: vec2<f32>,
     fade: u32,
     // A distant tile's tile-relative position for its fade (`faded`), or a merged
     // face's eye-relative position for its fog (`translucent_fog_distances`).
@@ -260,33 +287,39 @@ struct TerrainOut {
     // The camera-relative height, for the water mirror's cut at the plane.
     height: f32,
     emissive_layer: u32,
+    // Whether the face's sprite repeats once a block (`sprite`): a distant tile's face, or a
+    // section's merged face (`uv_step`).
+    repeats: bool,
 }
 // `TerrainOut` in 5 interpolant locations instead of 12. A GPU's vertex stage pays for each
 // location it exports (AMD's parameter cache gives one a whole slot, however few of its four
 // components are used): on an RX 580 the 12 cost 3.2 ns per quad and these 5 cost 1.6. Every
 // component is still interpolated on its own (and the integers stay flat), so each pixel gets
-// the very values the separate locations gave it.
+// the very values the separate locations gave it. 16 components cross here (20 before: an
+// unused pair, a spare lane and `emission` in a lane of its own).
 struct TerrainWire {
     @builtin(position) clip: vec4<f32>,
     // The colour.
     @location(0) a: vec4<f32>,
-    // `local` and `visibility`.
+    // `local` and `spherical`.
     @location(1) b: vec4<f32>,
-    // `uv` and `scene`.
+    // `uv`, `cylindrical` and `height`.
     @location(2) c: vec4<f32>,
-    // `spherical`, `cylindrical` and `height`.
-    @location(3) d: vec4<f32>,
-    // `layer`, `emission`, `fade` and `emissive_layer`.
-    @location(4) @interpolate(flat) e: vec4<u32>,
+    // `visibility`.
+    @location(3) d: f32,
+    // `layer` (16 bits, `TERRAIN_ATTRIBUTES`' Uint16), `emission` (0 to 8) and `repeats` above
+    // it, `fade` and `emissive_layer`.
+    @location(4) @interpolate(flat) e: vec3<u32>,
 }
 fn to_wire(o: TerrainOut) -> TerrainWire {
     var w: TerrainWire;
     w.clip = o.clip;
     w.a = o.color;
-    w.b = vec4(o.local, o.visibility);
-    w.c = vec4(o.uv, o.scene);
-    w.d = vec4(o.spherical, o.cylindrical, o.height, 0.0);
-    w.e = vec4(o.layer, o.emission, o.fade, o.emissive_layer);
+    w.b = vec4(o.local, o.spherical);
+    w.c = vec4(o.uv, o.cylindrical, o.height);
+    w.d = o.visibility;
+    w.e = vec3(o.layer | (o.emission << 16u) | (u32(o.repeats) << 20u), o.fade,
+        o.emissive_layer);
     return w;
 }
 fn from_wire(w: TerrainWire) -> TerrainOut {
@@ -294,16 +327,16 @@ fn from_wire(w: TerrainWire) -> TerrainOut {
     o.clip = w.clip;
     o.color = w.a;
     o.local = w.b.xyz;
-    o.visibility = w.b.w;
+    o.spherical = w.b.w;
     o.uv = w.c.xy;
-    o.scene = w.c.zw;
-    o.spherical = w.d.x;
-    o.cylindrical = w.d.y;
-    o.height = w.d.z;
-    o.layer = w.e.x;
-    o.emission = w.e.y;
-    o.fade = w.e.z;
-    o.emissive_layer = w.e.w;
+    o.cylindrical = w.c.z;
+    o.height = w.c.w;
+    o.visibility = w.d;
+    o.layer = w.e.x & 0xffffu;
+    o.emission = (w.e.x >> 16u) & 15u;
+    o.repeats = (w.e.x & 0x100000u) != 0u;
+    o.fade = w.e.y;
+    o.emissive_layer = w.e.z;
     return o;
 }
 // Whether a fading tile or section leaves this pixel out (gfx/lod.rs's
@@ -741,6 +774,7 @@ fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f3
     out.local = select(position, eye, (layer & 0x4000u) != 0u);
     out.uv = uv;
     out.layer = layer;
+    out.repeats = instance_step(uv_step(layer, w)) > 0.001;
     out.emissive_layer = 0xffffffffu;
     // The pairs are sorted by base layer: stop at the first past this one. The sprite's layer
     // is the low 14 bits: bit 15 marks opaque leaves, bit 14 a merged face (`uv_step`).
@@ -757,7 +791,6 @@ fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f3
     }
     let block = max(f32(light.y), dynamic_block_light(pos));
     out.color = vec4(color.rgb, 1.0) * sample_lightmap(f32(light.x) / 16.0, block / 16.0);
-    out.scene = vec2(block / 16.0, f32(light.x) / 16.0);
     if globals.colored_count.x > 0u {
         out.color = vec4(min(out.color.rgb + color.rgb * native_colored_light(pos), vec3(1.0)), out.color.a);
     }
@@ -813,7 +846,7 @@ struct TerrainMsaa {
 // `fs_solid` for the opaque pass (`opaque_quad`): no fade, no cutout, no discard.
 @fragment fn fs_opaque(wire: TerrainWire) -> @location(0) vec4<f32> {
     let in = from_wire(wire);
-    let texel = sprite(in.uv, in.layer & 0x7fffu);
+    let texel = sprite(in.uv, in.layer & 0x7fffu, in.repeats);
     var color = texel * in.color;
     color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
     if terrain_ab(8u) { return vec4(color.rgb, 1.0); }
@@ -843,7 +876,7 @@ fn solid_uncut(in: TerrainOut) -> SolidUncut {
     let dx = dpdx(in.local);
     let dy = dpdy(in.local);
     if faded(in.fade, in.local, dx, dy) { discard; }
-    let texel = sprite(in.uv, in.layer & 0x7fffu);
+    let texel = sprite(in.uv, in.layer & 0x7fffu, in.repeats);
     var color = texel * in.color;
     // terrain.fsh: the fade-in mixes toward the fog colour.
     color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
@@ -922,7 +955,7 @@ fn translucent_fog_distances(in: TerrainOut) -> vec2<f32> {
 // pixels showed the layer behind through the one in front, twice the water.
 @fragment fn fs_translucent(wire: TerrainWire) -> @location(0) vec4<f32> {
     let in = from_wire(wire);
-    let texel = sprite(in.uv, in.layer & 0x3fffu);
+    let texel = sprite(in.uv, in.layer & 0x3fffu, in.repeats);
     var color = texel * in.color;
     color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
     if color.a < 0.01 { discard; }

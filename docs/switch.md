@@ -144,9 +144,34 @@ build, one run) it was 19.3 against 20.2 ms; the mix is vanilla's visible fade-i
 Tried without gain: moving the vertex shader's colored-light loop first (39 → 32 registers in the
 section vertex shaders; 30.4 ms in one run against 30.1) and, earlier, a minimal vertex shader.
 
-`HORIZON_NEAREST_TEXELS=1` (in `env.txt`) samples terrain sprites as Build 40 does: the sampler
-takes the nearest texel, with no snapping in the shader, and mips stay blended. It changes the image
-(sharper texel edges up close), so it's off by default.
+**Nearest texels are the Switch's default** (Texture Filtering 0, the default option): the sampler
+takes the nearest texel, with no snapping in the shader, and mips stay blended, as Build 40 does.
+Up close texel edges are sharper than `sample_nearest`'s; the image is otherwise the same.
+`HORIZON_NEAREST_TEXELS=0` (in `env.txt`) turns it off on the Switch, `=1` turns it on elsewhere.
+The other Texture Filtering options sample as before.
+
+With it, a face inside one sprite samples at the sampler's implicit level, and a face whose sprite
+repeats once a block (a far tile's, a section's merged face; a flat bit beside the layer tells
+them apart) at the level its unwrapped gradients give (`textureSampleLevel`), where every face
+took `textureSampleGrad` before. `TerrainWire` also carries 16 components instead of 20 (an
+unused pair dropped, `emission` packed above the 16-bit layer). The forest benchmark, nearest
+texels, measured on one day through the harness build (terrain.wgsl from the SD card; not in
+the branch). UAM counts with no texture filtering and no emissive overlays:
+
+| terrain.wgsl | runs | GPU p50 ms | avg FPS | `fs_opaque` | `fs_solid` | section vertex |
+| --- | --- | --- | --- | --- | --- | --- |
+| `textureSampleGrad` (before) | 2 | 16.7, 18.6 | 39.4, 41.1 | 9 / 90 | 13 / 240 | 38 / 654 |
+| every face at its gradients' level | 1 | 20.6 | 40.3 | 9 / 102 | 13 / 252 | 38 / 654 |
+| ... and 16 components | 1 | 20.5 | 40.9 | 10 / 102 | 14 / 252 | 37 / 654 |
+| ... without the colored-light loop (measurement only) | 1 | 20.6 | 41.4 | 10 / 102 | 14 / 252 | 29 / 594 |
+| implicit level inside one sprite (now) | 2 | 18.4, 16.2 | 43.7, 42.4 | 10 / 114 | 15 / 270 | 38 / 666 |
+
+GPU p50 moved by up to 2 ms between runs of the same shader that day, so only the frame rate
+separates these: implicit sampling gained about 2.7 FPS over `textureSampleGrad`, while the level
+at the gradients, the narrower output and 8 fewer vertex registers didn't help (one run each).
+The full builds, nearest texels: this branch 18.5 ms, 42.8 FPS (one run); the build before it 20.8
+ms, 34.8 FPS the same day (one run, with a hitch: 1% low 3.1 FPS) and 20.2 ms, 41.3 FPS over two
+runs the day before.
 
 What moved deko3d from "before" to "now", as measured on the console:
 
