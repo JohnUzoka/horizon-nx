@@ -760,6 +760,11 @@ pub struct Streaming {
     /// The cause of each column's light job in flight: 0 its first light, 1 a
     /// neighbour's arrival, 2 anything else (edits, emission, unsticking).
     light_cause: FxHashMap<(i32, i32), u8>,
+    /// When `relight_beside_unlit` last queued each column, while within
+    /// [`BESIDE_UNLIT_EVERY`].
+    beside_unlit_last: FxHashMap<(i32, i32), std::time::Instant>,
+    /// The columns it was asked for again meanwhile, and when they are relit.
+    beside_unlit_waiting: FxHashMap<(i32, i32), std::time::Instant>,
     /// Columns whose sections have been meshed at least once.
     meshed: FxHashSet<(i32, i32)>,
     /// Dirty sections of loaded columns past the render distance, meshed once
@@ -1411,6 +1416,8 @@ impl Streaming {
             lit: Default::default(),
             relit_by_arrival: Default::default(),
             light_cause: Default::default(),
+            beside_unlit_last: Default::default(),
+            beside_unlit_waiting: Default::default(),
             meshed: Default::default(),
             waiting: Default::default(),
             waiting_area: ((0, 0), 0, 0),
@@ -2435,6 +2442,7 @@ impl Streaming {
         // grew with the render distance and outlived the columns they
         // were queued for (#3629). What stays in `dirty_light` is asked
         // for again, from the current centre, as capacity frees.
+        self.release_beside_unlit(world);
         if !world.dirty_light.is_empty() {
             let room = (self.workers() * 4).saturating_sub(self.lighting.len());
             {
@@ -2660,7 +2668,7 @@ impl Streaming {
             &mut changed,
         );
         Self::mark_light_changes(world, &changed);
-        Self::relight_beside_unlit(world, &changed);
+        self.relight_beside_unlit(world, &changed);
         if !self.light_snapshots.is_empty() {
             for p in positions {
                 self.light_edit_sequence += 1;
@@ -2711,7 +2719,7 @@ impl Streaming {
                 &mut changed,
             );
             Self::mark_light_changes(world, &changed);
-            Self::relight_beside_unlit(world, &changed);
+            self.relight_beside_unlit(world, &changed);
         }
         let oldest = self.light_snapshots.values().copied().min();
         match oldest {
@@ -2720,14 +2728,55 @@ impl Streaming {
         }
     }
     /// A column whose light an edit changed beside a column not lit yet gets
-    /// a full light job ([`crate::light::beside_unlit`]).
-    fn relight_beside_unlit(world: &mut World, changed: &LightChanges) {
+    /// a full light job ([`crate::light::beside_unlit`]), at most one every
+    /// [`BESIDE_UNLIT_EVERY`]: edits at the loading edge (fluids settling) asked for
+    /// one every few ticks, and 97% of those changed no light (forest benchmark).
+    /// A column asked for again within that time is relit once it is up, from the
+    /// blocks of then: the same light, later.
+    fn relight_beside_unlit(&mut self, world: &mut World, changed: &LightChanges) {
         let columns = crate::light::beside_unlit(changed, |x, z| {
             world.chunks.get(&(x, z)).is_some_and(|c| !c.lit)
         });
+        let now = std::time::Instant::now();
         let before = world.dirty_light.len();
-        world.dirty_light.extend(columns);
+        for column in columns {
+            match self.beside_unlit_last.get(&column) {
+                Some(&at) if now.saturating_duration_since(at) < BESIDE_UNLIT_EVERY => {
+                    self.beside_unlit_waiting
+                        .entry(column)
+                        .or_insert(at + BESIDE_UNLIT_EVERY);
+                }
+                _ => {
+                    world.dirty_light.insert(column);
+                    self.beside_unlit_last.insert(column, now);
+                }
+            }
+        }
         crate::light::note_relight_queued(3, world.dirty_light.len() - before);
+    }
+    /// The waiting columns of [`Self::relight_beside_unlit`] whose time is up go to
+    /// `dirty_light`; columns relit longer ago than [`BESIDE_UNLIT_EVERY`] are forgotten.
+    fn release_beside_unlit(&mut self, world: &mut World) {
+        if self.beside_unlit_last.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let last = &mut self.beside_unlit_last;
+        self.beside_unlit_waiting.retain(|&column, &mut due| {
+            if due > now {
+                return true;
+            }
+            if world.chunks.contains_key(&column) {
+                world.dirty_light.insert(column);
+                crate::light::note_relight_queued(3, 1);
+                last.insert(column, now);
+            }
+            false
+        });
+        last.retain(|column, &mut at| {
+            now.saturating_duration_since(at) < BESIDE_UNLIT_EVERY
+                || self.beside_unlit_waiting.contains_key(column)
+        });
     }
     /// Sections whose meshes sample a changed light value (faces and corners
     /// read light from neighbouring blocks). Every column whose stored light
@@ -3133,6 +3182,9 @@ pub fn in_view_distance(center: (i32, i32), radius: i32, x: i32, z: i32) -> bool
 /// How long a view's columns are waited for (`ViewArrival`): a server may never
 /// fill it.
 const VIEW_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// The least time between two whole light jobs of a column queued by
+/// `Streaming::relight_beside_unlit`.
+const BESIDE_UNLIT_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 /// Whether the columns of a view (centre, radius) have all arrived, as a client
 /// sees them come: a server forgets the old view's columns, then sends the new
 /// ones nearest first, so the view's outermost ones come last. Single player
