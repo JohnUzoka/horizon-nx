@@ -110,6 +110,11 @@ mod tests {
         assert_eq!(folder("My.World/Test", &[]), "My_World_Test");
         assert_eq!(folder("Bob's world! #1", &[]), "Bob's world! #1");
         assert_eq!(folder("a:b*c?d", &[]), "a_b_c_d");
+        // Non-ASCII names are kept as typed (the Switch's SD card device stores them in ASCII
+        // itself: horizon-nx `sd_names.rs`), and count up like any other.
+        assert_eq!(folder("Мир", &[]), "Мир");
+        assert_eq!(folder("Мир", &["Мир"]), "Мир (1)");
+        assert_eq!(folder("Новый.мир", &[]), "Новый_мир");
         // A name Windows reserves is wrapped in underscores (isPathPartPortable).
         assert_eq!(folder("con", &[]), "_con_");
         assert_eq!(folder("LPT1", &[]), "_LPT1_");

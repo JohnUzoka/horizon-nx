@@ -357,6 +357,21 @@ forest 51.6, 60.4 s; a generated chunk's noise 19.5 ms and surface 11.0 ms of ab
   was reverted. The job log's light lines (first lights, relights by cause and outcome, the columns
   queued by where) stay: a few counters per light job.
 
+## World names outside ASCII
+
+The Switch's FS service can't hold a non-ASCII file name: it reads a path's bytes as Shift-JIS,
+and its listings leave out every name that isn't ASCII. Up to 0.2.1 a world named `Мир` was saved
+under a mangled folder name that no listing showed, so it never appeared in the world list.
+
+horizon-nx replaces the SD card's newlib device with a copy (`crates/horizon-nx/src/sd_names.rs`,
+ported from KoHaku743/horizon-nx's fix for its issue #7): each path part with a non-ASCII
+character goes to the card as `xn--` and its Punycode (RFC 3492), so `saves/Мир` is
+`saves/xn--o0a0dya` on the card, and listings turn that form back into `Мир`. ASCII paths go
+through untouched. A folder an earlier build wrote under a raw name is still found by that name:
+the first time the game asks for it (`--world Мир`, or a new world named the same, whose folder
+search checks the name), it is renamed to its `xn--` form and lists from then on. A computer reading
+the card sees the `xn--` names.
+
 ## Known issues
 
 - On the title screen, GPU time per frame grew from 6–8 ms to 19–23 ms after minutes in the menus

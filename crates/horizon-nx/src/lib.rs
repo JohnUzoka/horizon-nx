@@ -49,6 +49,8 @@ mod keyboard;
 mod main_stack;
 #[cfg(target_os = "horizon")]
 mod motion;
+#[cfg(any(test, target_os = "horizon"))]
+mod sd_names;
 
 pub use compat::{
     ThreadCorePolicy, set_thread_core_policy, set_thread_logging, thread_core_policy,
@@ -96,6 +98,13 @@ pub fn init() {
         lifecycle::init_horizon_services();
         lifecycle::configure_memory_line_from_env();
         init_switch_logging("horizon");
+        // Non-ASCII names on the SD card in ASCII (sd_names.rs), before the game opens a file
+        // by one and while no other thread runs.
+        if let Err(e) = sd_names::install() {
+            crate::logging::write_log_line(format_args!(
+                "[Boot] ERROR: non-ASCII file names NOT kept in ASCII: {e}; worlds named in Cyrillic won't list"
+            ));
+        }
         // A homebrew loader leaves the working directory undefined, and the game resolves its
         // game home, options.txt, saves/ and world/ from it. Move into the NRO's own folder so
         // every file the user puts next to the NRO is found. No-op when the loader already
