@@ -1384,11 +1384,18 @@ impl Graphics {
         self.hdr_black_level as f32 / 100.0
     }
     /// Worker threads for chunk generation and meshing: the player's own count, or
-    /// the automatic one, which Battery Mode halves (`horizon_threads::sizing`). The
-    /// pools take their size when they start.
+    /// the automatic one, which Battery Mode halves (`horizon_threads::sizing`), and on the
+    /// Switch one. The pools take their size when they start.
     pub fn worker_threads(&self) -> usize {
         if self.workers > 0 {
             return self.workers as usize;
+        }
+        // The Switch plays with one worker, Battery Mode or not: the GPU-bound frame shares
+        // the three cores with the workers, and the forest flight ran 36.0-37.1 fps with one,
+        // 30.1-30.5 with two and 28.2-28.6 with three (docs/switch.md, "World loading").
+        // Loading still takes every automatic worker (`loading_worker_threads`).
+        if cfg!(target_os = "horizon") {
+            return 1;
         }
         // Vanilla's count (Util.maxAllowedExecutorThreads: every core but
         // one). The pool never takes every core: a pool that fills them all

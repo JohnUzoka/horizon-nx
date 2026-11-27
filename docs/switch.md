@@ -295,7 +295,9 @@ Workers while playing, on the final build (Battery Mode, `workers:N`, 3 workers 
 
 A second play worker costs the flight about 6 FPS and a third about 2 more, and the GPU's frame
 time rises with them (why is not measured); the 1% low stays near 23. One play worker is the
-fastest flight. None of these eight flights had a frame over 53 ms, so the two long frames seen
+fastest flight, so the Switch's automatic count while playing is 1, with or without Battery Mode
+(`Graphics::worker_threads`); loading still takes the automatic 2, and a `workers` setting above
+0 sets the playing count, with loading taking the larger of it and 2. None of these eight flights had a frame over 53 ms, so the two long frames seen
 earlier did not come back. Generation while flying (the job log's windows after the load) is too
 coarse at 10 s to compare the counts. The load counts disagree: 3 workers while loading beat 2 here
 (forest 37.7, 41.8 s against 50.8, 52.2 s), but not with the loading screen held (51.0 against
