@@ -66,8 +66,14 @@ fn taa_light_key(
 }
 
 pub(in crate::gfx) fn terrain_shader() -> String {
-    let mut terrain = include_str!("terrain.wgsl").to_owned();
-    // terrain.wgsl's compile-time choices, so a build without them carries none of their code.
+    wgsl_prefix::HDR_LIGHT.to_owned() + &terrain_choices(include_str!("terrain.wgsl"))
+}
+
+/// terrain.wgsl's compile-time choices in `text` (all of it, or a section holding its
+/// constants), so a build without them carries none of their code: the renderer's terrain and
+/// the copies shader packs' material and shadow stages draw terrain with.
+pub(in crate::gfx) fn terrain_choices(text: &str) -> String {
+    let mut terrain = text.to_owned();
     if terrain_ab::TerrainAb::wanted() {
         terrain = terrain.replacen(
             "const TERRAIN_AB: bool = false;",
@@ -82,7 +88,7 @@ pub(in crate::gfx) fn terrain_shader() -> String {
             1,
         );
     }
-    wgsl_prefix::HDR_LIGHT.to_owned() + &terrain
+    terrain
 }
 
 /// Nearest texels (read once): with no texture filtering, terrain sprites take the nearest texel
@@ -7216,6 +7222,7 @@ impl Renderer {
             globals: &self.terrain_layout,
             flat: self.flat.as_ref().map(|f| &f.draw_layout),
             sprites: self.terrain_sprites,
+            filtering: self.terrain_build.map_or(3.0, |b| f64::from(b.filtering)),
             sprite_views: &self.sprite_views,
             format: self.output.frame.format,
             linear: self.output.frame.linear_light,
@@ -7230,6 +7237,7 @@ impl Renderer {
             weather_groups: [&self.weather.entity_layout, &self.weather.time_layout],
             pbr: self.pbr_maps.as_ref().and_then(|arrays| arrays.first()),
             looks: self.looks_layout.as_ref().filter(|_| terrain_looks),
+            split_solid: split_solid_terrain(self.info.backend),
         };
         let mut metadata = native_pack::Metadata::of(&report);
         let (pack, labels) = native_pack::NativePack::new(
@@ -10552,6 +10560,8 @@ impl Renderer {
         });
         let translucent_pipeline = material.map_or(&self.translucent, |m| m.translucent);
         let pack_flat = material.and_then(|m| m.flat);
+        // A pack's solid terrain in the renderer's two solid passes (`SplitSolid`).
+        let pack_split = material.and_then(|m| m.split).filter(|_| split_solid);
         let pack_flat_msaa = material
             .filter(|_| msaa.is_some())
             .and_then(|m| m.msaa?.1.as_ref());
@@ -10832,33 +10842,42 @@ impl Renderer {
                 }
                 Some(flat) => {
                     let vertices = flat_vertices(&self.arena, self.translucent_arena.as_ref());
-                    // Without a pack, on Metal, the opaque pass, then the cutout one
-                    // (terrain.wgsl's `opaque_quad`), each over phase 1's and phase 2's
-                    // calls with quads for it (phase 2's counted from its first).
+                    // Without a pack or with one that has the split, on Metal and the Switch,
+                    // the opaque pass, then the cutout one (terrain.wgsl's `opaque_quad`), each
+                    // over phase 1's and phase 2's calls with quads for it (phase 2's counted
+                    // from its first).
                     let [opaque, cutout, phase2_split] = flat.pass_calls;
                     let phase2_split = phase2_split - flat.phase1_calls;
                     let phase2_calls = flat.solid_calls - flat.phase1_calls;
                     type Calls = std::ops::Range<usize>;
-                    let passes: &[(&wgpu::RenderPipeline, Calls, Calls)] = match pack_flat {
-                        Some(p) => &[(
-                            pack_flat_msaa.unwrap_or(&p.0),
-                            0..flat.phase1_calls,
-                            0..phase2_calls,
-                        )],
-                        None if split_solid => &[
-                            (flat.solid_opaque.get(hdr), 0..opaque, 0..phase2_split),
+                    let split = |(opaque_pipeline, cutout_pipeline)| {
+                        [
+                            (opaque_pipeline, 0..opaque, 0..phase2_split),
                             (
-                                flat.solid_cutout.get(hdr),
+                                cutout_pipeline,
                                 cutout..flat.phase1_calls,
                                 phase2_split..phase2_calls,
                             ),
-                        ],
-                        None => &[(
-                            flat.solid.antialiased(hdr, msaa.is_some()),
-                            0..flat.phase1_calls,
-                            0..phase2_calls,
-                        )],
+                        ]
                     };
+                    let pack_flat_split = pack_split.and_then(|s| s.flat.as_ref());
+                    let passes: &[(&wgpu::RenderPipeline, Calls, Calls)] =
+                        match (pack_flat, pack_flat_split) {
+                            (Some(_), Some((o, c))) => &split((o, c)),
+                            (Some(p), None) => &[(
+                                pack_flat_msaa.unwrap_or(&p.0),
+                                0..flat.phase1_calls,
+                                0..phase2_calls,
+                            )],
+                            (None, _) if split_solid => {
+                                &split((flat.solid_opaque.get(hdr), flat.solid_cutout.get(hdr)))
+                            }
+                            (None, _) => &[(
+                                flat.solid.antialiased(hdr, msaa.is_some()),
+                                0..flat.phase1_calls,
+                                0..phase2_calls,
+                            )],
+                        };
                     let draw = |pass: &mut wgpu::RenderPass<'_>| {
                         for (pipeline, calls, _) in passes {
                             pass.set_pipeline(pipeline);
@@ -10908,26 +10927,25 @@ impl Renderer {
                     pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
                 }
                 None => {
-                    // Without a native material, on Metal, the opaque pass, then the
-                    // cutout one (terrain.wgsl's `opaque_quad`), each over phase 1's
-                    // and phase 2's lists with quads for it.
+                    // Without a native material or with one that has the split, on Metal and
+                    // the Switch, the opaque pass, then the cutout one (terrain.wgsl's
+                    // `opaque_quad`), each over phase 1's and phase 2's lists with quads for it.
                     let (opaque, cutout) = (opaque_end as u32, cutout_start as u32);
                     type Draws = std::ops::Range<u32>;
-                    let passes: &[(&wgpu::RenderPipeline, Draws, Draws)] = match material {
-                        None if split_solid => &[
-                            (
-                                self.solid_opaque.get(hdr),
-                                0..opaque,
-                                phase1_draws..phase2_cutout,
-                            ),
-                            (
-                                self.solid_cutout.get(hdr),
-                                cutout..phase1_draws,
-                                phase2_cutout..solid_draws,
-                            ),
-                        ],
-                        _ => &[(solid_pipeline, 0..phase1_draws, phase1_draws..solid_draws)],
+                    let split = |(opaque_pipeline, cutout_pipeline)| {
+                        [
+                            (opaque_pipeline, 0..opaque, phase1_draws..phase2_cutout),
+                            (cutout_pipeline, cutout..phase1_draws, phase2_cutout..solid_draws),
+                        ]
                     };
+                    let passes: &[(&wgpu::RenderPipeline, Draws, Draws)] =
+                        match (material, pack_split) {
+                            (None, _) if split_solid => {
+                                &split((self.solid_opaque.get(hdr), self.solid_cutout.get(hdr)))
+                            }
+                            (Some(_), Some(s)) => &split((&s.opaque, &s.cutout)),
+                            _ => &[(solid_pipeline, 0..phase1_draws, phase1_draws..solid_draws)],
+                        };
                     // The solid pipelines, a native material's too, read the page themselves.
                     let pulled = self.flat.is_some();
                     pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);

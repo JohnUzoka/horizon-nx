@@ -1126,6 +1126,7 @@ file = \"material.wgsl\"
             globals,
             flat: None,
             sprites: [1.0, 2048.0],
+            filtering: 3.0,
             sprite_views: &[],
             format: wgpu::TextureFormat::Rgba8Unorm,
             linear: false,
@@ -1138,6 +1139,7 @@ file = \"material.wgsl\"
             weather_groups: [empty, empty],
             pbr: None,
             looks: None,
+            split_solid: false,
         }
     }
 
@@ -1623,6 +1625,7 @@ file = \"material.wgsl\"
             globals: &empty,
             flat: None,
             sprites: [8.0, 1.0],
+            filtering: 3.0,
             sprite_views: &views,
             format: wgpu::TextureFormat::Rgba16Float,
             linear: true,
@@ -1635,6 +1638,7 @@ file = \"material.wgsl\"
             weather_groups: [&empty, &empty],
             pbr: None,
             looks: None,
+            split_solid: false,
         };
         let build = |entity: &str| {
             let manifest = "schema = 1\nid = \"t\"\nname = \"T\"\nversion = \"1\"\napi = \"0.2\"\n\

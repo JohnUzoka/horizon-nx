@@ -40,7 +40,11 @@ fn horizon_material_covers(in: HorizonMaterialOut, color: vec4<f32>, cutoff: f32
     if horizon_material_coverage_pack {
         return color.a >= cutoff;
     }
-    return horizon_terrain_sprite(in.uv, in.layer & 0x7fffu, true).a >= cutoff;
+    return horizon_material_sprite(in).a >= cutoff;
+}
+// The point's block sprite, sampled as terrain.wgsl's own entries sample it.
+fn horizon_material_sprite(in: HorizonMaterialOut) -> vec4<f32> {
+    return horizon_terrain_sprite(in.uv, in.layer & 0x7fffu, (in.look & 0x8000u) != 0u);
 }
 struct HorizonMaterialOut {
     @builtin(position) clip: vec4<f32>,
@@ -56,7 +60,8 @@ struct HorizonMaterialOut {
     @location(7) cylindrical: f32,
     // From the quad's look: bits 0..2 the face, bit 3 a fluid quad, bits 4..6 the shade's code
     // (0: no look), bits 8..11 the light level the surface gives off; from the vertex, bits 12..14
-    // its light-source code (terrain.wgsl's `emission`, `horizon_material_light_tier`).
+    // its light-source code (terrain.wgsl's `emission`, `horizon_material_light_tier`) and bit 15
+    // whether its sprite repeats once a block (terrain.wgsl's `TerrainOut::repeats`).
     @location(8) @interpolate(flat) look: u32,
     // The look's tint, 0xBBGGRR.
     @location(9) @interpolate(flat) look_tint: u32,
@@ -69,9 +74,10 @@ struct HorizonMaterialOut {
     @location(13) displaced: f32,
     @location(14) @interpolate(flat) normal: vec3<f32>,@lit_varying@
 }@lit_fn@
-// `slot`: the corner's in the arena page, whose look is its quad's (`horizon_look`).
+// `slot`: the corner's in the arena page, whose look is its quad's (`horizon_look`); `step` the
+// UV step `uv` was unpacked with (`horizon_terrain_terrain_uv`).
 fn horizon_material_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f32>,
-    light: vec2<u32>, origin: vec4<f32>, slot: u32, corner: u32) -> HorizonMaterialOut {
+    light: vec2<u32>, origin: vec4<f32>, slot: u32, corner: u32, step: f32) -> HorizonMaterialOut {
     let look = horizon_look(slot);
     let ao = horizon_look_ao(look, corner);
     let pos = horizon_material_displace(position + origin.xyz, uv, layer, color, light, look, ao);
@@ -81,6 +87,7 @@ fn horizon_material_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color
     // loses nothing.
     let instance = horizon_terrain_instance_visibility(origin.w);
     out.fade = u32(round((1.0 - instance) * 65535.0));
+    out.look |= u32(horizon_terrain_instance_step(step) > 0.001) << 15u;
     return out;
 }
 // terrain.wgsl's fade-in (terrain.vsh's chunkVisibility): whole within 16 blocks, the section's
@@ -126,14 +133,39 @@ fn horizon_material_out(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f
     return out;
 }
 // A vertex's index is its slot in the arena page, and a quad's four come in order.
+fn horizon_material_instanced(vertex: u32, position: vec3<f32>, uv: vec2<u32>, layer: u32,
+    color: vec4<f32>, light: vec2<u32>, origin: vec4<f32>) -> HorizonMaterialOut {
+    // A merged face's bit 14 steps its UV, but does not belong to the pack's sprite layer.
+    let step = horizon_terrain_uv_step(layer, origin.w);
+    return horizon_material_vertex(position, horizon_terrain_terrain_uv(uv, step),
+        layer & 0xbfffu, color, light, origin, vertex, vertex & 3u, step);
+}
 @vertex fn horizon_material_vs(@builtin(vertex_index) vertex: u32,
     @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
     @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>,
     @location(5) origin: vec4<f32>) -> HorizonMaterialOut {
-    // A merged face's bit 14 steps its UV, but does not belong to the pack's sprite layer.
-    return horizon_material_vertex(position,
-        horizon_terrain_terrain_uv(uv, horizon_terrain_uv_step(layer, origin.w)),
-        layer & 0xbfffu, color, light, origin, vertex, vertex & 3u);
+    return horizon_material_instanced(vertex, position, uv, layer, color, light, origin);
+}
+// Where solid terrain draws in two passes (gfx.rs's `split_solid_terrain`), as the renderer's
+// own `vs_*_opaque` and `vs_*_cutout`: each pass leaves out the other's quads.
+fn horizon_material_left_out() -> HorizonMaterialOut {
+    var out: HorizonMaterialOut;
+    out.clip = vec4(2.0, 2.0, 2.0, 1.0);
+    return out;
+}
+@vertex fn horizon_material_vs_opaque(@builtin(vertex_index) vertex: u32,
+    @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
+    @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>,
+    @location(5) origin: vec4<f32>) -> HorizonMaterialOut {
+    if !horizon_terrain_opaque_quad(layer, origin.w) { return horizon_material_left_out(); }
+    return horizon_material_instanced(vertex, position, uv, layer, color, light, origin);
+}
+@vertex fn horizon_material_vs_cutout(@builtin(vertex_index) vertex: u32,
+    @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
+    @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>,
+    @location(5) origin: vec4<f32>) -> HorizonMaterialOut {
+    if horizon_terrain_opaque_quad(layer, origin.w) { return horizon_material_left_out(); }
+    return horizon_material_instanced(vertex, position, uv, layer, color, light, origin);
 }
 @vertex fn horizon_material_vs_flat(
     @builtin(vertex_index) vertex: u32,
@@ -141,25 +173,50 @@ fn horizon_material_out(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f
     @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
 ) -> HorizonMaterialOut {
     let origin = horizon_terrain_slot_origins[horizon_terrain_block_slots[vertex >> 6u]];
-    return horizon_material_vertex(position,
-        horizon_terrain_terrain_uv(uv, horizon_terrain_uv_step(layer, origin.w)),
-        layer & 0xbfffu, color, light, origin, vertex, vertex & 3u);
+    return horizon_material_instanced(vertex, position, uv, layer, color, light, origin);
 }
 // Solid draws reading the arena page (`SECTION_CORNER`), in either layout of the solid quads.
 fn horizon_material_corner(s: horizon_terrain_SectionCorner, vertex: u32, origin: vec4<f32>)
     -> HorizonMaterialOut {
     let c = horizon_terrain_corner_inputs(s.c);
     return horizon_material_vertex(c.position, horizon_terrain_terrain_uv(c.uv, origin.w), c.layer,
-        c.color, c.light, origin, s.slot, vertex & 3u);
+        c.color, c.light, origin, s.slot, vertex & 3u, origin.w);
+}
+// `horizon_material_corner`, or the left-out vertex where its quad draws in the other pass
+// (`opaque`: this is the opaque pass).
+fn horizon_material_corner_of(s: horizon_terrain_SectionCorner, vertex: u32, origin: vec4<f32>,
+    opaque: bool) -> HorizonMaterialOut {
+    if horizon_terrain_opaque_quad(horizon_terrain_corner_layer(s.c), origin.w) != opaque {
+        return horizon_material_left_out();
+    }
+    return horizon_material_corner(s, vertex, origin);
 }
 @vertex fn horizon_material_vs_section(@builtin(vertex_index) vertex: u32,
     @location(5) origin: vec4<f32>) -> HorizonMaterialOut {
     return horizon_material_corner(horizon_terrain_section_corner(vertex), vertex, origin);
 }
+@vertex fn horizon_material_vs_section_opaque(@builtin(vertex_index) vertex: u32,
+    @location(5) origin: vec4<f32>) -> HorizonMaterialOut {
+    return horizon_material_corner_of(horizon_terrain_section_corner(vertex), vertex, origin, true);
+}
+@vertex fn horizon_material_vs_section_cutout(@builtin(vertex_index) vertex: u32,
+    @location(5) origin: vec4<f32>) -> HorizonMaterialOut {
+    return horizon_material_corner_of(horizon_terrain_section_corner(vertex), vertex, origin, false);
+}
 @vertex fn horizon_material_vs_section_flat(@builtin(vertex_index) vertex: u32)
     -> HorizonMaterialOut {
     let s = horizon_terrain_section_corner(vertex);
     return horizon_material_corner(s, vertex, horizon_corner_origin(s));
+}
+@vertex fn horizon_material_vs_section_flat_opaque(@builtin(vertex_index) vertex: u32)
+    -> HorizonMaterialOut {
+    let s = horizon_terrain_section_corner(vertex);
+    return horizon_material_corner_of(s, vertex, horizon_corner_origin(s), true);
+}
+@vertex fn horizon_material_vs_section_flat_cutout(@builtin(vertex_index) vertex: u32)
+    -> HorizonMaterialOut {
+    let s = horizon_terrain_section_corner(vertex);
+    return horizon_material_corner_of(s, vertex, horizon_corner_origin(s), false);
 }
 // The prelude's `block_texture`: a sprite of the terrain's arrays at a mip level.
 fn horizon_block_size() -> vec2<f32> {
@@ -180,7 +237,7 @@ fn horizon_block_sample(uv: vec2<f32>, layer: u32, lod: f32) -> vec4<f32> {
     }
 }
 fn horizon_material_color(in: HorizonMaterialOut, translucent: bool) -> vec4<f32> {
-    let albedo = horizon_terrain_sprite(in.uv, in.layer & 0x7fffu, true);
+    let albedo = horizon_material_sprite(in);
     horizon_block_layer = in.layer & 0x7fffu;
     // The mip level of this point in the texture: its texels, as the sampler would pick.
     let texels = in.uv * horizon_block_size();
@@ -249,6 +306,11 @@ var<private> horizon_material_coverage: u32;
     }
     return horizon_material_solid(in);
 }
+// The opaque pass's quads (`horizon_terrain_opaque_quad`): no cutout, so nothing to discard
+// and the depth test runs before the material. Built only without `[displacement]`'s grid.
+@fragment fn horizon_material_fs_opaque(in: HorizonMaterialOut) -> HorizonMaterialSolid {
+    return horizon_material_solid_out(in, horizon_material_faded(in, horizon_material_color(in, false)));
+}
 fn horizon_material_solid(in: HorizonMaterialOut) -> HorizonMaterialSolid {
     return horizon_material_solid_sampled(in, false);
 }
@@ -259,10 +321,14 @@ fn horizon_material_solid_sampled(in: HorizonMaterialOut, multisampled: bool) ->
     // Bit 15 of the layer marks opaque leaves (forceOpaque): no alpha cutout.
     if multisampled {
         // The alpha `horizon_material_covers` cuts on, as the samples it covers.
-        let alpha = select(horizon_terrain_sprite(in.uv, in.layer & 0x7fffu, true).a, color.a,
+        let alpha = select(horizon_material_sprite(in).a, color.a,
             horizon_material_coverage_pack);
         horizon_material_coverage = horizon_terrain_cutout_coverage(alpha, (in.layer & 0x8000u) != 0u);
     } else if !horizon_material_covers(in, color, 0.5) && (in.layer & 0x8000u) == 0u { discard; }
+    return horizon_material_solid_out(in, color);
+}
+// The solid targets for the lit `color`: the world's, fogged, and the surface's.
+fn horizon_material_solid_out(in: HorizonMaterialOut, color: vec4<f32>) -> HorizonMaterialSolid {
     if horizon_surface.w == 0.0 {
         set_surface(horizon_material_face_normal, 0.0, 0.0);
     }
@@ -346,6 +412,9 @@ pub struct TerrainShape<'a> {
     pub flat: Option<&'a wgpu::BindGroupLayout>,
     /// terrain.wgsl's `SPRITE_ARRAYS` and `SPRITE_SPLIT`.
     pub sprites: [f64; 2],
+    /// terrain.wgsl's `TEXTURE_FILTERING`, as the renderer's terrain pipelines are built for it
+    /// (`TerrainBuild`; 3 reads the option every frame).
+    pub filtering: f64,
     /// terrain.wgsl's sprite arrays, the unused ones a stand-in: what a `[ray_tracing]` pack's
     /// `trace` reads a hit's texture from.
     pub sprite_views: &'a [wgpu::TextureView],
@@ -374,6 +443,9 @@ pub struct TerrainShape<'a> {
     pub pbr: Option<&'a [wgpu::Texture; 2]>,
     /// The arenas' quad looks' group (`looks`), while sections carry them (`looks::wanted`).
     pub looks: Option<&'a wgpu::BindGroupLayout>,
+    /// The renderer draws solid terrain in two passes (gfx.rs's `split_solid_terrain`): the
+    /// pack's solid terrain gets the two passes' pipelines too (`MaterialPipelines::split`).
+    pub split_solid: bool,
 }
 
 /// The pack's terrain pipelines: solid (with the cutout test) and translucent, for the
@@ -387,6 +459,18 @@ pub struct MaterialPipelines {
     pub msaa: Option<(wgpu::RenderPipeline, Option<wgpu::RenderPipeline>)>,
     /// `[displacement]`'s grid of the solid terrain near the camera (gfx/displace.rs).
     pub displaced: Option<wgpu::RenderPipeline>,
+    /// Where the renderer splits solid terrain (`TerrainShape::split_solid`), without
+    /// `[displacement]`: `solid` in its two passes.
+    pub split: Option<SplitSolid>,
+}
+
+/// Solid terrain in two passes, as the renderer's own where a discard costs the GPU its hidden
+/// surface removal (gfx.rs's `split_solid_terrain`): the opaque quads, through a fragment entry
+/// that never discards, then the cutout ones; for the instanced draws, then the flat ones.
+pub struct SplitSolid {
+    pub opaque: wgpu::RenderPipeline,
+    pub cutout: wgpu::RenderPipeline,
+    pub flat: Option<(wgpu::RenderPipeline, wgpu::RenderPipeline)>,
 }
 
 /// A pack's material stage: its terrain pipelines, and for a stage that calls `trace` or
@@ -434,12 +518,13 @@ pub(super) fn terrain_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
     entries
 }
 
-/// terrain.wgsl's terrain section (its globals, bindings, sampling, lighting and fog), with
-/// every name it declares prefixed.
-fn vanilla_terrain() -> String {
+/// terrain.wgsl's terrain section (its globals, bindings, sampling, lighting and fog), with its
+/// compile-time choices as the renderer's own terrain makes them (`terrain_choices`) and every
+/// name it declares prefixed: the material's and the shadow pass's terrain sample as it does.
+pub(super) fn vanilla_terrain() -> String {
+    let section = section(TERRAIN, "struct Globals {", "// Sky (SkyRenderer)");
     prefixed(
-        &(super::wgsl_prefix::HDR_LIGHT.to_owned()
-            + section(TERRAIN, "struct Globals {", "// Sky (SkyRenderer)")),
+        &(super::wgsl_prefix::HDR_LIGHT.to_owned() + &super::terrain_choices(section)),
         PREFIX,
     )
 }
@@ -767,6 +852,7 @@ impl NativeMaterial {
         ];
         constants.extend(sprite_names.into_iter().zip(shape.sprites));
         constants.push(("horizon_material_fog", f64::from(u8::from(fog))));
+        constants.push(("horizon_terrain_TEXTURE_FILTERING", shape.filtering));
         let pack = coverage == horizon_shader_api::Coverage::Pack;
         constants.push(("horizon_material_coverage_pack", f64::from(u8::from(pack))));
         let [(_, write_light), (_, linear)] =
@@ -883,11 +969,12 @@ impl NativeMaterial {
         // (`SECTION_CORNER`), in either layout of the solid quads, as the renderer's do.
         let paged = shape.flat.map(|group| layout(Some(group)));
         let origins = [None, Some(instances)];
-        // The solid draws' pipeline, single-sampled or 4x MSAA's (`horizon_material_fs_msaa`).
-        let solid_with = |fragment: &str, samples: u32| match &paged {
+        // The solid draws' pipeline, single-sampled or 4x MSAA's (`horizon_material_fs_msaa`),
+        // its vertex entry's `part` "" for every quad, `_opaque` or `_cutout` for a split pass's.
+        let solid_with = |part: &str, fragment: &str, samples: u32| match &paged {
             Some(paged) => pipeline(
                 paged,
-                "horizon_material_vs_section",
+                &format!("horizon_material_vs_section{part}"),
                 &origins,
                 fragment,
                 None,
@@ -895,24 +982,42 @@ impl NativeMaterial {
             ),
             None => pipeline(
                 &instanced,
-                "horizon_material_vs",
+                &format!("horizon_material_vs{part}"),
                 &buffers,
                 fragment,
                 None,
                 samples,
             ),
         };
-        let flat_with = |layout: &wgpu::PipelineLayout, fragment: &str, samples: u32| {
-            pipeline(
-                layout,
-                "horizon_material_vs_section_flat",
-                &[],
-                fragment,
-                None,
-                samples,
-            )
-        };
-        let solid = solid_with("horizon_material_fs_solid", 1);
+        let flat_with =
+            |layout: &wgpu::PipelineLayout, part: &str, fragment: &str, samples: u32| {
+                pipeline(
+                    layout,
+                    &format!("horizon_material_vs_section_flat{part}"),
+                    &[],
+                    fragment,
+                    None,
+                    samples,
+                )
+            };
+        let solid = solid_with("", "horizon_material_fs_solid", 1);
+        // Where the renderer splits its own (`TerrainShape::split_solid`): the opaque quads
+        // through `horizon_material_fs_opaque`, which never discards. `[displacement]`'s
+        // discard near the camera keeps its terrain in one pass.
+        let split = (shape.split_solid && displaced.is_none()).then(|| {
+            let opaque = ("_opaque", "horizon_material_fs_opaque");
+            let cutout = ("_cutout", "horizon_material_fs_solid");
+            SplitSolid {
+                opaque: solid_with(opaque.0, opaque.1, 1),
+                cutout: solid_with(cutout.0, cutout.1, 1),
+                flat: paged.as_ref().map(|layout| {
+                    (
+                        flat_with(layout, opaque.0, opaque.1, 1),
+                        flat_with(layout, cutout.0, cutout.1, 1),
+                    )
+                }),
+            }
+        });
         let translucent = pipeline(
             &instanced,
             "horizon_material_vs",
@@ -924,7 +1029,7 @@ impl NativeMaterial {
         let flat = paged.as_ref().map(|layout| {
             let buffers = [Some(vertices.clone())];
             (
-                flat_with(layout, "horizon_material_fs_solid", 1),
+                flat_with(layout, "", "horizon_material_fs_solid", 1),
                 pipeline(
                     layout,
                     "horizon_material_vs_flat",
@@ -939,10 +1044,10 @@ impl NativeMaterial {
         let msaa_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let msaa_internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
         let msaa = (shape.msaa && displaced.is_none()).then(|| {
-            let solid = solid_with("horizon_material_fs_msaa", super::msaa::SAMPLES);
-            let flat = paged
-                .as_ref()
-                .map(|layout| flat_with(layout, "horizon_material_fs_msaa", super::msaa::SAMPLES));
+            let solid = solid_with("", "horizon_material_fs_msaa", super::msaa::SAMPLES);
+            let flat = paged.as_ref().map(|layout| {
+                flat_with(layout, "", "horizon_material_fs_msaa", super::msaa::SAMPLES)
+            });
             (solid, flat)
         });
         let msaa_internal = pollster::block_on(msaa_internal.pop());
@@ -973,6 +1078,7 @@ impl NativeMaterial {
             flat,
             msaa,
             displaced,
+            split,
         })
     }
 }
@@ -1036,6 +1142,7 @@ impl super::native_pack::NativePack {
             flat: pipelines.flat.as_ref(),
             displaced: (pipelines.displaced.as_ref()).filter(|_| self.displacement.is_some()),
             msaa: pipelines.msaa.as_ref(),
+            split: pipelines.split.as_ref(),
             surface: m.writes_surface.then_some(&self.frame.surface_view),
             reads_opaque: self.frame.reads_opaque,
             frame,
@@ -1364,8 +1471,8 @@ mod tests {
             .entry_points
             .iter()
             .filter(|e| e.name.starts_with("horizon_material_fs"));
-        // Solid, 4x MSAA's solid, translucent and the displaced grid.
-        assert_eq!(fragments.count(), 4);
+        // Solid, the opaque pass's solid, 4x MSAA's solid, translucent and the displaced grid.
+        assert_eq!(fragments.count(), 5);
     }
 
     /// A pack's own text that happens to hold a `lit_tint` mark's spelling keeps it.
@@ -1439,9 +1546,9 @@ mod tests {
                         .filter(|i| i.entry.starts_with("horizon_material_"))
                         .map(|i| i.total())
                         .collect();
-                    // Four vertex entries, the solid, translucent and 4x MSAA fragments, and
-                    // the displaced grid's two.
-                    assert_eq!(counts.len(), 7 + 2 * usize::from(displaced));
+                    // Ten vertex entries (four, and the two solid passes' six), the solid,
+                    // opaque, translucent and 4x MSAA fragments, and the displaced grid's two.
+                    assert_eq!(counts.len(), 14 + 2 * usize::from(displaced));
                     (counts.into_iter().max().unwrap(), text)
                 };
                 let case = format!("vertex {vertex}, displaced {displaced}");
