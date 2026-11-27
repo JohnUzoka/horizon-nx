@@ -389,6 +389,48 @@ mod tests {
         assert_eq!(card.read(&format!("{SAVES}/Мир/level.dat")), Some(&b"old"[..]));
     }
 
+    /// Create World's folder search (horizon-client `title.rs` `target_folder`, through
+    /// `world_folder::result_folder`, the same in 0.2.1): the name, then `name (1)`, `name (2)`...
+    /// until `exists` says no. Each check goes through the device, so a hidden world of that
+    /// name is adopted by the check, and the new world gets the next free folder.
+    fn create_world_folder(game: &mut Game<'_>, name: &str) -> String {
+        let mut folder = name.to_owned();
+        let mut count = 0;
+        while game.exists(&format!("{SAVES}/{folder}")) {
+            count += 1;
+            folder = format!("{name} ({count})");
+        }
+        game.mkdir(&format!("{SAVES}/{folder}"));
+        game.write(&format!("{SAVES}/{folder}/level.dat"), b"new");
+        folder
+    }
+
+    #[test]
+    fn naming_a_new_world_like_a_hidden_one_brings_the_hidden_one_back_untouched() {
+        let mut card = card_with_saves();
+        // 0.2.1 saved Старый, then a second world named the same in Старый (1), both raw.
+        for folder in ["Старый", "Старый (1)"] {
+            card.mkdir(&format!("{SAVES}/{folder}"));
+            card.write(&format!("{SAVES}/{folder}/level.dat"), folder.as_bytes());
+            card.mkdir(&format!("{SAVES}/{folder}/region"));
+            card.write(&format!("{SAVES}/{folder}/region/r.0.0.mca"), b"chunks");
+        }
+        let mut game = Game(&mut card);
+        assert_eq!(game.list(SAVES), Vec::<String>::new());
+
+        assert_eq!(create_world_folder(&mut game, "Старый"), "Старый (2)");
+        assert_eq!(game.list(SAVES), ["Старый", "Старый (1)", "Старый (2)"]);
+        for folder in ["Старый", "Старый (1)"] {
+            let level = game.read(&format!("{SAVES}/{folder}/level.dat"));
+            assert_eq!(level.as_deref(), Some(folder.as_bytes()));
+            let region = game.read(&format!("{SAVES}/{folder}/region/r.0.0.mca"));
+            assert_eq!(region.as_deref(), Some(&b"chunks"[..]));
+        }
+        let level = game.read(&format!("{SAVES}/Старый (2)/level.dat"));
+        assert_eq!(level.as_deref(), Some(&b"new"[..]));
+        assert!(card.entries.keys().all(|p| p.is_ascii()), "{:?}", card.entries.keys());
+    }
+
     #[test]
     fn ascii_paths_are_never_looked_at() {
         let mut looked = Vec::new();
