@@ -124,15 +124,19 @@ impl SamplerContext {
     }
     /// Start an independent evaluation, retaining only temporary scratch buffers.
     /// Cached scalar/volume results and world bindings must not cross chunks or
-    /// graphs, whose cache IDs can refer to different functions.
+    /// graphs, whose cache IDs can refer to different functions: every cache cell
+    /// forgets its values, keeping its buffer for the next chunk's volume of the
+    /// same size (a chunk's cached volumes are hundreds of KiB each).
     pub fn reset(&mut self) {
-        self.caches = self.caches.as_ref().map(|_| Vec::new());
+        if let Some(caches) = &mut self.caches {
+            caches.iter_mut().for_each(cache::CacheCell::forget);
+        }
         self.fields = WorldFields::default();
         if let Some(planes) = &mut self.planes {
             planes.clear();
         }
         self.capture = None;
-        self.lattice = Vec::new();
+        self.lattice.clear();
     }
     /// Keep the input samples of interpolated samplers sampled on their own
     /// cell lattice from now until [`Self::take_lattice_capture`].

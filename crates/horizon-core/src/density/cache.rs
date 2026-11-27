@@ -20,6 +20,20 @@ impl Default for CacheCell {
         }
     }
 }
+impl CacheCell {
+    /// As a new cell, keeping the buffer's allocation.
+    pub(super) fn forget(&mut self) {
+        self.volume = None;
+        self.value_key = 0;
+        self.value = f32::NAN;
+        self.active = false;
+    }
+    /// Nothing cached: what [`Self::forget`] leaves.
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.volume.is_none() && self.value.is_nan() && !self.active
+    }
+}
 impl SamplerContext {
     /// Cache cells belong to this evaluation context, never to shared samplers.
     pub fn cached() -> Self {
