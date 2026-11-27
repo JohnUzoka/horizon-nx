@@ -81,17 +81,19 @@ Licenses of everything a deko3d build links: [THIRD_PARTY_NOTICES.md](../THIRD_P
 
 Horizon's own benchmark (`--benchmark forest`, [Benchmark your own machine](benchmark.md#benchmark-your-own-machine)),
 render distance 12, 1280x720, stock clocks, the 12-second forest flight, on one console. "Before" is
-deko3d without the changes in the next table; "now" is the `deko3d` branch with them.
+deko3d without the changes in the next table; "0.3.0" has them.
 
-| | NVK, packed terrain vertices (3 runs) | NVK, wide terrain vertices (1) | Build 40, NVK (1) | deko3d before (2) | deko3d now (2) | deko3d now, `HORIZON_NEAREST_TEXELS=1` (2) |
-| --- | --- | --- | --- | --- | --- | --- |
-| avg FPS | 24.4 | 36.9 | 42.2 | 21.2 | 35.7 | 41.3 |
-| 1% low FPS | 14.3 | 23.3 | 24.4 | 11.6 | 6.3, 23.8 | 26.7 |
-| p50 / p99 frame ms | 35.8 / 69.5 | 24.2 / 42.7 | 20.1 / 40.2 | 49.6 / 83.2 | 25.1 / 40.4 | 21.5 / 35.4 |
-| CPU p50 ms | 7.1 | 6.3 | 5.2 | 31.1 | 5.4 | 5.0 |
-| GPU p50 ms | 34.2 | 23.0 | 16.4 | 32.4 | 24.2 | 20.2 |
+| | NVK, packed terrain vertices (3 runs) | NVK, wide terrain vertices (1) | Build 40, NVK (1) | deko3d before (2) | deko3d, 0.3.0 (2) |
+| --- | --- | --- | --- | --- | --- |
+| avg FPS | 24.4 | 36.9 | 42.2 | 21.2 | 47.2, 50.3 |
+| 1% low FPS | 14.3 | 23.3 | 24.4 | 11.6 | 32.7, 32.9 |
+| p50 / p99 frame ms | 35.8 / 69.5 | 24.2 / 42.7 | 20.1 / 40.2 | 49.6 / 83.2 | 17.6 / 29.5 |
+| CPU p50 ms | 7.1 | 6.3 | 5.2 | 31.1 | 4.7 |
+| GPU p50 ms | 34.2 | 23.0 | 16.4 | 32.4 | 15.5 |
 
-"deko3d now", 1% low: one value per run; the first run had a one-second hitch.
+"deko3d, 0.3.0" is the release candidate (`release/switch-0.3.0`, rc3): nearest texels (the Switch
+default), the terrain pipelines built for their options, and the fade check's derivatives skipped
+for quads that aren't fading (9e0d3387af: 43.6 → 48.7 fps over the build before it, 2 runs each).
 
 Packed terrain vertices cost NVK about 11 ms of median GPU and make no difference on deko3d (25.6
 FPS with wide ones). The Switch now defaults to the wide ones (0.2.0's choice for NVK);
