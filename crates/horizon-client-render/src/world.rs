@@ -632,11 +632,13 @@ impl World {
             if lit {
                 self.light_edits.push(((x, y, z), previous, state.0));
             } else {
+                let before = self.dirty_light.len();
                 for dz in -1..=1 {
                     for dx in -1..=1 {
                         self.dirty_light.insert(((x >> 4) + dx, (z >> 4) + dz));
                     }
                 }
+                crate::light::note_relight_queued(0, self.dirty_light.len() - before);
             }
         }
         Ok(())

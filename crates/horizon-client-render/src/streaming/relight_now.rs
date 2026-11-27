@@ -6,10 +6,23 @@ use crate::{
     world::World,
 };
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+/// Light jobs taken into their chunks since the job log last read them (`take_light_outcomes`):
+/// a column's first light; then relights queued by a neighbour's arrival, with light changed and
+/// unchanged; then those queued otherwise (edits, emission, unsticking), changed and unchanged.
+static LIGHT_OUTCOMES: [AtomicU32; 5] = [const { AtomicU32::new(0) }; 5];
+
+/// [`LIGHT_OUTCOMES`], starting them over.
+#[cfg_attr(not(target_os = "horizon"), allow(dead_code))]
+pub(super) fn take_light_outcomes() -> [u32; 5] {
+    std::array::from_fn(|i| LIGHT_OUTCOMES[i].swap(0, Ordering::Relaxed))
+}
 
 impl Streaming {
     /// Takes a lit column's light into its chunk (`Done::Lit`), `snapshot` being
-    /// the edit sequence the blocks it was lit from had reached.
+    /// the edit sequence the blocks it was lit from had reached and `cause` why it
+    /// was queued (`Streaming::light_cause`).
     pub(super) fn apply_lit(
         &mut self,
         world: &mut World,
@@ -17,6 +30,7 @@ impl Streaming {
         z: i32,
         sections: Vec<Light>,
         snapshot: u64,
+        cause: u8,
     ) {
         if let Some(chunk) = world.chunks.get_mut(&(x, z)) {
             let chunk = Arc::make_mut(chunk);
@@ -36,6 +50,14 @@ impl Streaming {
             if (first && !chunk.light_loaded) || !changed.is_empty() {
                 world.modified.insert((x, z));
             }
+            let outcome = match (first, cause, changed.is_empty()) {
+                (true, ..) => 0,
+                (false, 1, false) => 1,
+                (false, 1, true) => 2,
+                (false, _, false) => 3,
+                (false, _, true) => 4,
+            };
+            LIGHT_OUTCOMES[outcome].fetch_add(1, Ordering::Relaxed);
             chunk.lit = true;
             if first {
                 for dz in -1..=1 {

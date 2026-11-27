@@ -332,6 +332,31 @@ coarse at 10 s to compare the counts. The load counts disagree: 3 workers while 
 (forest 37.7, 41.8 s against 50.8, 52.2 s), but not with the loading screen held (51.0 against
 48.8 s, both runs); the console's battery was low from about the third row on.
 
+With the player's data file (`hx-bench.py`, the integrated build of all the above as the baseline):
+open → join 12.2, 12.4 s, first world frame 26.6, 26.9 s, spawn loaded 33.5–36.2 s after it,
+forest 51.6, 60.4 s; a generated chunk's noise 19.5 ms and surface 11.0 ms of about 41 ms.
+
+- **Density caches.** A chunk's reset dropped its cache cells, so every chunk allocated its cached
+  volumes again; they now keep their buffers. Byte-identical (`chunkgen_bench` snapshots, 12 areas);
+  noise 19.3, 19.2 ms against 19.5, 19.4, the forest 47.5, 52.0 s: within the runs' spread.
+- **What is left in the noise** (host profile, seed 1234): Perlin volumes 9% of the generation
+  thread, aquifers 5%, Perlin points 3%, interpolation 2.9%, the rest under 1.5% each. The column
+  fill already reads a column as one slice, writes solid runs at once, skips the air above the
+  aquifer and keeps its longest buffer.
+- **Surface.** The rule is compiled once per worker already; one compiled rule per biome set
+  (OPTIMIZATIONS.md) is not done. A chunk's nine biome-chunk clones and biome names are inside the
+  host's 0.4–0.5 ms biome stage.
+- **Light jobs** (the job log's counts, one forest run): 1,585 first lights and 1,110 relights, of
+  which 34 changed any light. 1,054 of the columns queued for a relight came from
+  `relight_beside_unlit` (an edit that changed a lit column's light beside an unlit one: fluids
+  settling at the loading edge, every few ticks), 142 from edits on unlit columns; a neighbour's
+  arrival relit 6. Light jobs took 17.5 s of worker time, the unchanged relights about 7 s of it.
+  Relighting such a column at most every 2 s (later edits waiting for that one job) cut the
+  relights to 652 and 658 and light's worker time to 14.4, 14.5 s, but the load did not get
+  faster (world 62.9, 67.0 s; spawn 34.5, 39.4 s after the first frame; forest 51.6, 53.3 s), so it
+  was reverted. The job log's light lines (first lights, relights by cause and outcome, the columns
+  queued by where) stay: a few counters per light job.
+
 ## Known issues
 
 - On the title screen, GPU time per frame grew from 6–8 ms to 19–23 ms after minutes in the menus

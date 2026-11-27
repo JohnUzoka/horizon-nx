@@ -873,7 +873,8 @@ fn reset_retains_scratch_but_discards_graph_caches_and_world_bindings() {
     let capacity = context.scratch[0].capacity();
     context.reset();
     assert!(lifetime.upgrade().is_none());
-    assert!(context.caches.as_ref().unwrap().is_empty());
+    // The cells stay, their buffers kept for the next chunk, with nothing cached in them.
+    assert!(context.caches.as_ref().unwrap().iter().all(|cell| cell.is_empty()));
     assert_eq!(context.scratch[0].as_ptr(), allocation);
     assert_eq!(context.scratch[0].capacity(), capacity);
     // Same coordinates and cache ID must resolve the new context's fallback.
