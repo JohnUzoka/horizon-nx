@@ -283,6 +283,24 @@ matters without the hold. The default is the "FastLoad through the open" row: th
   a run): noise 18.6–19.3 ms, surface 10.5–10.9, carvers 5.4–5.5, structures 2.7–5.1, biomes
   2.8–3.1.
 
+Workers while playing, on the final build (Battery Mode, `workers:N`, 3 workers while loading,
+`HORIZON_SPIKE_LOG=100`), two runs each:
+
+| Play workers | flight FPS | 1% low | GPU p50 ms | max frame ms | forest s |
+| --- | --- | --- | --- | --- | --- |
+| 1 (automatic: 2 while loading) | 36.5, 36.0 | 24.1, 24.0 | 24.0, 24.3 | 45.9, 46.1 | 50.8, 52.2 |
+| 1 | 36.3, 37.1 | 23.8, 22.6 | 24.2, 23.7 | 46.9, 52.6 | 37.7, 41.8 |
+| 2 | 30.1, 30.5 | 23.4, 22.6 | 30.6, 30.8 | 46.7, 47.6 | 39.6, 47.7 |
+| 3 | 28.2, 28.6 | 23.2, 23.1 | 32.9, 31.9 | 45.8, 46.7 | 53.5, 41.5 |
+
+A second play worker costs the flight about 6 FPS and a third about 2 more, and the GPU's frame
+time rises with them (why is not measured); the 1% low stays near 23. One play worker is the
+fastest flight. None of these eight flights had a frame over 53 ms, so the two long frames seen
+earlier did not come back. Generation while flying (the job log's windows after the load) is too
+coarse at 10 s to compare the counts. The load counts disagree: 3 workers while loading beat 2 here
+(forest 37.7, 41.8 s against 50.8, 52.2 s), but not with the loading screen held (51.0 against
+48.8 s, both runs); the console's battery was low from about the third row on.
+
 ## Known issues
 
 - On the title screen, GPU time per frame grew from 6–8 ms to 19–23 ms after minutes in the menus
