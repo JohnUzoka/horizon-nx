@@ -174,11 +174,13 @@ impl World {
                     }
                 }
             }
+            let before = self.dirty_light.len();
             for dz in -1..=1 {
                 for dx in -1..=1 {
                     self.dirty_light.insert((key.0 + dx, key.1 + dz));
                 }
             }
+            crate::light::note_relight_queued(1, self.dirty_light.len() - before);
         }
         out
     }

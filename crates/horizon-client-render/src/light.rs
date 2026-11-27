@@ -429,6 +429,23 @@ fn give_scratch(scratch: LightScratch) {
     }
 }
 
+/// Columns queued for a whole light job since the job log last read them, by where: 0 an
+/// edit on an unlit chunk (`World::set_with_notification`), 1 a bulk edit (`World::edit_runs`),
+/// 2 a big batch of edits on lit chunks (`Streaming::relight_on_workers`), 3 light an edit
+/// changed beside an unlit chunk (`Streaming::relight_beside_unlit`).
+static RELIGHT_QUEUED: [std::sync::atomic::AtomicU32; 4] =
+    [const { std::sync::atomic::AtomicU32::new(0) }; 4];
+
+pub(crate) fn note_relight_queued(site: usize, columns: usize) {
+    RELIGHT_QUEUED[site].fetch_add(columns as u32, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// [`RELIGHT_QUEUED`], starting it over.
+#[cfg_attr(not(target_os = "horizon"), allow(dead_code))]
+pub(crate) fn take_relight_queued() -> [u32; 4] {
+    std::array::from_fn(|i| RELIGHT_QUEUED[i].swap(0, std::sync::atomic::Ordering::Relaxed))
+}
+
 /// Frees the pooled scratch, once the streaming workers have had nothing to
 /// do for a while (`jobs::Source::all_idle`): a full pool is some 50 MB on
 /// twelve threads, and a loaded view lights nothing new until the player

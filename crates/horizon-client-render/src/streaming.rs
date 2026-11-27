@@ -423,10 +423,12 @@ mod job_log {
                 each(stages.carvers),
             );
         }
-        let [first, changed, same] = super::relight_now::take_light_outcomes();
-        if first + changed + same > 0 {
+        let [first, arrival_changed, arrival_same, other_changed, other_same] =
+            super::relight_now::take_light_outcomes();
+        if first + arrival_changed + arrival_same + other_changed + other_same > 0 {
             log::info!(
-                "Horizon: light jobs taken: {first} first, {changed} relit with changes, {same} relit unchanged"
+                "Horizon: light jobs taken: {first} first; after an arrival {arrival_changed} relit with changes, {arrival_same} unchanged; otherwise {other_changed} with changes, {other_same} unchanged; columns queued for whole light: {:?} (edit on unlit, bulk edit, edit batch, light changed beside unlit)",
+                crate::light::take_relight_queued()
             );
         }
         *s = Sums {
@@ -752,6 +754,12 @@ pub struct Streaming {
     compile_started: FxHashMap<(i32, i32, i32), u64>,
     /// Chunks whose light is current.
     lit: FxHashSet<(i32, i32)>,
+    /// Lit columns a neighbour's arrival queued for light again (the job log's
+    /// light outcomes by cause).
+    relit_by_arrival: FxHashSet<(i32, i32)>,
+    /// The cause of each column's light job in flight: 0 its first light, 1 a
+    /// neighbour's arrival, 2 anything else (edits, emission, unsticking).
+    light_cause: FxHashMap<(i32, i32), u8>,
     /// Columns whose sections have been meshed at least once.
     meshed: FxHashSet<(i32, i32)>,
     /// Dirty sections of loaded columns past the render distance, meshed once
@@ -1401,6 +1409,8 @@ impl Streaming {
             meshing: Default::default(),
             compile_started: Default::default(),
             lit: Default::default(),
+            relit_by_arrival: Default::default(),
+            light_cause: Default::default(),
             meshed: Default::default(),
             waiting: Default::default(),
             waiting_area: ((0, 0), 0, 0),
@@ -1750,6 +1760,9 @@ impl Streaming {
                 let n = (key.0 + dx, key.1 + dz);
                 if !loaded || world.chunks.get(&n).is_some_and(|c| !c.light_loaded) {
                     world.dirty_light.insert(n);
+                    if n != key && self.lit.contains(&n) {
+                        self.relit_by_arrival.insert(n);
+                    }
                 }
             }
         }
@@ -2061,8 +2074,9 @@ impl Streaming {
                         continue;
                     }
                     self.lighting.remove(&(x, z));
+                    let cause = self.light_cause.remove(&(x, z)).unwrap_or(2);
                     let snapshot = self.light_snapshots.remove(&(x, z)).unwrap_or(u64::MAX);
-                    self.apply_lit(world, x, z, sections, snapshot);
+                    self.apply_lit(world, x, z, sections, snapshot, cause);
                 }
                 Done::Meshed(x, sy, z, mesh, seq) => {
                     if self.meshing.get(&(x, sy, z)) != Some(&seq) {
@@ -2435,6 +2449,7 @@ impl Streaming {
             }
             for key in gone.drain(..) {
                 world.dirty_light.remove(&key);
+                self.relit_by_arrival.remove(&key);
             }
             if room > 0 && !light.is_empty() {
                 nearest_first(&mut light, room);
@@ -2443,6 +2458,14 @@ impl Streaming {
                         continue;
                     };
                     world.dirty_light.remove(&(x, z));
+                    let cause = if !self.lit.contains(&(x, z)) {
+                        0
+                    } else if self.relit_by_arrival.remove(&(x, z)) {
+                        1
+                    } else {
+                        2
+                    };
+                    self.light_cause.insert((x, z), cause);
                     self.sequence += 1;
                     self.lighting.insert((x, z), self.sequence);
                     self.light_snapshots
@@ -2661,7 +2684,9 @@ impl Streaming {
         let (columns, inline) = whole_relight_columns(positions, |x, z| {
             self.lit.contains(&(x, z)) && self.light_region_ready(world, x, z)
         });
+        let before = world.dirty_light.len();
         world.dirty_light.extend(columns);
+        crate::light::note_relight_queued(2, world.dirty_light.len() - before);
         inline
     }
     /// A light job computed from blocks older than some edits: redo those
@@ -2700,7 +2725,9 @@ impl Streaming {
         let columns = crate::light::beside_unlit(changed, |x, z| {
             world.chunks.get(&(x, z)).is_some_and(|c| !c.lit)
         });
+        let before = world.dirty_light.len();
         world.dirty_light.extend(columns);
+        crate::light::note_relight_queued(3, world.dirty_light.len() - before);
     }
     /// Sections whose meshes sample a changed light value (faces and corners
     /// read light from neighbouring blocks). Every column whose stored light
