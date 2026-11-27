@@ -117,6 +117,9 @@ pub const DEFAULT_CUTOUT_LEAVES: bool = true;
 /// triangles and cost ~12 ms a frame (RUN 34: 35 fps against 59). The menu still turns it on.
 #[cfg(target_os = "horizon")]
 pub const DEFAULT_CUTOUT_LEAVES: bool = false;
+/// Menu Background Blurriness' default: vanilla's 5; on the Switch 0 (no blur): any blur costs a
+/// menu over a world ~12 fps (deko3d, its seven passes ~3.5-4 ms; docs/switch.md).
+pub const DEFAULT_MENU_BLUR: i32 = if cfg!(target_os = "horizon") { 0 } else { 5 };
 const INACTIVITY: &[&str] = &["minimized", "afk"];
 const CLOUDS: &[&str] = &["false", "fast", "true"];
 const MAIN_HAND: &[&str] = &["left", "right"];
@@ -282,7 +285,7 @@ static TABLE: LazyLock<Vec<Def>> = LazyLock::new(|| {
             "menuBackgroundBlurriness",
             0,
             10,
-            if cfg!(target_os = "horizon") { 0 } else { 5 },
+            DEFAULT_MENU_BLUR,
         ),
         pb("startedCleanly", true),
         n("musicToast", MUSIC_TOAST, 0),
