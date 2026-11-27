@@ -873,9 +873,10 @@ struct SolidUncut {
     color: vec4<f32>,
 }
 fn solid_uncut(in: TerrainOut) -> SolidUncut {
-    let dx = dpdx(in.local);
-    let dy = dpdy(in.local);
-    if faded(in.fade, in.local, dx, dy) { discard; }
+    // A quad that isn't fading (fade 0, flat for the primitive, so a pixel quad takes one side)
+    // skips the derivatives `faded` would only throw away: the forest benchmark's cutout pass on
+    // the Switch's GM20B (docs/switch.md).
+    if in.fade != 0u && faded(in.fade, in.local, dpdx(in.local), dpdy(in.local)) { discard; }
     let texel = sprite(in.uv, in.layer & 0x7fffu, in.repeats);
     var color = texel * in.color;
     // terrain.fsh: the fade-in mixes toward the fog colour.

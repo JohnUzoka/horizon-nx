@@ -129,9 +129,8 @@ struct VisCutoutOut {
     return out;
 }
 @fragment fn fs_vis_cutout(in: VisCutoutOut) -> @location(0) u32 {
-    let dx = dpdx(in.local);
-    let dy = dpdy(in.local);
-    if faded(in.fade, in.local, dx, dy) { discard; }
+    // As terrain.wgsl's `solid_uncut`: a quad that isn't fading skips `faded`'s derivatives.
+    if in.fade != 0u && faded(in.fade, in.local, dpdx(in.local), dpdy(in.local)) { discard; }
     let alpha = vis_sprite(in.uv, in.layer & 0x7fffu, dpdx(in.uv), dpdy(in.uv)).a * in.alpha;
     if alpha < 0.5 && (in.layer & 0x8000u) == 0u { discard; }
     return in.id;
