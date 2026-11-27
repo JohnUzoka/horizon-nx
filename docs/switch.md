@@ -256,6 +256,78 @@ What it still shows in this benchmark: the section arena growing a page (`arena_
 on the render thread, about once a run) and frames waiting up to 90 ms for the GPU. Pausing (which
 saves) gave one frame of 135 ms before and 70 ms after the queued lines (one session each).
 
+## World loading
+
+`--benchmark forest` (render distance 12, seed 1234), two runs per row, on the bench's settings
+(Battery Mode, automatic workers: 1 while playing) and on 3 workers without Battery Mode. Every
+row ran with `HORIZON_NO_DATA_FILE=1` (`hx-bench-var.py` always sets it), which makes the world's
+open slower than a player's (open → join about 130 s instead of about 22 s). "First frame" and
+"spawn loaded" count from the process start; "forest" is the teleport's load.
+The new rows are one build with the changes switched off or on by `env.txt` (`HORIZON_SPAWN_HOLD`,
+`HORIZON_NX_WORLD_BOOST=0`); the bench's held row ran before the 120 s fix below, which only
+matters without the hold. The default is the "FastLoad through the open" row: the hold is opt-in.
+
+| Build (Battery Mode, 1 worker) | open → join s | first world frame s | spawn loaded s | forest s | chunks/s | flight FPS | 1% low |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| before | 127.8, 133.5 | 239.3, 232.7 | 285.3, 292.1 | 79.4, 78.2 | 8.0, 8.1 | 36.1, 37.7 | 24.0, 24.0 |
+| all workers while loading | 132.1, 133.6 | 238.1, 233.4 | 273.5, 267.1 | 55.8, 53.2 | 11.4, 12.0 | 36.2, 36.4 | 23.9, 23.9 |
+| ... and FastLoad through the open | 90.3, 90.1 | 197.0, 190.1 | 235.0, 228.7 | 51.7, 56.3 | 12.3, 11.3 | 36.3, 36.4 | 24.8, 23.7 |
+| ... and the loading screen held until the spawn view is in | 90.3, 88.8 | 219.3, 207.1 | 227.8, 213.3 | 48.8, 48.8 | 13.0, 13.1 | 36.1, 36.2 | 23.8, 24.5 |
+| ... with 3 workers while loading | 90.6, 88.5 | 212.4, 204.3 | 211.8, 212.9 | 51.0, 51.0 | 12.5, 12.5 | 36.2, 36.1 | 23.6, 24.0 |
+
+| Build (3 workers, no Battery Mode) | open → join s | first world frame s | spawn loaded s | forest s | flight FPS | 1% low |
+| --- | --- | --- | --- | --- | --- | --- |
+| before | 132.8, 133.0 | 239.0, 232.0 | 268.0, 260.6 | 56.8, 44.5 | 29.5, 29.6 | 23.3, 23.5 |
+| FastLoad through the open | 89.7, 86.6 | 194.3, 188.5 | 223.7, 217.0 | 56.7, 50.5 | 28.8, 29.4 | 23.4, 22.4 |
+| ... and the loading screen held | 89.7, 88.3 | 233.3, 203.2 | 210.4, 208.2 | 34.3, 52.6 | 28.8, 28.2 | 23.4, 5.1 |
+
+- **Workers.** The job pool starts its loading count (the automatic count without Battery Mode's
+  halving, 2 on the Switch, or the player's own if higher) and runs only the playing count until
+  a world loads: its open and loading screens, a teleport (more than 4 chunks in a frame) or a
+  dimension change, until the view's outer columns are in and nothing is in flight for 1 s (at
+  most 120 s after the last loading screen). Flight runs on the playing count, and its frame rate
+  did not change. Two flights of the fourteen on the new builds had one long frame (952 ms and
+  648 ms, 1% low 4.5 and 5.1 FPS: a workers-only run before the 120 s fix, not in the table, and
+  the last row); the four before had none. Not attributed. `HORIZON_LOAD_JOB_THREADS=N` sets the
+  loading count; 3 instead of 2 measured no faster.
+- **FastLoad.** The benchmark's open (no loading screen is drawn while it waits) now asks for the
+  boost: open → join 130 → 89 s. It ends when the world shows (at its first mesh), or with the
+  loading screen held, once the spawn view is in.
+- **Holding the loading screen** (`HORIZON_SPAWN_HOLD=1`, off by default) shows the world later
+  than showing it at the first mesh (run for run: 22 and 17 s on the bench's settings, 39 and 15 s
+  on 3 workers; the screen stays up 20–41 s after join instead of 2–3 s), with the spawn area loaded
+  when it shows; the spawn area is in 7–15 s sooner. The hold's own test (outer columns in, nothing
+  meshing) is stricter than the benchmark's: in two runs the benchmark counted the spawn loaded
+  before the screen went away, and in one of those its teleport ran behind the held screen (the
+  34.3 s forest).
+- **Where open → join goes** (`HORIZON_STARTUP_TRACE`, one run before, unboosted): the world's
+  preparation on its thread (`world.prepare`, 66.5 s, of which the worldgen data 11.9 s), then the
+  server's `open_world` (51.6 s), then 4.1 s waiting for the recipe and registry preload (which ran
+  beside them for 75 s; `sync.recipes.item_catalog` 5.4 s) and 2.1 s settling the spawn.
+- **A generated chunk's stages** (the job log's new line, wall time on a worker, about 2,250 chunks
+  a run): noise 18.6–19.3 ms, surface 10.5–10.9, carvers 5.4–5.5, structures 2.7–5.1, biomes
+  2.8–3.1.
+
+Workers while playing, on the final build (Battery Mode, `workers:N`, 3 workers while loading,
+`HORIZON_SPIKE_LOG=100`), two runs each:
+
+| Play workers | flight FPS | 1% low | GPU p50 ms | max frame ms | forest s |
+| --- | --- | --- | --- | --- | --- |
+| 1 (automatic: 2 while loading) | 36.5, 36.0 | 24.1, 24.0 | 24.0, 24.3 | 45.9, 46.1 | 50.8, 52.2 |
+| 1 | 36.3, 37.1 | 23.8, 22.6 | 24.2, 23.7 | 46.9, 52.6 | 37.7, 41.8 |
+| 2 | 30.1, 30.5 | 23.4, 22.6 | 30.6, 30.8 | 46.7, 47.6 | 39.6, 47.7 |
+| 3 | 28.2, 28.6 | 23.2, 23.1 | 32.9, 31.9 | 45.8, 46.7 | 53.5, 41.5 |
+
+A second play worker costs the flight about 6 FPS and a third about 2 more, and the GPU's frame
+time rises with them (why is not measured); the 1% low stays near 23. One play worker is the
+fastest flight, so the Switch's automatic count while playing is 1, with or without Battery Mode
+(`Graphics::worker_threads`); loading still takes the automatic 2, and a `workers` setting above
+0 sets the playing count, with loading taking the larger of it and 2. None of these eight flights had a frame over 53 ms, so the two long frames seen
+earlier did not come back. Generation while flying (the job log's windows after the load) is too
+coarse at 10 s to compare the counts. The load counts disagree: 3 workers while loading beat 2 here
+(forest 37.7, 41.8 s against 50.8, 52.2 s), but not with the loading screen held (51.0 against
+48.8 s, both runs); the console's battery was low from about the third row on.
+
 ## Known issues
 
 - On the title screen, GPU time per frame grew from 6–8 ms to 19–23 ms after minutes in the menus

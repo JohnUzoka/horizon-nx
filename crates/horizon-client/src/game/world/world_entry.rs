@@ -9,6 +9,8 @@ pub(super) struct SwitchWorldEntry {
     pub(super) opened_at: Instant,
     pub(super) joined_at: Option<Instant>,
     pub(super) waiting_for_scene: bool,
+    /// The loading screen is held until the spawn view is in (`switch_local_loading`).
+    pub(super) holding_for_view: bool,
 }
 
 impl Game<'_> {

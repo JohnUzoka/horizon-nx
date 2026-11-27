@@ -4,8 +4,10 @@
 //! were on a core 88% and 90% of their lives, and with the boost (log16) resources loaded in 88 s
 //! instead of 174 s. The GPU runs slower during FastLoad, so menus can feel less responsive.
 //! Launch drops the CPU boost when the title becomes interactive. Opening a world restores
-//! the boost until entry or cancellation. Gameplay never requests a sustained
-//! CPU overclock. HOME/sleep temporarily releases the boost, and exit restores normal clocks.
+//! the boost until the world shows or the open is cancelled: through the server's start (the
+//! benchmark's synchronous open too) and single player's loading screens (held until the spawn view
+//! is in with `HORIZON_SPAWN_HOLD=1`). Gameplay never requests a sustained CPU overclock.
+//! HOME/sleep temporarily releases the boost, and exit restores normal clocks.
 //! `HORIZON_NX_CPU_BOOST=0` in env.txt keeps the normal clocks throughout, to compare, and
 //! `HORIZON_NX_WORLD_BOOST=0` only while a world opens. Only an Application (title takeover) may
 //! boost; an applet (album) logs why and loads at the normal clocks.
@@ -175,9 +177,21 @@ pub(crate) fn on_exit() {
 
 /// The winit backend calls this whenever the game grabs the cursor; the first call means the player
 /// is in a world, so the clocks go back to normal and the GPU runs at full speed for play. Every
-/// later call returns at once.
+/// later call returns at once. A world's loading screen drawn in the last two loop iterations
+/// keeps the boost: the game grabs the cursor once its player exists, while single player's
+/// loading screen stays up until the spawn view is in ([`world_entered`] ends it there).
 #[unsafe(no_mangle)]
 pub extern "C" fn horizon_nx_entered_world() {
+    if REASON.load(Ordering::Relaxed) == FOR_WORLD
+        && ITERATIONS_WITHOUT_LOADING.load(Ordering::Relaxed) < 2
+    {
+        return;
+    }
+    end("the player is in a world");
+}
+
+/// The game shows the world: its loading screens are done.
+pub fn world_entered() {
     end("the player is in a world");
 }
 

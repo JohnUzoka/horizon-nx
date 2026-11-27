@@ -1788,6 +1788,24 @@ pub struct StageTimings {
     /// Carving mask generation/application and final heightmap priming.
     pub carvers: std::time::Duration,
 }
+/// Every worker's [`StageTimings`] since the last [`take_stage_totals`].
+static STAGE_TOTALS: std::sync::Mutex<StageTimings> = std::sync::Mutex::new(StageTimings {
+    chunks: 0,
+    biomes: std::time::Duration::ZERO,
+    noise: std::time::Duration::ZERO,
+    surface: std::time::Duration::ZERO,
+    structures: std::time::Duration::ZERO,
+    carvers: std::time::Duration::ZERO,
+});
+/// The stage times of every proto chunk generated in the process since the last call
+/// (the Switch's chunk job log reads them), and starts the sums over.
+pub fn take_stage_totals() -> StageTimings {
+    std::mem::take(
+        &mut *STAGE_TOTALS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
 /// Worker-owned mutable caches. Biome temperature caches mirror vanilla's
 /// thread-local caches and never change results.
 pub(super) struct WorkerState {
@@ -2990,8 +3008,19 @@ impl GeneratorWorker {
     /// Biomes, noise fill and aquifers, material surface and carvers: the
     /// vanilla statuses up to TERRAIN. Independent of neighbor chunks' state.
     pub fn generate_proto(&mut self, pos: ChunkPos) -> Result<ProtoChunk, GeneratorError> {
+        let before = self.state.timings;
         let result = self.pipeline.generate(&mut self.state, pos);
         self.state.timings.chunks += 1;
+        let after = self.state.timings;
+        let mut totals = STAGE_TOTALS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        totals.chunks += 1;
+        totals.biomes += after.biomes - before.biomes;
+        totals.noise += after.noise - before.noise;
+        totals.surface += after.surface - before.surface;
+        totals.structures += after.structures - before.structures;
+        totals.carvers += after.carvers - before.carvers;
         result
     }
     /// Noise/aquifer surface and its material rule, without chunks, structures or features.

@@ -635,8 +635,13 @@ impl Game<'_> {
             folder: folder.to_owned(),
             new_world,
         });
+        // A synchronous open draws no loading screen: the gate opens here.
+        self.world_load_begins("opening the world");
         // Harnesses, control scripts and runs without a window go on with the world open.
         if self.window.is_none() || super::synchronous_startup(&self.options) {
+            // No loading screen asks for the boost while this waits (the benchmark's open).
+            #[cfg(target_os = "horizon")]
+            horizon_nx::loading_world();
             while self.integrated_starting.is_some() {
                 self.poll_integrated_start()?;
                 if self.integrated_starting.is_some() {

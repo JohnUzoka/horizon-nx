@@ -575,10 +575,12 @@ pub(super) fn load_resources(
     // here, before any pool size is read or a pool starts; a later change waits
     // for the next launch.
     horizon_threads::sizing::set_battery(settings.horizon.battery && !headless);
-    let threads = settings.horizon.worker_threads();
     // One pool of workers for every level's streaming, the client's and the
-    // server thread's (horizon_threads::jobs), sized before any world opens.
-    horizon_threads::jobs::configure(threads);
+    // server thread's (horizon_threads::jobs), sized before any world opens: the
+    // playing count runs, all of them while a world loads. Work in flight is sized
+    // for the loading count and limited to the workers running.
+    let threads = settings.horizon.loading_worker_threads();
+    horizon_threads::jobs::configure(settings.horizon.worker_threads(), threads);
     horizon_client::sprites::set_texture_budget(settings.horizon.texture_budget_mib);
     horizon_client::sprites::set_labpbr_maps(shader_packs::picks_material_pack(settings));
     // Stage A: the menu bundle (atlas and panorama). With a loading screen it is
