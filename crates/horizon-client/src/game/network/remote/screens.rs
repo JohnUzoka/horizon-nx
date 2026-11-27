@@ -8,10 +8,12 @@ use crate::game::PendingWorldEntry;
 /// The longest the Switch loading screen waits for the spawn view after join.
 #[cfg(target_os = "horizon")]
 const SPAWN_HOLD: Duration = Duration::from_secs(60);
-/// `HORIZON_SPAWN_HOLD=0`: the world shows at its first mesh, while the spawn view loads.
+/// `HORIZON_SPAWN_HOLD=1`: the loading screen stays up until the spawn view is in. Off, the
+/// world shows at its first mesh while the spawn view loads (the player's choice: it showed
+/// the world 15–39 s later for a spawn area in 7–15 s sooner).
 #[cfg(target_os = "horizon")]
 static SPAWN_HOLD_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-    std::env::var("HORIZON_SPAWN_HOLD").map_or(true, |v| v.trim() != "0")
+    std::env::var("HORIZON_SPAWN_HOLD").is_ok_and(|v| v.trim() == "1")
 });
 
 impl Game<'_> {
@@ -73,11 +75,9 @@ impl Game<'_> {
                 _ => ("horizon.loading.terrain", None),
             });
         }
-        // The spawn view loads behind the loading screen, boosted (FastLoad) and on every
-        // job worker (`world_load`): shown, the world would draw at FastLoad's minimum GPU
-        // clock, and at normal clocks the spawn area took ~45 s more to come in on one
-        // worker. At most `SPAWN_HOLD` after join; `HORIZON_SPAWN_HOLD=0` shows the world
-        // at its first mesh, as before.
+        // With `HORIZON_SPAWN_HOLD=1` the spawn view loads behind the loading screen, boosted
+        // (FastLoad) and on every job worker (`world_load`): shown, the world would draw at
+        // FastLoad's minimum GPU clock. At most `SPAWN_HOLD` after join.
         if *SPAWN_HOLD_ON && self.world_load.loading() && joined_at.elapsed() < SPAWN_HOLD {
             horizon_nx::loading_world();
             if !std::mem::replace(&mut entry.holding_for_view, true) {

@@ -238,9 +238,9 @@ saves) gave one frame of 135 ms before and 70 ms after the queued lines (one ses
 row ran with `HORIZON_NO_DATA_FILE=1` (`hx-bench-var.py` always sets it), which makes the world's
 open slower than a player's (open → join about 130 s instead of about 22 s). "First frame" and
 "spawn loaded" count from the process start; "forest" is the teleport's load.
-The new rows are one build with the changes switched off by `env.txt` (`HORIZON_SPAWN_HOLD=0`,
+The new rows are one build with the changes switched off or on by `env.txt` (`HORIZON_SPAWN_HOLD`,
 `HORIZON_NX_WORLD_BOOST=0`); the bench's held row ran before the 120 s fix below, which only
-matters without the hold.
+matters without the hold. The default is the "FastLoad through the open" row: the hold is opt-in.
 
 | Build (Battery Mode, 1 worker) | open → join s | first world frame s | spawn loaded s | forest s | chunks/s | flight FPS | 1% low |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -266,15 +266,15 @@ matters without the hold.
   the last row); the four before had none. Not attributed. `HORIZON_LOAD_JOB_THREADS=N` sets the
   loading count; 3 instead of 2 measured no faster.
 - **FastLoad.** The benchmark's open (no loading screen is drawn while it waits) now asks for the
-  boost: open → join 130 → 89 s. With the loading screen held, single player's boost lasts until
-  the spawn view is in instead of ending at the first mesh.
-- **Holding the loading screen** shows the world later than showing it at the first mesh (run for
-  run: 22 and 17 s on the bench's settings, 39 and 15 s on 3 workers; the screen stays up 20–41 s
-  after join instead of 2–3 s), with the spawn area loaded when it shows; the spawn area is in
-  7–15 s sooner. The hold's own test (outer columns in, nothing meshing) is stricter than the
-  benchmark's: in two runs the benchmark counted the spawn loaded before the screen went away, and
-  in one of those its teleport ran behind the held screen (the 34.3 s forest).
-  `HORIZON_SPAWN_HOLD=0` shows the world at its first mesh.
+  boost: open → join 130 → 89 s. It ends when the world shows (at its first mesh), or with the
+  loading screen held, once the spawn view is in.
+- **Holding the loading screen** (`HORIZON_SPAWN_HOLD=1`, off by default) shows the world later
+  than showing it at the first mesh (run for run: 22 and 17 s on the bench's settings, 39 and 15 s
+  on 3 workers; the screen stays up 20–41 s after join instead of 2–3 s), with the spawn area loaded
+  when it shows; the spawn area is in 7–15 s sooner. The hold's own test (outer columns in, nothing
+  meshing) is stricter than the benchmark's: in two runs the benchmark counted the spawn loaded
+  before the screen went away, and in one of those its teleport ran behind the held screen (the
+  34.3 s forest).
 - **Where open → join goes** (`HORIZON_STARTUP_TRACE`, one run before, unboosted): the world's
   preparation on its thread (`world.prepare`, 66.5 s, of which the worldgen data 11.9 s), then the
   server's `open_world` (51.6 s), then 4.1 s waiting for the recipe and registry preload (which ran

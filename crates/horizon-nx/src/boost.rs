@@ -4,10 +4,10 @@
 //! were on a core 88% and 90% of their lives, and with the boost (log16) resources loaded in 88 s
 //! instead of 174 s. The GPU runs slower during FastLoad, so menus can feel less responsive.
 //! Launch drops the CPU boost when the title becomes interactive. Opening a world restores
-//! the boost until entry or cancellation: through the server's start (the benchmark's
-//! synchronous open too) and single player's loading screen, which stays up until the spawn view
-//! is in. Gameplay never requests a sustained CPU overclock. HOME/sleep temporarily releases the
-//! boost, and exit restores normal clocks.
+//! the boost until the world shows or the open is cancelled: through the server's start (the
+//! benchmark's synchronous open too) and single player's loading screens (held until the spawn view
+//! is in with `HORIZON_SPAWN_HOLD=1`). Gameplay never requests a sustained CPU overclock.
+//! HOME/sleep temporarily releases the boost, and exit restores normal clocks.
 //! `HORIZON_NX_CPU_BOOST=0` in env.txt keeps the normal clocks throughout, to compare, and
 //! `HORIZON_NX_WORLD_BOOST=0` only while a world opens. Only an Application (title takeover) may
 //! boost; an applet (album) logs why and loads at the normal clocks.
