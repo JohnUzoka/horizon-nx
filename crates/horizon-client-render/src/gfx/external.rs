@@ -335,6 +335,9 @@ pub struct TerrainLayers<'a> {
     pub displaced: Option<&'a wgpu::RenderPipeline>,
     /// The solid layers for 4x MSAA (instanced, then flat draws), when the pack's material got them.
     pub msaa: Option<&'a (wgpu::RenderPipeline, Option<wgpu::RenderPipeline>)>,
+    /// The solid layer in the renderer's two solid passes, where it splits them
+    /// (`native_material::SplitSolid`).
+    pub split: Option<&'a super::native_material::SplitSolid>,
     /// The solid layers' second target, which they write beside the world's colour.
     pub surface: Option<&'a wgpu::TextureView>,
     /// The layers read the world before translucent terrain: the renderer stops there for

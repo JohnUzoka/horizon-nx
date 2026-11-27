@@ -317,7 +317,10 @@ fn scaled(size: [u32; 2], scale: f32) -> [u32; 2] {
 }
 
 pub struct NativePost {
-    passes: Vec<(String, wgpu::RenderPipeline)>,
+    /// Each pass's label, pipeline, and whether it writes every pixel of its target (its
+    /// stage can't `discard`; a full-screen triangle with no blending): then the target needs no
+    /// clear before it.
+    passes: Vec<(String, wgpu::RenderPipeline, bool)>,
     layout: wgpu::BindGroupLayout,
     /// `layout`'s entries, which the scene's join (`trace`), the passes built against the
     /// scene where the device traces rays, and the scene's generation `groups` hold (none
@@ -1175,6 +1178,7 @@ impl NativePost {
         let mut direct_sdr = None;
         for (i, stage) in stages.into_iter().enumerate() {
             let fused = direct && plan[i].writes == Writes::Picture;
+            let covers = !stage.discards();
             let (module, target) = if fused {
                 let source = direct_post_source(&stage.source);
                 let module = naga::front::wgsl::parse_str(&source)
@@ -1195,7 +1199,7 @@ impl NativePost {
                 return Err(format!("{}: {e}", stage.file));
             }
             direct_sdr = direct_sdr.or(sdr.zip(overlay));
-            passes.push((stage.label, pipeline));
+            passes.push((stage.label, pipeline, covers));
         }
         let pipeline = if direct {
             None
@@ -1296,7 +1300,7 @@ impl NativePost {
         let tonemap = self.display.label.as_deref();
         self.passes
             .iter()
-            .map(|(l, _)| l.as_str())
+            .map(|(l, ..)| l.as_str())
             .chain(tonemap)
             .collect()
     }
@@ -1571,7 +1575,7 @@ impl NativePost {
             return;
         };
         d.decoder.run(device, encoder, world.0, scene);
-        for (i, ((label, pipeline), group)) in self.passes.iter().zip(passes).enumerate() {
+        for (i, ((label, pipeline, covers), group)) in self.passes.iter().zip(passes).enumerate() {
             let computes = self.trace.as_ref().filter(|_| self.traced.is_some());
             let traced = computes.map(|t| t.computes.as_slice());
             let timed = timing.as_deref_mut();
@@ -1588,7 +1592,15 @@ impl NativePost {
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    // Tegra draws straight to memory: a clear is one more write of the whole
+                    // target, where a pass that `covers` it writes every pixel anyway, and
+                    // loading costs nothing. A tiler pays for the load instead, so keeps the clear.
+                    // (`DontCare` is the op for both, but takes `unsafe`, which the crate forbids.)
+                    load: if *covers && cfg!(target_os = "horizon") {
+                        wgpu::LoadOp::Load
+                    } else {
+                        wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             })];
@@ -1633,7 +1645,7 @@ impl NativePost {
         let (label, pipeline) = match &d.tonemap {
             Some(pipeline) => (d.label.as_deref().unwrap_or("Tonemap"), pipeline),
             None => {
-                let (label, pipeline) = self.passes.last().expect("fused final post pass");
+                let (label, pipeline, _) = self.passes.last().expect("fused final post pass");
                 let pipeline = d
                     .sdr
                     .as_ref()

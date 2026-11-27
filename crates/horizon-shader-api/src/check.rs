@@ -186,6 +186,64 @@ impl CheckedStage {
             .filter(|(_, g)| g.name.as_deref() == Some(global))
             .any(|(handle, _)| !self.info[function][handle].is_empty())
     }
+
+    /// Whether a function of the stage, called or not, reads `MaterialInput.fluid`: only then
+    /// does the renderer call the material with the fluid kind a constant on either side of a
+    /// branch, which drops the paths of the fluids a pass never draws.
+    pub fn reads_fluid(&self) -> bool {
+        reads_fields(
+            &self.module,
+            &self.info,
+            &[("MaterialInput", &["fluid"])],
+            false,
+        )
+    }
+
+    /// Whether the stage's function can reach a `discard`, itself or through a function it
+    /// calls: a post pass that can't writes every pixel of its target.
+    pub fn discards(&self) -> bool {
+        reachable_discard(&self.module, self.kind.function()).is_some()
+    }
+
+    /// Whether the stage's function, or a function it calls, takes a derivative (`dpdx` and its
+    /// kin) or samples at an implicit level (`textureSample`, `textureSampleBias`,
+    /// `textureSampleCompare`): what reads the neighbouring pixels, so the renderer calls it
+    /// only where they all run it.
+    pub fn derives(&self) -> bool {
+        let module = &self.module;
+        let Some((start, _)) = (module.functions.iter())
+            .find(|(_, f)| f.name.as_deref() == Some(self.kind.function()))
+        else {
+            return false;
+        };
+        let (mut calls, mut seen) = (vec![start], HashSet::new());
+        while let Some(f) = calls.pop() {
+            if !seen.insert(f) {
+                continue;
+            }
+            let function = &module.functions[f];
+            let derives = function.expressions.iter().any(|(_, e)| {
+                matches!(
+                    e,
+                    naga::Expression::Derivative { .. }
+                        | naga::Expression::ImageSample {
+                            level: naga::SampleLevel::Auto | naga::SampleLevel::Bias(_),
+                            ..
+                        }
+                )
+            });
+            if derives {
+                return true;
+            }
+            find_statement(&function.body, &mut |statement| {
+                if let naga::Statement::Call { function, .. } = *statement {
+                    calls.push(function);
+                }
+                false
+            });
+        }
+        false
+    }
 }
 
 /// The fields of the terrain's inputs that only its quads' looks hold, by struct: the vertex

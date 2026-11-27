@@ -67,6 +67,10 @@ Licenses of everything a deko3d build links: [THIRD_PARTY_NOTICES.md](../THIRD_P
   (one folder per UAM build), as NVK keeps its programs in `sdmc:/.mesa`. The first launch is
   slower; deleting the folder clears the cache. The GLSL writer's depth-texture change for this is in
   `third_party/naga` ([THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md#naga)).
+  UAM 1.1.0 compiles a `main` that ends in `if (c) { discard; } else { return; }` (naga's GLSL of a
+  void fragment entry ending in `if c { discard; }`) without an EXIT: the discarding invocations
+  never finish and the queue times out. The backend ends such bodies with one `return` of their
+  own (`shader.rs`'s `end_with_return`); it was what lost the device with Daybreak's shadows.
 - **GPU faults are logged.** deko3d's fatal errors and warnings (a GPU fault's details, a failed
   submission) go to `sdmc:/switch/deko3d.log`, where upstream's release library aborts without a
   word; the debug library adds misuse reports there.

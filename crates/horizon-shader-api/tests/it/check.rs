@@ -1377,8 +1377,8 @@ fn a_traced_pack_that_doesn_t_name_ray_entity_composes_as_before() {
     assert_eq!(
         hashes,
         [
-            "1af2ec758e6f343986c676a7df695a1bf820ac9f498840422bbb8ef72df65cc4",
-            "89fcc776fe9b408a89e71fcc10716a5d2744d79e6c1581889de27752c25e4e6a",
+            "68881d879f98a46cc50ad280e57b348ae3442c0df3ad3711444f2e3b75c6bd00",
+            "6c9f1a920b92b1bc1a90e381aa38fda8024914f2f7a081f6228e0253f5c51d55",
             "e646501b8bcd9097579a8bcb14e11710439d85617dfc61b044bde4e0490c8681",
             "6c25d87e7bd62b1d8ba9fccc35d6ef6426a845e344e3bf45c197afdf1bdb7db2",
         ]
@@ -1421,8 +1421,8 @@ fn a_traced_pack_that_reads_no_hit_look_composes_as_before() {
     assert_eq!(
         hashes,
         [
-            "63fdd95b1f17608e158dbd7106ec22583c6cf5337f542bf31d6028d436d6e833",
-            "867893c5981df7efb562ecb414a836bed778dbf8323f0e76c2b675f6188227e5",
+            "e16b594465413e4afcaabe3265e19634b253d87a035a030a3df01095b8a98912",
+            "3999ed8c4f9183f7b40da845009aab798fbc37357ec8b4b2188e0b8b0787130b",
             "dd8aade96c75cdd11a2866b8ab9164c7a7d36355d317dc527de0b1eba4f4880c",
             "1e944762ceee869009feb9a014806d08aa635aa706fb2683cdf1b28e4b325880",
         ]

@@ -178,7 +178,7 @@ const PINNED_0_2: [(StageKind, &str, &str); 6] = [
     ),
     (
         StageKind::Post,
-        "de8725d1bd09091439222978f5c5c8f73d16c18c61125f5be395cb1104105993",
+        "2fb173bad9033a3a8e83a43c5b3bf302e4586007a1d53758840fb797a639446d",
         "f1ffc3c9e0692e1d1f49de4a34ae90b93f7f2eda2eaa42ce936f630139cc4648",
     ),
     (
@@ -204,7 +204,7 @@ fn the_wgsl_of_a_pack_without_ray_tracing_is_unchanged() {
     assert_eq!(
         // As the repository holds the files: a Windows checkout may give them CRLF.
         sha256_hex(glow.text.replace('\r', "").as_bytes()),
-        "e0de176db0fbae5c564406678c7f0142b1d679e1a8dc443a969f7abf2cd7828f"
+        "f6673bd94f0821a1cad4ac3098ed9ef463fa1d075c7465d71babde50f4c99282"
     );
 }
 

@@ -11,9 +11,6 @@ use horizon_shaders::Shadow;
 
 use super::external::ShadowDraws;
 use super::native_material::TerrainShape;
-use super::wgsl_prefix::{TERRAIN, prefixed, section};
-
-const PREFIX: &str = "horizon_terrain_";
 
 /// The shadow pass's entries: terrain's vertices through the shadow camera, distorted, and the
 /// cutout test (leaves' and plants' holes let the light through).
@@ -23,6 +20,8 @@ struct HorizonShadowOut {
     @location(0) uv: vec2<f32>,
     @location(1) @interpolate(flat) layer: u32,
     @location(2) tint: vec3<f32>,
+    // Bit 0 a fluid, bit 1 whether the sprite repeats once a block (terrain.wgsl's
+    // `TerrainOut::repeats`).
     @location(3) @interpolate(flat) fluid: u32,
     // The point on the flat face, camera-relative (`[displacement]`'s grid takes it over near
     // the camera).
@@ -31,7 +30,8 @@ struct HorizonShadowOut {
 // `color` is the vertex colour: the tint, and the fluid flag in its alpha's bit 3 (mesher.rs's
 // `FLUID_BIT`, clear on a fluid). What the light passes through is that colour, whether or not the
 // sections carry their quads' looks: a pack's `shadow_color` doesn't depend on its other inputs.
-fn horizon_shadow_vertex(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f32>)
+// `step` is the UV step `uv` was unpacked with (`horizon_terrain_terrain_uv`).
+fn horizon_shadow_vertex(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f32>, step: f32)
     -> HorizonShadowOut {
     let clip = frame.shadow_view_proj * vec4(pos, 1.0);
     let xy = shadow_distort(clip.xy);
@@ -40,7 +40,8 @@ fn horizon_shadow_vertex(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<
     out.uv = uv;
     out.layer = layer;
     out.tint = color.rgb;
-    out.fluid = u32((u32(round(color.a * 255.0)) & 8u) == 0u);
+    let repeats = horizon_terrain_instance_step(step) > 0.001;
+    out.fluid = u32((u32(round(color.a * 255.0)) & 8u) == 0u) | u32(repeats) << 1u;
     out.base = pos;
     return out;
 }
@@ -51,7 +52,7 @@ fn horizon_shadow_terrain(c: HorizonCorner, origin: vec4<f32>, slot: u32, corner
     let look = horizon_look(slot);
     let pos = horizon_material_displace(c.position + origin.xyz, atlas, c.layer, c.color, c.light,
         look, horizon_look_ao(look, corner));
-    return horizon_shadow_vertex(pos, atlas, c.layer, c.color);
+    return horizon_shadow_vertex(pos, atlas, c.layer, c.color, origin.w);
 }
 @vertex fn horizon_shadow_vs(@builtin(vertex_index) vertex: u32,
     @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
@@ -84,17 +85,21 @@ fn horizon_shadow_terrain(c: HorizonCorner, origin: vec4<f32>, slot: u32, corner
     if horizon_shadow_taken(in.base, in.layer) { discard; }
     horizon_shadow_cutout(in);
 }
+// The point's block sprite, sampled as terrain.wgsl's own entries sample it.
+fn horizon_shadow_sprite(in: HorizonShadowOut) -> vec4<f32> {
+    return horizon_terrain_sprite(in.uv, in.layer & 0x7fffu, (in.fluid & 2u) != 0u);
+}
 fn horizon_shadow_cutout(in: HorizonShadowOut) {
     // Bit 15 of the layer marks opaque leaves (forceOpaque): no alpha cutout.
-    let alpha = horizon_terrain_sprite(in.uv, in.layer & 0x7fffu, true).a;
+    let alpha = horizon_shadow_sprite(in).a;
     if alpha < 0.5 && (in.layer & 0x8000u) == 0u && !horizon_shadow_solid(in.layer & 0x7fffu) { discard; }
 }
 // Translucent terrain: its colour where it is the nearest thing the light passes through;
 // alpha 1 marks a fluid, other surfaces keep their alpha below it.
 @fragment fn horizon_shadow_fs_translucent(in: HorizonShadowOut) -> @location(0) vec4<f32> {
-    let color = horizon_terrain_sprite(in.uv, in.layer & 0x7fffu, true);
+    let color = horizon_shadow_sprite(in);
     if color.a < 0.01 { discard; }
-    return vec4(horizon_line_in(color.rgb * in.tint), select(min(color.a, 0.99), 1.0, in.fluid != 0u));
+    return vec4(horizon_line_in(color.rgb * in.tint), select(min(color.a, 0.99), 1.0, (in.fluid & 1u) != 0u));
 }
 ";
 
@@ -149,7 +154,7 @@ fn horizon_shadow_taken(base: vec3<f32>, layer: u32) -> bool {
 @vertex fn horizon_shadow_vs_displaced(@builtin(vertex_index) v: u32,
     @builtin(instance_index) instance: u32) -> HorizonShadowOut {
     let p = horizon_displace_point(v, instance);
-    var out = horizon_shadow_vertex(p.position, p.uv, p.layer, p.color);
+    var out = horizon_shadow_vertex(p.position, p.uv, p.layer, p.color, 0.0);
     out.base = p.base;
     return out;
 }
@@ -527,11 +532,7 @@ fn shader_source(
     };
     format!(
         "{head}// Horizon's terrain (terrain.wgsl)\n{}{solid}{}{displace}{}{ENTRIES}",
-        prefixed(
-            &(super::wgsl_prefix::HDR_LIGHT.to_owned()
-                + section(TERRAIN, "struct Globals {", "// Sky (SkyRenderer)")),
-            PREFIX
-        ),
+        super::native_material::vanilla_terrain(),
         super::native_post::line_helpers(false),
         super::native_material::section_corner(),
     )
@@ -564,6 +565,7 @@ impl NativeShadow {
         constants.extend([
             ("horizon_terrain_SPRITE_ARRAYS", shape.sprites[0]),
             ("horizon_terrain_SPRITE_SPLIT", shape.sprites[1]),
+            ("horizon_terrain_TEXTURE_FILTERING", shape.filtering),
         ]);
         if let Some(g) = &grid {
             constants.extend([
