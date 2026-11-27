@@ -86,13 +86,13 @@ fn horizon_shadow_terrain(c: HorizonCorner, origin: vec4<f32>, slot: u32, corner
 }
 fn horizon_shadow_cutout(in: HorizonShadowOut) {
     // Bit 15 of the layer marks opaque leaves (forceOpaque): no alpha cutout.
-    let alpha = horizon_terrain_sprite(in.uv, in.layer & 0x7fffu).a;
+    let alpha = horizon_terrain_sprite(in.uv, in.layer & 0x7fffu, true).a;
     if alpha < 0.5 && (in.layer & 0x8000u) == 0u && !horizon_shadow_solid(in.layer & 0x7fffu) { discard; }
 }
 // Translucent terrain: its colour where it is the nearest thing the light passes through;
 // alpha 1 marks a fluid, other surfaces keep their alpha below it.
 @fragment fn horizon_shadow_fs_translucent(in: HorizonShadowOut) -> @location(0) vec4<f32> {
-    let color = horizon_terrain_sprite(in.uv, in.layer & 0x7fffu);
+    let color = horizon_terrain_sprite(in.uv, in.layer & 0x7fffu, true);
     if color.a < 0.01 { discard; }
     return vec4(horizon_line_in(color.rgb * in.tint), select(min(color.a, 0.99), 1.0, in.fluid != 0u));
 }

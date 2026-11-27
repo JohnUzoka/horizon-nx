@@ -40,7 +40,7 @@ fn horizon_material_covers(in: HorizonMaterialOut, color: vec4<f32>, cutoff: f32
     if horizon_material_coverage_pack {
         return color.a >= cutoff;
     }
-    return horizon_terrain_sprite(in.uv, in.layer & 0x7fffu).a >= cutoff;
+    return horizon_terrain_sprite(in.uv, in.layer & 0x7fffu, true).a >= cutoff;
 }
 struct HorizonMaterialOut {
     @builtin(position) clip: vec4<f32>,
@@ -180,7 +180,7 @@ fn horizon_block_sample(uv: vec2<f32>, layer: u32, lod: f32) -> vec4<f32> {
     }
 }
 fn horizon_material_color(in: HorizonMaterialOut, translucent: bool) -> vec4<f32> {
-    let albedo = horizon_terrain_sprite(in.uv, in.layer & 0x7fffu);
+    let albedo = horizon_terrain_sprite(in.uv, in.layer & 0x7fffu, true);
     horizon_block_layer = in.layer & 0x7fffu;
     // The mip level of this point in the texture: its texels, as the sampler would pick.
     let texels = in.uv * horizon_block_size();
@@ -259,7 +259,7 @@ fn horizon_material_solid_sampled(in: HorizonMaterialOut, multisampled: bool) ->
     // Bit 15 of the layer marks opaque leaves (forceOpaque): no alpha cutout.
     if multisampled {
         // The alpha `horizon_material_covers` cuts on, as the samples it covers.
-        let alpha = select(horizon_terrain_sprite(in.uv, in.layer & 0x7fffu).a, color.a,
+        let alpha = select(horizon_terrain_sprite(in.uv, in.layer & 0x7fffu, true).a, color.a,
             horizon_material_coverage_pack);
         horizon_material_coverage = horizon_terrain_cutout_coverage(alpha, (in.layer & 0x8000u) != 0u);
     } else if !horizon_material_covers(in, color, 0.5) && (in.layer & 0x8000u) == 0u { discard; }
