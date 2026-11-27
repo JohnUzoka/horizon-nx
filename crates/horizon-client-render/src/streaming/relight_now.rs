@@ -6,6 +6,17 @@ use crate::{
     world::World,
 };
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+/// Light jobs taken into their chunks since the job log last read them (`take_light_outcomes`):
+/// a column's first light, a relight that changed some light, one that changed none.
+static LIGHT_OUTCOMES: [AtomicU32; 3] = [const { AtomicU32::new(0) }; 3];
+
+/// [`LIGHT_OUTCOMES`], starting them over.
+#[cfg_attr(not(target_os = "horizon"), allow(dead_code))]
+pub(super) fn take_light_outcomes() -> [u32; 3] {
+    std::array::from_fn(|i| LIGHT_OUTCOMES[i].swap(0, Ordering::Relaxed))
+}
 
 impl Streaming {
     /// Takes a lit column's light into its chunk (`Done::Lit`), `snapshot` being
@@ -36,6 +47,14 @@ impl Streaming {
             if (first && !chunk.light_loaded) || !changed.is_empty() {
                 world.modified.insert((x, z));
             }
+            let outcome = if first {
+                0
+            } else if changed.is_empty() {
+                2
+            } else {
+                1
+            };
+            LIGHT_OUTCOMES[outcome].fetch_add(1, Ordering::Relaxed);
             chunk.lit = true;
             if first {
                 for dz in -1..=1 {

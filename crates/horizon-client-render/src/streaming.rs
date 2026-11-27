@@ -423,6 +423,12 @@ mod job_log {
                 each(stages.carvers),
             );
         }
+        let [first, changed, same] = super::relight_now::take_light_outcomes();
+        if first + changed + same > 0 {
+            log::info!(
+                "Horizon: light jobs taken: {first} first, {changed} relit with changes, {same} relit unchanged"
+            );
+        }
         *s = Sums {
             since: Some(now),
             count: [0; KINDS.len()],
